@@ -488,31 +488,6 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
 
       const raw = results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
 
-      if (results.length >= 3) {
-        try {
-          // Normalize activation scores to [0,1] weights for the synthesis prompt
-          const maxScore = Math.max(...results.map(r => r.score));
-          const weightedMems = results.slice(0, 5)
-            .map(r => {
-              const w = maxScore > 0 ? (r.score / maxScore) : 1;
-              return `[weight=${w.toFixed(2)}] ${r.text}`;
-            })
-            .join('\n');
-          const synthesis = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
-            messages: [
-              {
-                role: 'system',
-                content: 'You are reconstructing context from weighted memory fragments. Higher-weight fragments are more relevant. Synthesize into 1-2 terse sentences, emphasizing high-weight facts. Facts only, no filler, no "based on" phrases.',
-              },
-              { role: 'user', content: `Weighted memories:\n${weightedMems}` },
-            ],
-            max_tokens: 130,
-          }) as any;
-          const synthesized = synthesis?.response?.trim();
-          if (synthesized) return `[Context] ${synthesized}\n\n${raw}`;
-        } catch {}
-      }
-
       return raw;
     }
 
