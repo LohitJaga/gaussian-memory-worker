@@ -165,22 +165,24 @@ async function retrieve(
   const ids = results.matches.map(m => m.id);
   const placeholders = ids.map(() => '?').join(',');
   const rows = await env.DB.prepare(
-    `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag
+    `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp
      FROM memories WHERE id IN (${placeholders})`
   ).bind(...ids).all<{
     id: string; text: string; domain: string; memory_type: string;
-    sigma_diagonal: string; access_count: number; contradiction_flag: number;
+    sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number;
   }>();
 
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
   // Build candidates — primary score is now distributional (Bhattacharyya-based)
+  const nowSec = Math.floor(Date.now() / 1000);
   const candidates = (rows.results ?? []).map(row => {
     const memSigma = deserializeSigma(row.sigma_diagonal);
     const memSigmaVal = meanSigma(memSigma);
     const cosineSim = cosineMap.get(row.id) ?? 0;
     const primaryScore = distributionalScore(cosineSim, querySigmaVal, memSigmaVal);
+    const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
       text: row.text,
@@ -190,6 +192,8 @@ async function retrieve(
       primaryScore,
       vector: vectorMap.get(row.id) ?? [],
       contradiction: row.contradiction_flag === 1,
+      fresh: ageSeconds < 1800,  // stored within last 30 min
+      isFileEdit: /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text),
     };
   });
 
@@ -217,9 +221,17 @@ async function retrieve(
     // Domain alignment boost
     const domainBoost = (domain && c.domain === domain) ? 0.05 : 0;
 
-    const activation = c.primaryScore
+    // Recency boost: memories stored in this session (last 30 min) get a lift
+    const recencyBoost = c.fresh ? 0.12 : 0;
+
+    // File-edit penalty: "Edited: foo.ts" memories have short generic embeddings
+    // that falsely match almost any query — suppress unless no better candidates
+    const fileEditPenalty = c.isFileEdit ? 0.55 : 1.0;
+
+    const activation = (c.primaryScore
       + 0.4 * neighborScore * sigmaWeight * contradictionFactor
-      + domainBoost;
+      + domainBoost
+      + recencyBoost) * fileEditPenalty;
 
     return { ...c, score: activation };
   });
