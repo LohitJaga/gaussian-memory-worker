@@ -381,7 +381,7 @@ function classifyDomainFromCache(
     if (sim > bestSim) { bestSim = sim; bestName = name; }
   }
 
-  if (bestSim >= 0.88) return { domain: bestName };
+  if (bestSim >= 0.82) return { domain: bestName };
 
   const name = deriveAnchorName(text);
   anchorCache.set(name, muArr);
@@ -404,7 +404,7 @@ async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise
     if (sim > bestSim) { bestSim = sim; bestName = row.name; }
   }
 
-  if (bestSim >= 0.88) return bestName;
+  if (bestSim >= 0.82) return bestName;
 
   const name = deriveAnchorName(text);
   await env.DB.prepare(
@@ -522,6 +522,15 @@ const TOOLS = [
         log_text: { type: 'string' },
       },
       required: ['log_text'],
+    },
+  },
+  {
+    name: 'memory_bulk_delete',
+    description: 'Delete all memories whose text matches a SQL LIKE pattern. Use % as wildcard. Returns count deleted.',
+    inputSchema: {
+      type: 'object',
+      properties: { pattern: { type: 'string' } },
+      required: ['pattern'],
     },
   },
   {
@@ -741,6 +750,19 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         }
       }
       return `Extracted ${facts.length} facts, stored ${stored}.`;
+    }
+
+    case 'memory_bulk_delete': {
+      const rows = await env.DB.prepare(
+        'SELECT id FROM memories WHERE text LIKE ?'
+      ).bind(args.pattern as string).all<{ id: string }>();
+      const ids = (rows.results ?? []).map(r => r.id);
+      if (!ids.length) return 'No memories matched pattern.';
+      for (const id of ids) {
+        await env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id).run();
+      }
+      if (ids.length > 0) await env.VECTORIZE.deleteByIds(ids);
+      return `Deleted ${ids.length} memories matching "${args.pattern}".`;
     }
 
     case 'memory_rebuild_domains': {
