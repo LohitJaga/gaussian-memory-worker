@@ -367,6 +367,27 @@ function deriveAnchorName(text: string): string {
   return `cluster_${Date.now().toString(36).slice(-4)}`;
 }
 
+function classifyDomainFromCache(
+  mu: Float32Array,
+  text: string,
+  anchorCache: Map<string, number[]>,
+): { domain: string; newAnchor?: { name: string; embedding: number[] } } {
+  const muArr = Array.from(mu);
+  let bestName = '';
+  let bestSim = -1;
+
+  for (const [name, anchorEmb] of anchorCache) {
+    const sim = dotProduct(muArr, anchorEmb);
+    if (sim > bestSim) { bestSim = sim; bestName = name; }
+  }
+
+  if (bestSim >= 0.88) return { domain: bestName };
+
+  const name = deriveAnchorName(text);
+  anchorCache.set(name, muArr);
+  return { domain: name, newAnchor: { name, embedding: muArr } };
+}
+
 async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise<string> {
   const muArr = Array.from(mu);
 
@@ -744,21 +765,37 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         return `Done. ${total?.n ?? 0} memories re-classified into ${anchors?.n ?? 0} domains.`;
       }
 
+      // Load all anchors once — avoids 50× SELECT inside classifyDomain
+      const anchorRows = await env.DB.prepare('SELECT name, embedding FROM domain_anchors')
+        .all<{ name: string; embedding: string }>();
+      const anchorCache = new Map<string, number[]>(
+        (anchorRows.results ?? []).map(r => [r.name, JSON.parse(r.embedding)])
+      );
+
       // One AI call for the whole batch — avoids subrequest limit
       const mus = await batchEmbed(batch.map(r => r.text), env);
 
       const vectorizeUpdates: any[] = [];
+      const newAnchors: { name: string; embedding: number[] }[] = [];
+
       for (let i = 0; i < batch.length; i++) {
         const row = batch[i];
         const mu = mus[i];
-        const newDomain = await classifyDomain(mu, row.text, env);
+        const { domain: newDomain, newAnchor } = classifyDomainFromCache(mu, row.text, anchorCache);
+        if (newAnchor) newAnchors.push(newAnchor);
         await env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(newDomain, row.id).run();
         vectorizeUpdates.push({ id: row.id, values: Array.from(mu), metadata: { domain: newDomain, memory_type: row.memory_type } });
       }
 
-      await env.VECTORIZE.upsert(vectorizeUpdates);
+      // Write new anchors to D1 in one batch
+      for (const a of newAnchors) {
+        await env.DB.prepare('INSERT OR REPLACE INTO domain_anchors (name, embedding) VALUES (?, ?)')
+          .bind(a.name, JSON.stringify(a.embedding)).run();
+      }
 
+      await env.VECTORIZE.upsert(vectorizeUpdates);
       await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
+
       const totalCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
       return `Processed ${offset + batch.length}/${totalCount?.n ?? '?'} — call again to continue.`;
     }
