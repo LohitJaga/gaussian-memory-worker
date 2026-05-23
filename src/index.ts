@@ -375,7 +375,7 @@ async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise
     if (sim > bestSim) { bestSim = sim; bestName = row.name; }
   }
 
-  if (bestSim >= 0.75) return bestName;
+  if (bestSim >= 0.88) return bestName;
 
   const name = deriveAnchorName(text);
   await env.DB.prepare(
@@ -494,6 +494,11 @@ const TOOLS = [
       },
       required: ['log_text'],
     },
+  },
+  {
+    name: 'memory_rebuild_domains',
+    description: 'Re-classify all existing memories with the current domain threshold. Processes in batches of 100; call repeatedly until it returns "done". Clears domain_anchors on first call and lets them re-emerge.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'identity_profile_get',
@@ -707,6 +712,45 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         }
       }
       return `Extracted ${facts.length} facts, stored ${stored}.`;
+    }
+
+    case 'memory_rebuild_domains': {
+      const BATCH = 100;
+      const offsetRaw = await env.KV.get('REBUILD_OFFSET');
+
+      // First call: clear anchors so they re-emerge with new threshold
+      if (offsetRaw === null) {
+        await env.DB.prepare('DELETE FROM domain_anchors').run();
+      }
+
+      const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+      const rows = await env.DB.prepare(
+        'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
+      ).bind(BATCH, offset).all<{ id: string; text: string; memory_type: string }>();
+
+      const batch = rows.results ?? [];
+      if (!batch.length) {
+        await env.KV.delete('REBUILD_OFFSET');
+        const total = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
+        const anchors = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+        return `Done. ${total?.n ?? 0} memories re-classified into ${anchors?.n ?? 0} domains.`;
+      }
+
+      const vectorizeUpdates: any[] = [];
+      for (const row of batch) {
+        const mu = await embed(row.text, env);
+        const newDomain = await classifyDomain(mu, row.text, env);
+        await env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(newDomain, row.id).run();
+        vectorizeUpdates.push({ id: row.id, values: Array.from(mu), metadata: { domain: newDomain, memory_type: row.memory_type } });
+      }
+
+      for (let i = 0; i < vectorizeUpdates.length; i += 50) {
+        await env.VECTORIZE.upsert(vectorizeUpdates.slice(i, i + 50));
+      }
+
+      await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
+      const totalCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
+      return `Processed ${offset + batch.length}/${totalCount?.n ?? '?'} — call again to continue.`;
     }
 
     case 'identity_profile_get': {
