@@ -20,6 +20,14 @@ async function embed(text: string, env: Env): Promise<Float32Array> {
   return new Float32Array(vec.map((v: number) => v / norm));
 }
 
+async function batchEmbed(texts: string[], env: Env): Promise<Float32Array[]> {
+  const result = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: texts }) as any;
+  return (result.data as number[][]).map(vec => {
+    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+    return new Float32Array(vec.map(v => v / norm));
+  });
+}
+
 // ── Core memory ops ──────────────────────────────────────────────────────────
 
 const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;
@@ -715,10 +723,10 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
     }
 
     case 'memory_rebuild_domains': {
-      const BATCH = 100;
+      const BATCH = 50;
       const offsetRaw = await env.KV.get('REBUILD_OFFSET');
 
-      // First call: clear anchors so they re-emerge with new threshold
+      // First call (no offset key): clear anchors so they re-emerge with new threshold
       if (offsetRaw === null) {
         await env.DB.prepare('DELETE FROM domain_anchors').run();
       }
@@ -736,17 +744,19 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         return `Done. ${total?.n ?? 0} memories re-classified into ${anchors?.n ?? 0} domains.`;
       }
 
+      // One AI call for the whole batch — avoids subrequest limit
+      const mus = await batchEmbed(batch.map(r => r.text), env);
+
       const vectorizeUpdates: any[] = [];
-      for (const row of batch) {
-        const mu = await embed(row.text, env);
+      for (let i = 0; i < batch.length; i++) {
+        const row = batch[i];
+        const mu = mus[i];
         const newDomain = await classifyDomain(mu, row.text, env);
         await env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(newDomain, row.id).run();
         vectorizeUpdates.push({ id: row.id, values: Array.from(mu), metadata: { domain: newDomain, memory_type: row.memory_type } });
       }
 
-      for (let i = 0; i < vectorizeUpdates.length; i += 50) {
-        await env.VECTORIZE.upsert(vectorizeUpdates.slice(i, i + 50));
-      }
+      await env.VECTORIZE.upsert(vectorizeUpdates);
 
       await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
       const totalCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
