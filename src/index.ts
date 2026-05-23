@@ -459,6 +459,20 @@ const TOOLS = [
       required: ['log_text'],
     },
   },
+  {
+    name: 'identity_profile_get',
+    description: 'Retrieve the stored CLAUDE.md identity profile from KV. Returns empty string if not set.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'identity_profile_set',
+    description: 'Store CLAUDE.md identity profile content in KV for cross-device sync.',
+    inputSchema: {
+      type: 'object',
+      properties: { content: { type: 'string' } },
+      required: ['content'],
+    },
+  },
 ];
 
 async function handleToolCall(name: string, args: any, env: Env): Promise<string> {
@@ -638,6 +652,16 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         }
       }
       return `Extracted ${facts.length} facts, stored ${stored}.`;
+    }
+
+    case 'identity_profile_get': {
+      const content = await env.KV.get('IDENTITY_PROFILE') ?? '';
+      return content;
+    }
+
+    case 'identity_profile_set': {
+      await env.KV.put('IDENTITY_PROFILE', args.content as string);
+      return `Identity profile stored (${(args.content as string).length} chars)`;
     }
 
     default:
