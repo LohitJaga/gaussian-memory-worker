@@ -239,6 +239,10 @@ async function retrieve(
   scored.sort((a, b) => b.score - a.score);
   const top = scored.slice(0, topK);
 
+  // De-biasing: surface one high-value contradiction that got penalty-suppressed
+  const suppressed = scored.slice(topK).find(c => c.contradiction && c.primaryScore > 0.7);
+  if (suppressed) top.push(suppressed);
+
   // Sharpen accessed memories
   const now = Math.floor(Date.now() / 1000);
   for (const mem of top) {
@@ -248,7 +252,12 @@ async function retrieve(
     ).bind(now, serializeSigma(newSigma), mem.id).run();
   }
 
-  return top.map(m => ({ score: m.score, text: m.text, domain: m.domain, type: m.type }));
+  return top.map(m => ({
+    score: m.score,
+    text: m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text,
+    domain: m.domain,
+    type: m.type,
+  }));
 }
 
 async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
@@ -274,6 +283,32 @@ async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number 
   }
 
   return { decayed, pruned };
+}
+
+async function synthesizeIdentityProfile(env: Env): Promise<void> {
+  const rows = await env.DB.prepare(
+    `SELECT text FROM memories WHERE memory_type = 'semantic'
+     ORDER BY access_count DESC, last_accessed DESC LIMIT 20`
+  ).all<{ text: string }>();
+
+  const facts = (rows.results ?? []).map(r => r.text).join('\n');
+  if (!facts) return;
+
+  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+    messages: [
+      {
+        role: 'system',
+        content: 'You are building an identity profile for a personal AI memory system. Given semantic memory facts about a person, synthesize a concise markdown identity document. Include sections: Identity/background, Active projects, Career goals, Tech stack, Working style. Use only facts present in the memories. Be concise — under 600 words.',
+      },
+      { role: 'user', content: facts },
+    ],
+    max_tokens: 700,
+  }) as any;
+
+  const profile = result?.response?.trim();
+  if (profile) {
+    await env.KV.put('IDENTITY_PROFILE', profile);
+  }
 }
 
 interface DomainAnchor {
@@ -398,13 +433,14 @@ const TOOLS = [
   },
   {
     name: 'memory_retrieve',
-    description: 'Retrieve top-k relevant memories by semantic similarity + sharpness.',
+    description: 'Retrieve top-k relevant memories by semantic similarity + sharpness. Set synthesize=true to blend equidistant memories into a single reconstructed memory.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string' },
         domain: { type: 'string' },
         top_k: { type: 'number', default: 5 },
+        synthesize: { type: 'boolean', default: false },
       },
       required: ['query'],
     },
@@ -500,9 +536,28 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env);
       if (!results.length) return 'No memories found.';
 
-      const raw = results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
+      // Soft-collapse: when top-2 scores are within 0.04 and both > 0.85, synthesize a blend
+      let preamble = '';
+      if (args.synthesize && results.length >= 2
+          && results[0].score > 0.85
+          && (results[0].score - results[1].score) < 0.04) {
+        const blendInput = results.slice(0, 3).map(r => r.text).join('\n');
+        const blend = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+          messages: [
+            {
+              role: 'system',
+              content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.',
+            },
+            { role: 'user', content: blendInput },
+          ],
+          max_tokens: 100,
+        }) as any;
+        const blended = blend?.response?.trim();
+        if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
+      }
 
-      return raw;
+      const raw = results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
+      return preamble + raw;
     }
 
     case 'memory_list': {
@@ -731,8 +786,9 @@ export default {
     });
   },
 
-  // Daily decay via cron
+  // Daily decay + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     await updateDecay(env);
+    await synthesizeIdentityProfile(env);
   },
 };
