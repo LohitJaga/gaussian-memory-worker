@@ -666,6 +666,14 @@ export default {
     const body = await request.json() as any;
     const { method, params, id } = body;
 
+    // MCP notifications have no id — must return 202 with no body
+    if (id === undefined) {
+      return new Response(null, {
+        status: 202,
+        headers: { 'Access-Control-Allow-Origin': '*' },
+      });
+    }
+
     let result: any;
 
     if (method === 'initialize') {
