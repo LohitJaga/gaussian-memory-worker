@@ -730,14 +730,30 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
     }
 
     case 'memory_extract_and_store': {
+      // Pre-filter: strip file paths, URLs, extensions before Llama sees them
+      const rawLog = args.log_text as string;
+      const filteredLog = rawLog
+        .split(/\s*\|\s*/)
+        .filter(line => {
+          const t = line.trim();
+          if (t.length < 25) return false;
+          if (/https?:\/\//.test(t)) return false;
+          if (/^\/Users|^\/home|^[A-Z]:\\/.test(t)) return false;
+          if (/\.(csv|jsonl|pdf|png|jpg|jpeg|js|ts|md|json|txt|py|sh|sql|ipynb)\b/i.test(t)) return false;
+          if (/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}/.test(t)) return false;
+          return true;
+        })
+        .join(' | ')
+        .slice(-4000);
+
       const extraction = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
         messages: [
           {
             role: 'system',
-            content: `Extract 3-5 memorable facts from this session log for long-term personal memory storage.
+            content: `Extract 5-8 memorable facts from this session log for long-term personal memory storage.
 
-INCLUDE: decisions made, problems solved, preferences expressed, project context, career/personal facts, technical approaches chosen.
-SKIP: generic status messages ("successfully", "completed", "updated"), file paths, URLs, tool outputs, error messages, one-word answers, filler.
+INCLUDE: decisions made, problems solved, preferences expressed, project context, career/personal facts, technical approaches chosen, opinions stated.
+SKIP: generic status messages ("successfully", "completed", "updated"), tool outputs, error messages, one-word answers, filler phrases.
 
 Classify each fact:
 - "episodic": specific event or session outcome
@@ -747,9 +763,9 @@ Classify each fact:
 Return ONLY a JSON array of objects, no other text.
 Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
           },
-          { role: 'user', content: (args.log_text as string).slice(0, 2000) },
+          { role: 'user', content: filteredLog },
         ],
-        max_tokens: 300,
+        max_tokens: 500,
       }) as any;
 
       interface ExtractedFact { text: string; type?: string }
@@ -774,7 +790,7 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
       }
 
       let stored = 0;
-      for (const fact of facts.slice(0, 5)) {
+      for (const fact of facts.slice(0, 8)) {
         const text = fact.text ?? '';
         if (text.length > 10) {
           const mu = await embed(text, env, false);
