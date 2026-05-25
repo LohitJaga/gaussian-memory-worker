@@ -968,10 +968,11 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
     }
 
     case 'memory_rebuild_domains': {
-      const BATCH = 50;
+      await ensureDomainColumns(env);
+      const BATCH = 30;  // Smaller batch — 3 Llama calls per invocation (10 texts each)
       const offsetRaw = await env.KV.get('REBUILD_OFFSET');
 
-      // First call (no offset key): clear anchors so they re-emerge with new threshold
+      // First call: clear all domain anchors so clean ones emerge from Llama
       if (offsetRaw === null) {
         await env.DB.prepare('DELETE FROM domain_anchors').run();
       }
@@ -986,42 +987,103 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
         await env.KV.delete('REBUILD_OFFSET');
         const total = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
         const anchors = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-        return `Done. ${total?.n ?? 0} memories re-classified into ${anchors?.n ?? 0} domains.`;
+        return `Done. ${total?.n ?? 0} memories reclassified into ${anchors?.n ?? 0} domains.`;
       }
 
-      // Load all anchors once — avoids 50× SELECT inside classifyDomain
-      const anchorRows = await env.DB.prepare('SELECT name, embedding FROM domain_anchors')
-        .all<{ name: string; embedding: string }>();
-      const anchorCache = new Map<string, number[]>(
-        (anchorRows.results ?? []).map(r => [r.name, JSON.parse(r.embedding)])
-      );
-
-      // One AI call for the whole batch — avoids subrequest limit
+      // Batch embed all texts in one AI call
       const mus = await batchEmbed(batch.map(r => r.text), env);
 
+      // Batch Llama classification: 10 memories per Llama call
+      const GROUP = 10;
+      const domainAssignments: string[] = new Array(batch.length).fill('general');
+
+      // Load current domain list once (shared across all Llama calls in this batch)
+      const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
+        .all<{ name: string }>()).results?.map(r => r.name) ?? [];
+      const canCreate = existingDomains.length < 50;
+
+      for (let g = 0; g < batch.length; g += GROUP) {
+        const group = batch.slice(g, g + GROUP);
+        const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
+
+        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+          messages: [
+            {
+              role: 'system',
+              content: `Classify each memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+            },
+            { role: 'user', content: numbered },
+          ],
+          max_tokens: 120,
+        }) as any;
+
+        const raw = (result?.response ?? '').trim();
+        try {
+          const match = raw.match(/\[[\s\S]*?\]/);
+          if (match) {
+            const parsed = JSON.parse(match[0]) as string[];
+            for (let j = 0; j < group.length && j < parsed.length; j++) {
+              const d = (parsed[j] ?? '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
+              if (d.length >= 2) {
+                domainAssignments[g + j] = d;
+                if (!existingDomains.includes(d) && existingDomains.length < 50) {
+                  existingDomains.push(d);
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // Batch D1 updates + centroid accumulation
+      const d1Updates: D1PreparedStatement[] = [];
       const vectorizeUpdates: any[] = [];
-      const newAnchors: { name: string; embedding: number[] }[] = [];
+      const centroidAccum = new Map<string, { sum: number[]; count: number }>();
 
       for (let i = 0; i < batch.length; i++) {
-        const row = batch[i];
-        const mu = mus[i];
-        const { domain: newDomain, newAnchor } = classifyDomainFromCache(mu, row.text, anchorCache);
-        if (newAnchor) newAnchors.push(newAnchor);
-        await env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(newDomain, row.id).run();
-        vectorizeUpdates.push({ id: row.id, values: Array.from(mu), metadata: { domain: newDomain, memory_type: row.memory_type } });
+        const domain = domainAssignments[i];
+        d1Updates.push(env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(domain, batch[i].id));
+        vectorizeUpdates.push({ id: batch[i].id, values: Array.from(mus[i]), metadata: { domain, memory_type: batch[i].memory_type } });
+
+        const acc = centroidAccum.get(domain) ?? { sum: new Array(mus[i].length).fill(0), count: 0 };
+        mus[i].forEach((v, j) => { acc.sum[j] = (acc.sum[j] ?? 0) + v; });
+        acc.count++;
+        centroidAccum.set(domain, acc);
       }
 
-      // Write new anchors to D1 in one batch
-      for (const a of newAnchors) {
-        await env.DB.prepare('INSERT OR REPLACE INTO domain_anchors (name, embedding) VALUES (?, ?)')
-          .bind(a.name, JSON.stringify(a.embedding)).run();
+      // Write D1 memory updates in one batch
+      for (let i = 0; i < d1Updates.length; i += 500) {
+        await env.DB.batch(d1Updates.slice(i, i + 500));
       }
-
       await env.VECTORIZE.upsert(vectorizeUpdates);
-      await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
 
+      // Update domain centroids (incremental mean)
+      for (const [domain, { sum, count }] of centroidAccum) {
+        const existing = await env.DB.prepare(
+          'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
+        ).bind(domain).first<{ embedding: string; memory_count: number }>();
+
+        if (!existing) {
+          const norm = Math.sqrt(sum.reduce((s, v) => s + v * v, 0));
+          const centroid = sum.map(v => v / (norm || 1));
+          await env.DB.prepare(
+            'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, ?, 0)'
+          ).bind(domain, JSON.stringify(centroid), count).run();
+        } else {
+          const n = existing.memory_count ?? 0;
+          const old: number[] = JSON.parse(existing.embedding);
+          const updated = old.map((v, j) => (v * n + (sum[j] ?? 0)) / (n + count));
+          const norm = Math.sqrt(updated.reduce((s, v) => s + v * v, 0));
+          await env.DB.prepare(
+            'UPDATE domain_anchors SET embedding = ?, memory_count = ? WHERE name = ?'
+          ).bind(JSON.stringify(updated.map(v => v / (norm || 1))), n + count, domain).run();
+        }
+      }
+
+      await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
       const totalCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
-      return `Processed ${offset + batch.length}/${totalCount?.n ?? '?'} — call again to continue.`;
+      const domainCount = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+      return `Processed ${offset + batch.length}/${totalCount?.n ?? '?'} — ${domainCount?.n ?? 0} domains so far. Call again to continue.`;
     }
 
     case 'identity_profile_get': {
