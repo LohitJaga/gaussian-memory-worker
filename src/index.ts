@@ -719,33 +719,57 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         messages: [
           {
             role: 'system',
-            content: 'Extract 3-5 specific, memorable facts from this session log worth keeping for future sessions. Return ONLY a JSON array of strings, no other text. Example: ["Deployed worker to Cloudflare", "Fixed KV rate limit bug"]',
+            content: `Extract 3-5 memorable facts from this session log for long-term personal memory storage.
+
+INCLUDE: decisions made, problems solved, preferences expressed, project context, career/personal facts, technical approaches chosen.
+SKIP: generic status messages ("successfully", "completed", "updated"), file paths, URLs, tool outputs, error messages, one-word answers, filler.
+
+Classify each fact:
+- "episodic": specific event or session outcome
+- "semantic": belief, value, or personality trait
+- "procedural": preference or working style
+
+Return ONLY a JSON array of objects, no other text.
+Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
           },
           { role: 'user', content: (args.log_text as string).slice(0, 2000) },
         ],
         max_tokens: 300,
       }) as any;
 
-      let facts: string[] = [];
+      interface ExtractedFact { text: string; type?: string }
+      let facts: ExtractedFact[] = [];
       const raw = extraction?.response?.trim() ?? '';
       try {
         const match = raw.match(/\[[\s\S]*\]/);
-        if (match) facts = JSON.parse(match[0]);
+        if (match) {
+          const parsed = JSON.parse(match[0]);
+          // Handle both object array and legacy string array
+          facts = parsed.map((f: any) =>
+            typeof f === 'string' ? { text: f } : f
+          );
+        }
       } catch {}
 
       if (!facts.length) {
         facts = raw.split('\n')
           .map((l: string) => l.replace(/^[-*\d.)\s]+/, '').trim())
-          .filter((l: string) => l.length > 15);
+          .filter((l: string) => l.length > 15)
+          .map(text => ({ text }));
       }
 
       let stored = 0;
       for (const fact of facts.slice(0, 5)) {
-        if (fact.length > 10) {
-          const mu = await embed(fact, env, false);
-          const domain = await classifyDomain(mu, fact, env);
-          const { memory_type, emotional_intensity } = inferTypeAndIntensity(fact);
-          await storeMemory(fact, memory_type, domain, emotional_intensity, env, mu);
+        const text = fact.text ?? '';
+        if (text.length > 10) {
+          const mu = await embed(text, env, false);
+          const domain = await classifyDomain(mu, text, env);
+          // Use Llama-classified type if provided, else fall back to heuristic
+          const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
+            ? fact.type : null;
+          const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
+          const memory_type = llmType ?? inferredType;
+          await storeMemory(text, memory_type, domain, emotional_intensity, env, mu);
           stored++;
         }
       }
