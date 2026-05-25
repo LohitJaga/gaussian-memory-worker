@@ -162,11 +162,40 @@ async function retrieve(
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
   const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
 
-  const results = await env.VECTORIZE.query(Array.from(qvec), {
-    topK: topK * 3,
-    returnValues: true,
-    returnMetadata: 'all',
-  });
+  // Stage 1: Domain routing — score query against domain centroids
+  let activeDomains: string[] | null = null;
+  if (!domain) {
+    try {
+      const anchorRows = await env.DB.prepare(
+        'SELECT name, embedding FROM domain_anchors WHERE memory_count >= 3'
+      ).all<{ name: string; embedding: string }>();
+      if ((anchorRows.results ?? []).length > 0) {
+        const qArr = Array.from(qvec);
+        const domScores = (anchorRows.results ?? [])
+          .map(r => ({ name: r.name, score: dotProduct(qArr, JSON.parse(r.embedding) as number[]) }))
+          .sort((a, b) => b.score - a.score);
+        activeDomains = domScores.slice(0, 3).filter(d => d.score > 0.25).map(d => d.name);
+      }
+    } catch {}
+  }
+
+  // Stage 2: Vector search, optionally filtered to active domains
+  const queryOpts: any = { topK: topK * 4, returnValues: true, returnMetadata: 'all' };
+  if (activeDomains && activeDomains.length > 0) {
+    queryOpts.filter = activeDomains.length === 1
+      ? { domain: activeDomains[0] }
+      : { domain: { $in: activeDomains } };
+  }
+  let vecResults = await env.VECTORIZE.query(Array.from(qvec), queryOpts);
+
+  // Fallback: if domain filter gave too few results, try global search
+  if (activeDomains && (vecResults.matches?.length ?? 0) < topK) {
+    vecResults = await env.VECTORIZE.query(Array.from(qvec), {
+      topK: topK * 3, returnValues: true, returnMetadata: 'all',
+    });
+  }
+
+  const results = vecResults;
 
   if (!results.matches.length) return [];
 
@@ -694,7 +723,27 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env);
       if (!results.length) return 'No memories found.';
 
-      // Soft-collapse: when top-2 scores are within 0.04 and both > 0.85, synthesize a blend
+      // Fetch domain summaries for domains present in results
+      const domainsHit = [...new Set(results.map(r => r.domain))];
+      const summaries: Record<string, string> = {};
+      for (const d of domainsHit) {
+        const s = await env.KV.get(`domain_summary:${d}`);
+        if (s) summaries[d] = s;
+      }
+
+      // If summaries exist: group output by domain with summary header
+      if (Object.keys(summaries).length > 0) {
+        const sections = domainsHit.map(d => {
+          const mems = results.filter(r => r.domain === d);
+          const lines: string[] = [`[DOMAIN: ${d}]`];
+          if (summaries[d]) lines.push(`Summary: ${summaries[d]}`);
+          lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`));
+          return lines.join('\n');
+        });
+        return sections.join('\n\n');
+      }
+
+      // Soft-collapse fallback: flat list with optional synthesis
       let preamble = '';
       if (args.synthesize && results.length >= 2
           && results[0].score > 0.85
@@ -702,10 +751,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         const blendInput = results.slice(0, 3).map(r => r.text).join('\n');
         const blend = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
           messages: [
-            {
-              role: 'system',
-              content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.',
-            },
+            { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
             { role: 'user', content: blendInput },
           ],
           max_tokens: 100,
@@ -714,8 +760,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
       }
 
-      const raw = results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
-      return preamble + raw;
+      return preamble + results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
     }
 
     case 'memory_list': {
