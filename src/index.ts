@@ -894,13 +894,15 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
         const text = fact.text ?? '';
         if (text.length > 10) {
           const mu = await embed(text, env);
-          const domain = await classifyDomain(mu, text, env);
-          // Use Llama-classified type if provided, else fall back to heuristic
+          const domain = await classifyDomainWithLlama(text, env, mu);
           const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
             ? fact.type : null;
           const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
           const memory_type = llmType ?? inferredType;
-          await storeMemory(text, memory_type, domain, emotional_intensity, env, mu);
+          const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu);
+          if (action === 'spawned') {
+            await updateDomainCentroid(domain, mu, env).catch(() => {});
+          }
           stored++;
         }
       }
