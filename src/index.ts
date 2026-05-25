@@ -428,6 +428,103 @@ async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise
   return name;
 }
 
+// ── Llama domain classification (capped at 50) ───────────────────────────────
+
+async function ensureDomainColumns(env: Env): Promise<void> {
+  try { await env.DB.prepare('ALTER TABLE domain_anchors ADD COLUMN memory_count INTEGER DEFAULT 0').run(); } catch {}
+  try { await env.DB.prepare('ALTER TABLE domain_anchors ADD COLUMN last_summarized_count INTEGER DEFAULT 0').run(); } catch {}
+}
+
+async function classifyDomainWithLlama(text: string, env: Env, precomputedMu?: Float32Array): Promise<string> {
+  const rows = await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid').all<{ name: string }>();
+  const existing = (rows.results ?? []).map(r => r.name);
+  const canCreate = existing.length < 50;
+
+  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+    messages: [
+      {
+        role: 'system',
+        content: `Classify this memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words (e.g. "gaussian-memory", "loreal-work", "stats-coursework", "career-goals", "personal-life", "cloudflare-dev", "bayer-research").\n${canCreate ? 'Use an existing domain or create a new one if none fit well.' : 'Assign to the best existing domain (50-domain cap reached).'}\nExisting domains: ${existing.length ? existing.join(', ') : 'none yet'}\nReturn ONLY JSON: {"domain":"name"}`,
+      },
+      { role: 'user', content: text.slice(0, 300) },
+    ],
+    max_tokens: 25,
+  }) as any;
+
+  const raw = (result?.response ?? '').trim();
+  try {
+    const match = raw.match(/\{[^}]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed.domain && typeof parsed.domain === 'string') {
+        const clean = parsed.domain.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
+        if (clean.length >= 2) return clean;
+      }
+    }
+  } catch {}
+
+  // Fallback: cosine classifier
+  const mu = precomputedMu ?? await embed(text, env);
+  return classifyDomain(mu, text, env);
+}
+
+async function updateDomainCentroid(domainName: string, mu: Float32Array, env: Env): Promise<void> {
+  await ensureDomainColumns(env);
+  const existing = await env.DB.prepare(
+    'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
+  ).bind(domainName).first<{ embedding: string; memory_count: number }>();
+
+  if (!existing) {
+    await env.DB.prepare(
+      'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, 1, 0)'
+    ).bind(domainName, JSON.stringify(Array.from(mu))).run();
+    return;
+  }
+
+  const n = existing.memory_count ?? 0;
+  const old: number[] = JSON.parse(existing.embedding);
+  const updated = old.map((v, i) => (v * n + (mu[i] ?? 0)) / (n + 1));
+  const norm = Math.sqrt(updated.reduce((s, v) => s + v * v, 0));
+  const centroid = updated.map(v => v / (norm || 1));
+  const newCount = n + 1;
+
+  await env.DB.prepare(
+    'UPDATE domain_anchors SET embedding = ?, memory_count = ? WHERE name = ?'
+  ).bind(JSON.stringify(centroid), newCount, domainName).run();
+
+  // Trigger summary when domain has ≥5 memories and grew 25%+ since last summary
+  const lastSummarized = (await env.DB.prepare(
+    'SELECT last_summarized_count FROM domain_anchors WHERE name = ?'
+  ).bind(domainName).first<{ last_summarized_count: number }>())?.last_summarized_count ?? 0;
+
+  if (newCount >= 5 && (lastSummarized === 0 || newCount >= Math.ceil(lastSummarized * 1.25))) {
+    refreshDomainSummary(domainName, newCount, env).catch(() => {});
+  }
+}
+
+async function refreshDomainSummary(domainName: string, newCount: number, env: Env): Promise<void> {
+  const rows = await env.DB.prepare(
+    'SELECT text FROM memories WHERE domain = ? ORDER BY access_count DESC, timestamp DESC LIMIT 12'
+  ).bind(domainName).all<{ text: string }>();
+  const facts = (rows.results ?? []).map(r => r.text).join('\n');
+  if (!facts) return;
+
+  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+    messages: [
+      { role: 'system', content: 'Summarize these memory facts into 2-3 sentences capturing key themes, decisions, and context. Be specific and concise. No preamble.' },
+      { role: 'user', content: facts },
+    ],
+    max_tokens: 150,
+  }) as any;
+
+  const summary = result?.response?.trim();
+  if (summary) {
+    await env.KV.put(`domain_summary:${domainName}`, summary);
+    await env.DB.prepare('UPDATE domain_anchors SET last_summarized_count = ? WHERE name = ?')
+      .bind(newCount, domainName).run();
+  }
+}
+
 function inferTypeAndIntensity(text: string): { memory_type: string; emotional_intensity: number } {
   const t = text.toLowerCase();
 
@@ -580,13 +677,16 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
     }
 
     case 'memory_auto_store': {
-      const mu = await embed(args.text, env, false);
-      const domain = await classifyDomain(mu, args.text, env);
+      const mu = await embed(args.text, env);
+      const domain = await classifyDomainWithLlama(args.text, env, mu);
       const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(args.text);
       const emotional_intensity = Math.max(args.emotional_intensity ?? 0.0, inferred);
       const { action, id } = await storeMemory(
         args.text, memory_type, domain, emotional_intensity, env, mu
       );
+      if (action === 'spawned') {
+        await updateDomainCentroid(domain, mu, env).catch(() => {});
+      }
       return `${action.toUpperCase()}: '${args.text.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
     }
 
@@ -713,7 +813,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       ).bind(args.id).first<{ sigma_diagonal: string; memory_type: string; domain: string }>();
       if (!existing) return `Not found: ${args.id}`;
 
-      const mu = await embed(args.text, env, false);
+      const mu = await embed(args.text, env);
       const now = Math.floor(Date.now() / 1000);
 
       await env.DB.prepare(
@@ -786,14 +886,14 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
         facts = raw.split('\n')
           .map((l: string) => l.replace(/^[-*\d.)\s]+/, '').trim())
           .filter((l: string) => l.length > 15)
-          .map(text => ({ text }));
+          .map((t: string) => ({ text: t }));
       }
 
       let stored = 0;
       for (const fact of facts.slice(0, 8)) {
         const text = fact.text ?? '';
         if (text.length > 10) {
-          const mu = await embed(text, env, false);
+          const mu = await embed(text, env);
           const domain = await classifyDomain(mu, text, env);
           // Use Llama-classified type if provided, else fall back to heuristic
           const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
