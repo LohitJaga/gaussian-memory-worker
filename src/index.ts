@@ -274,21 +274,36 @@ async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number 
   ).all<{ id: string; sigma_diagonal: string }>();
 
   let decayed = 0, pruned = 0;
+  const updateStmts: D1PreparedStatement[] = [];
+  const pruneIds: string[] = [];
 
   for (const row of rows.results ?? []) {
     const sigma = decaySigma(deserializeSigma(row.sigma_diagonal));
-
     if (meanSigma(sigma) > 2.0) {
-      await env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(row.id).run();
-      await env.VECTORIZE.deleteByIds([row.id]);
+      pruneIds.push(row.id);
       pruned++;
     } else {
-      await env.DB.prepare(
-        'UPDATE memories SET sigma_diagonal = ? WHERE id = ?'
-      ).bind(serializeSigma(sigma), row.id).run();
+      updateStmts.push(
+        env.DB.prepare('UPDATE memories SET sigma_diagonal = ? WHERE id = ?')
+          .bind(serializeSigma(sigma), row.id)
+      );
       decayed++;
     }
   }
+
+  // Batch all D1 writes — one API call instead of N, stays under limits
+  const CHUNK = 500;
+  for (let i = 0; i < updateStmts.length; i += CHUNK) {
+    await env.DB.batch(updateStmts.slice(i, i + CHUNK));
+  }
+  for (let i = 0; i < pruneIds.length; i += CHUNK) {
+    await env.DB.batch(
+      pruneIds.slice(i, i + CHUNK).map(id =>
+        env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)
+      )
+    );
+  }
+  if (pruneIds.length) await env.VECTORIZE.deleteByIds(pruneIds);
 
   return { decayed, pruned };
 }
