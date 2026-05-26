@@ -1256,9 +1256,29 @@ export default {
     });
   },
 
-  // Daily decay + identity synthesis via cron
+  // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     await updateDecay(env);
+    // One rebuild batch nightly — slowly consolidates singleton domains over time
+    // Reuses same KV offset logic as memory_rebuild_domains tool
+    await ensureDomainColumns(env);
+    const offsetRaw = await env.KV.get('REBUILD_OFFSET');
+    const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+    const rows = await env.DB.prepare(
+      'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT 30 OFFSET ?'
+    ).bind(offset).all<{ id: string; text: string; memory_type: string }>();
+    if ((rows.results ?? []).length > 0) {
+      const mus = await batchEmbed((rows.results ?? []).map(r => r.text), env);
+      for (let i = 0; i < (rows.results ?? []).length; i++) {
+        const row = (rows.results ?? [])[i];
+        const domain = await classifyDomainWithLlama(row.text, env, mus[i]);
+        await env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(domain, row.id).run();
+        await updateDomainCentroid(domain, mus[i], env).catch(() => {});
+      }
+      await env.KV.put('REBUILD_OFFSET', String(offset + 30));
+    } else {
+      await env.KV.delete('REBUILD_OFFSET');
+    }
     await synthesizeIdentityProfile(env);
   },
 };
