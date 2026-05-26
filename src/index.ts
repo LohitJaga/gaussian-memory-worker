@@ -11,7 +11,7 @@ export interface Env {
   KV: KVNamespace;
 }
 
-// ── Embedding ────────────────────────────────────────────────────────────────
+// ── Embedding ─────────────────────────────────────────────────────────────────
 
 async function embed(text: string, env: Env): Promise<Float32Array> {
   const result = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [text] }) as any;
@@ -467,13 +467,12 @@ async function ensureDomainColumns(env: Env): Promise<void> {
 async function classifyDomainWithLlama(text: string, env: Env, precomputedMu?: Float32Array): Promise<string> {
   const rows = await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid').all<{ name: string }>();
   const existing = (rows.results ?? []).map(r => r.name);
-  const canCreate = existing.length < 50;
 
   const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
     messages: [
       {
         role: 'system',
-        content: `Classify this memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words (e.g. "gaussian-memory", "loreal-work", "stats-coursework", "career-goals", "personal-life", "cloudflare-dev", "bayer-research").\n${canCreate ? 'Use an existing domain or create a new one if none fit well.' : 'Assign to the best existing domain (50-domain cap reached).'}\nExisting domains: ${existing.length ? existing.join(', ') : 'none yet'}\nReturn ONLY JSON: {"domain":"name"}`,
+        content: `Classify this memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words (e.g. "gaussian-memory-dev", "loreal-internship", "stats-coursework", "career-goals", "personal-life", "cloudflare-dev", "bayer-research").\nStrongly prefer existing domains — only create a new one if NONE of the existing domains reasonably fit. Broad domains are better than narrow ones. Keep total domain count small.\nExisting domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}\nReturn ONLY JSON: {"domain":"name"}`,
       },
       { role: 'user', content: text.slice(0, 300) },
     ],
@@ -504,6 +503,20 @@ async function updateDomainCentroid(domainName: string, mu: Float32Array, env: E
   ).bind(domainName).first<{ embedding: string; memory_count: number }>();
 
   if (!existing) {
+    // Enforce 50-domain cap: if at cap, redirect centroid update to nearest existing domain
+    const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+    if ((totalDomains?.n ?? 0) >= 75) {
+      const allAnchors = await env.DB.prepare('SELECT name, embedding FROM domain_anchors').all<{ name: string; embedding: string }>();
+      const muArr = Array.from(mu);
+      let bestName = '';
+      let bestSim = -1;
+      for (const row of allAnchors.results ?? []) {
+        const sim = dotProduct(muArr, JSON.parse(row.embedding) as number[]);
+        if (sim > bestSim) { bestSim = sim; bestName = row.name; }
+      }
+      if (bestName) await updateDomainCentroid(bestName, mu, env);
+      return;
+    }
     await env.DB.prepare(
       'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, 1, 0)'
     ).bind(domainName, JSON.stringify(Array.from(mu))).run();
@@ -599,6 +612,20 @@ const TOOLS = [
         emotional_intensity: { type: 'number', default: 0.0 },
       },
       required: ['text'],
+    },
+  },
+  {
+    name: 'memory_store_diff',
+    description: 'Store a semantic description of a code edit or bash command. Pass raw diff (file_path + old_string + new_string) or command context; worker infers meaning via Llama before storing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string' },
+        old_string: { type: 'string' },
+        new_string: { type: 'string' },
+        command: { type: 'string' },
+        output: { type: 'string' },
+      },
     },
   },
   {
@@ -717,6 +744,45 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         await updateDomainCentroid(domain, mu, env).catch(() => {});
       }
       return `${action.toUpperCase()}: '${args.text.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
+    }
+
+    case 'memory_store_diff': {
+      // Build raw context for Llama to interpret
+      let diffContext = '';
+      if (args.command) {
+        const cmd = (args.command as string).slice(0, 200);
+        const out = ((args.output as string) ?? '').trim().slice(0, 200);
+        diffContext = `Command: ${cmd}${out ? `\nOutput: ${out}` : ''}`;
+      } else if (args.file_path || args.new_string) {
+        const filePath = (args.file_path as string) ?? '';
+        const file = filePath.split('/').pop() ?? 'unknown';
+        const project = filePath.match(/\/([^/]+)\/(?:src|lib|app)\//)?.[1] ?? '';
+        const oldSnip = ((args.old_string as string) ?? '').trim().replace(/\s+/g, ' ').slice(0, 150);
+        const newSnip = ((args.new_string as string) ?? '').trim().replace(/\s+/g, ' ').slice(0, 150);
+        diffContext = `File: ${project ? project + '/' : ''}${file}\nBefore: ${oldSnip}\nAfter: ${newSnip}`;
+      }
+      if (!diffContext) return 'SKIP: no diff context provided';
+
+      // Ask Llama to describe the change semantically in one sentence
+      const descResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        messages: [
+          {
+            role: 'system',
+            content: 'Summarize this code change or command in ONE factual sentence for a developer memory system. Be specific about what changed and why it matters. Do not start with "I" or "The developer". Under 30 words. Return ONLY the sentence, no JSON, no quotes.',
+          },
+          { role: 'user', content: diffContext },
+        ],
+        max_tokens: 60,
+      }) as any;
+
+      const description = ((descResult?.response ?? '') as string).trim();
+      if (!description || description.length < 10) return 'SKIP: Llama returned empty description';
+
+      const mu = await embed(description, env);
+      const domain = await classifyDomainWithLlama(description, env, mu);
+      const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu);
+      if (action === 'spawned') await updateDomainCentroid(domain, mu, env).catch(() => {});
+      return `${action.toUpperCase()}: '${description.slice(0, 60)}' -> (${domain}/episodic, id=${id.slice(0, 8)})`;
     }
 
     case 'memory_retrieve': {
@@ -895,17 +961,32 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         messages: [
           {
             role: 'system',
-            content: `Extract 5-8 memorable facts from this session log for long-term personal memory storage.
+            content: `Extract memorable facts from this session log for long-term personal memory storage. Prioritize in this order:
 
-INCLUDE: decisions made, problems solved, preferences expressed, project context, career/personal facts, technical approaches chosen, opinions stated.
-SKIP: generic status messages ("successfully", "completed", "updated"), tool outputs, error messages, one-word answers, filler phrases.
+1. DECISIONS — architectural, career, or project direction choices made and why
+2. PROBLEMS SOLVED — what broke, how it was diagnosed, what fixed it
+3. PROJECT CONTEXT — current state of active work, goals, constraints, blockers
+4. PREFERENCES — stated opinions about tools, methods, working style
+
+Extract up to 4 facts per category (up to 12 total). Quality over quantity — skip a category if nothing meaningful happened.
+
+SKIP ALL of these — do not store them under any circumstances:
+- Raw conversational messages ("ok", "yea", "sure", "what do u think", "can u", "how about")
+- Questions directed at the assistant ("can you verify", "give full summary")
+- Pasted external content (CI output, PR descriptions, error logs, API responses)
+- Generic status ("successfully", "completed", "updated", "done", "it works")
+- Filler and reactions ("lol", "mf", "ig", "tbh", "idk", "bruh")
+- Tool outputs and command results
+- Anything under 15 words that isn't a clear factual statement
+
+Each stored fact must be a complete, third-person factual sentence about the person or their work. NOT a question. NOT raw chat.
 
 Classify each fact:
 - "episodic": specific event or session outcome
 - "semantic": belief, value, or personality trait
 - "procedural": preference or working style
 
-Return ONLY a JSON array of objects, no other text.
+Return ONLY a JSON array, no other text.
 Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
           },
           { role: 'user', content: filteredLog },
@@ -935,7 +1016,7 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
       }
 
       let stored = 0;
-      for (const fact of facts.slice(0, 8)) {
+      for (const fact of facts.slice(0, 12)) {
         const text = fact.text ?? '';
         if (text.length > 10) {
           const mu = await embed(text, env);
@@ -1064,11 +1145,15 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
         ).bind(domain).first<{ embedding: string; memory_count: number }>();
 
         if (!existing) {
-          const norm = Math.sqrt(sum.reduce((s, v) => s + v * v, 0));
-          const centroid = sum.map(v => v / (norm || 1));
-          await env.DB.prepare(
-            'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, ?, 0)'
-          ).bind(domain, JSON.stringify(centroid), count).run();
+          // Cap guard: don't create new anchors beyond 50
+          const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+          if ((totalDomains?.n ?? 0) < 50) {
+            const norm = Math.sqrt(sum.reduce((s, v) => s + v * v, 0));
+            const centroid = sum.map(v => v / (norm || 1));
+            await env.DB.prepare(
+              'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, ?, 0)'
+            ).bind(domain, JSON.stringify(centroid), count).run();
+          }
         } else {
           const n = existing.memory_count ?? 0;
           const old: number[] = JSON.parse(existing.embedding);
