@@ -69,7 +69,9 @@ async function storeMemory(
     ).bind(match.id).first<{ sigma_diagonal: string; text: string }>();
 
     if (!row) continue;
-    if (matchDomain && matchDomain !== domain && match.score < 0.95) continue;
+    // Cross-domain dedup: if cosine similarity is very high (>0.97), merge regardless of domain
+    // This prevents near-identical memories from spawning in different domains
+    if (matchDomain && matchDomain !== domain && match.score < 0.97) continue;
 
     const existingSigma = deserializeSigma(row.sigma_diagonal);
     const approxDist = 0.5 * (1 - match.score);
@@ -99,7 +101,9 @@ async function storeMemory(
     return { action: 'contradiction', id };
   }
 
-  if (bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, 0.20)) {
+  // Use tighter threshold for cross-domain merges (0.08) vs same-domain (0.20)
+  const mergeThreshold = (bestId && results.matches.find(m => m.id === bestId && (m.metadata as any)?.domain === domain)) ? 0.20 : 0.08;
+  if (bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold)) {
     const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
 
     await env.DB.prepare(`
