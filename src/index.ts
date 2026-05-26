@@ -202,23 +202,27 @@ async function retrieve(
   const ids = results.matches.map(m => m.id);
   const placeholders = ids.map(() => '?').join(',');
   const rows = await env.DB.prepare(
-    `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp
+    `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
      FROM memories WHERE id IN (${placeholders})`
   ).bind(...ids).all<{
     id: string; text: string; domain: string; memory_type: string;
-    sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number;
+    sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
   }>();
 
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
-  // Build candidates — primary score is now distributional (Bhattacharyya-based)
+  // Build candidates — primary score: 0.6*cosine + 0.25*recency + 0.15*access_freq
+  // Spreads scores across a wider range than Bhattacharyya, better differentiation
   const nowSec = Math.floor(Date.now() / 1000);
+  const NINETY_DAYS = 90 * 24 * 3600;
   const candidates = (rows.results ?? []).map(row => {
     const memSigma = deserializeSigma(row.sigma_diagonal);
-    const memSigmaVal = meanSigma(memSigma);
     const cosineSim = cosineMap.get(row.id) ?? 0;
-    const primaryScore = distributionalScore(cosineSim, querySigmaVal, memSigmaVal);
+    const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
+    const recency = Math.max(0, 1 - (nowSec - lastAccessed) / NINETY_DAYS);
+    const accessFreq = Math.min(1, (row.access_count ?? 0) / 50);
+    const primaryScore = 0.6 * cosineSim + 0.25 * recency + 0.15 * accessFreq;
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
