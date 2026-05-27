@@ -5,7 +5,7 @@
 - [x] Fix retrieval scoring — cosine+recency+access_freq deployed (May 26)
 - [x] Cross-domain dedup fix — tighter merge thresholds deployed (May 26)
 - [x] Domain rebuild #2 — 3449 memories → 55 anchored domains (May 26)
-- [ ] Singleton domain cleanup (Option B) — reclassify all domains with count < 3 into existing 55 anchored domains, no new domain creation
+- [x] Singleton domain cleanup — memory_cleanup_singletons tool deployed, 131 domains → 48 anchored domains (May 27)
 - [ ] Add spreading activation — memory_edges table in D1, one-hop traversal on retrieve, boosts related memories
 - [ ] Receipt logging — retrieve hook emits privacy-safe receipt (query_hash, result_count, score_buckets, injected=true/false, latency_ms) to local log file
 - [ ] Verify stop hook quality — check what this session stored, confirm priority categories (decisions/problems/context) vs old flat extraction
