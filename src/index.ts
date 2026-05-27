@@ -710,6 +710,14 @@ const TOOLS = [
     },
   },
   {
+    name: 'memory_cleanup_singletons',
+    description: 'Reclassify all memories in domains with fewer than N memories (default 3) into the nearest anchored domain. Does not create new domains. Call once — completes in one shot.',
+    inputSchema: {
+      type: 'object',
+      properties: { min_count: { type: 'number', description: 'Domains with fewer than this many memories are singletons. Default 3.' } },
+    },
+  },
+  {
     name: 'memory_rebuild_domains',
     description: 'Re-classify all existing memories with the current domain threshold. Processes in batches of 100; call repeatedly until it returns "done". Clears domain_anchors on first call and lets them re-emerge.',
     inputSchema: { type: 'object', properties: {} },
@@ -1054,6 +1062,108 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
       }
       if (ids.length > 0) await env.VECTORIZE.deleteByIds(ids);
       return `Deleted ${ids.length} memories matching "${args.pattern}".`;
+    }
+
+    case 'memory_cleanup_singletons': {
+      await ensureDomainColumns(env);
+      const minCount = (args.min_count as number) ?? 3;
+
+      // Count actual memories per domain from memories table (source of truth)
+      const domainCounts = await env.DB.prepare(
+        'SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain'
+      ).all<{ domain: string; cnt: number }>();
+      const countMap = new Map<string, number>();
+      for (const row of domainCounts.results ?? []) countMap.set(row.domain, row.cnt);
+
+      // Get all domain anchors with their centroids
+      const allAnchors = await env.DB.prepare(
+        'SELECT name, embedding, memory_count FROM domain_anchors'
+      ).all<{ name: string; embedding: string; memory_count: number }>();
+      const allAnchorList = allAnchors.results ?? [];
+
+      // Anchored = actual memory count >= minCount
+      const anchoredDomains = allAnchorList.filter(a => (countMap.get(a.name) ?? 0) >= minCount);
+
+      if (anchoredDomains.length === 0) {
+        return 'No anchored domains found — run memory_rebuild_domains first.';
+      }
+
+      // Singletons = domains in domain_anchors with actual count < minCount
+      const singletonNames = allAnchorList
+        .filter(a => (countMap.get(a.name) ?? 0) < minCount)
+        .map(a => a.name);
+
+      // Also handle orphaned domains: in memories table but not in domain_anchors
+      const anchoredSet = new Set(allAnchorList.map(a => a.name));
+      for (const [domain, cnt] of countMap) {
+        if (!anchoredSet.has(domain) && cnt < minCount) {
+          singletonNames.push(domain);
+        }
+      }
+
+      if (singletonNames.length === 0) {
+        return `No singleton domains found (all domains have >= ${minCount} memories).`;
+      }
+
+      // For each singleton domain, get its memories and reassign to nearest anchored domain
+      let totalReassigned = 0;
+      const d1Updates: ReturnType<typeof env.DB.prepare>[] = [];
+      const vectorizeUpdates: { id: string; values: number[]; metadata: Record<string, string> }[] = [];
+
+      for (const singletonName of singletonNames) {
+        const memories = await env.DB.prepare(
+          'SELECT id, text, memory_type FROM memories WHERE domain = ?'
+        ).bind(singletonName).all<{ id: string; text: string; memory_type: string }>();
+
+        const batch = memories.results ?? [];
+        if (batch.length === 0) continue;
+
+        // Embed all memories in this singleton domain
+        const mus = await batchEmbed(batch.map(r => r.text), env);
+
+        // Parse anchored centroids once
+        const anchoredParsed = anchoredDomains.map(a => ({
+          name: a.name,
+          centroid: JSON.parse(a.embedding) as number[],
+          count: a.memory_count,
+        }));
+
+        for (let i = 0; i < batch.length; i++) {
+          const mu = Array.from(mus[i]);
+          // Find nearest anchored domain by cosine similarity
+          let bestDomain = anchoredParsed[0].name;
+          let bestSim = -1;
+          for (const anchor of anchoredParsed) {
+            const sim = dotProduct(mu, anchor.centroid);
+            if (sim > bestSim) { bestSim = sim; bestDomain = anchor.name; }
+          }
+          d1Updates.push(
+            env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(bestDomain, batch[i].id)
+          );
+          vectorizeUpdates.push({
+            id: batch[i].id,
+            values: mu,
+            metadata: { domain: bestDomain, memory_type: batch[i].memory_type },
+          });
+          totalReassigned++;
+        }
+      }
+
+      // Write D1 updates in batches of 500
+      for (let i = 0; i < d1Updates.length; i += 500) {
+        await env.DB.batch(d1Updates.slice(i, i + 500));
+      }
+      if (vectorizeUpdates.length > 0) {
+        await env.VECTORIZE.upsert(vectorizeUpdates);
+      }
+
+      // Delete singleton domain anchors
+      for (const name of singletonNames) {
+        await env.DB.prepare('DELETE FROM domain_anchors WHERE name = ?').bind(name).run();
+      }
+
+      const remaining = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+      return `Cleaned up ${singletonNames.length} singleton domains. Reassigned ${totalReassigned} memories. Domains remaining: ${remaining?.n ?? 0}.`;
     }
 
     case 'memory_rebuild_domains': {
