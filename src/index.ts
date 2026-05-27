@@ -1027,26 +1027,52 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
       if (!facts.length) {
         facts = raw.split('\n')
           .map((l: string) => l.replace(/^[-*\d.)\s]+/, '').trim())
-          .filter((l: string) => l.length > 15)
+          .filter((l: string) =>
+            l.length > 25 &&
+            !l.startsWith('{') &&
+            !l.startsWith('[') &&
+            !/^here are/i.test(l) &&
+            !/^extracted/i.test(l) &&
+            !/^json/i.test(l)
+          )
           .map((t: string) => ({ text: t }));
       }
 
+      // Filter out obvious garbage before embedding
+      const cleanFacts = facts.slice(0, 12).filter(f => {
+        const t = (f.text ?? '').trim();
+        if (t.length < 20) return false;
+        if (t.startsWith('{') || t.startsWith('[')) return false;
+        if (/^here are/i.test(t) || /^extracted/i.test(t)) return false;
+        if (t.split(' ').length < 4) return false;
+        return true;
+      });
+
       let stored = 0;
-      for (const fact of facts.slice(0, 12)) {
+      const storedMus: Float32Array[] = [];  // intra-batch dedup
+
+      for (const fact of cleanFacts) {
         const text = fact.text ?? '';
-        if (text.length > 10) {
-          const mu = await embed(text, env);
-          const domain = await classifyDomainWithLlama(text, env, mu);
-          const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
-            ? fact.type : null;
-          const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
-          const memory_type = llmType ?? inferredType;
-          const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu);
-          if (action === 'spawned') {
-            await updateDomainCentroid(domain, mu, env).catch(() => {});
-          }
-          stored++;
+        const mu = await embed(text, env);
+
+        // Intra-batch dedup: skip if too similar to something already stored this run
+        const tooSimilar = storedMus.some(prev => {
+          const sim = dotProduct(Array.from(mu), Array.from(prev));
+          return sim > 0.92;
+        });
+        if (tooSimilar) continue;
+
+        const domain = await classifyDomainWithLlama(text, env, mu);
+        const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
+          ? fact.type : null;
+        const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
+        const memory_type = llmType ?? inferredType;
+        const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu);
+        if (action === 'spawned') {
+          await updateDomainCentroid(domain, mu, env).catch(() => {});
+          storedMus.push(mu);
         }
+        stored++;
       }
       return `Extracted ${facts.length} facts, stored ${stored}.`;
     }
