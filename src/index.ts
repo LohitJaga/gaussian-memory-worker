@@ -168,12 +168,14 @@ async function retrieve(
 
   // Stage 1: Domain routing — score query against domain centroids
   let activeDomains: string[] | null = null;
+  const domainSizeMap = new Map<string, number>();
   if (!domain) {
     try {
       const anchorRows = await env.DB.prepare(
-        'SELECT name, embedding FROM domain_anchors WHERE memory_count >= 3'
-      ).all<{ name: string; embedding: string }>();
+        'SELECT name, embedding, memory_count FROM domain_anchors WHERE memory_count >= 3'
+      ).all<{ name: string; embedding: string; memory_count: number }>();
       if ((anchorRows.results ?? []).length > 0) {
+        for (const r of anchorRows.results ?? []) domainSizeMap.set(r.name, r.memory_count ?? 0);
         const qArr = Array.from(qvec);
         const domScores = (anchorRows.results ?? [])
           .map(r => ({ name: r.name, score: dotProduct(qArr, JSON.parse(r.embedding) as number[]) }))
@@ -288,10 +290,11 @@ async function retrieve(
   const suppressed = scored.slice(topK).find(c => c.contradiction && c.primaryScore > 0.7);
   if (suppressed) top.push(suppressed);
 
-  // Sharpen accessed memories
+  // Sharpen accessed memories — widen sigma if contradicted, adaptive floor by domain size
   const now = Math.floor(Date.now() / 1000);
   for (const mem of top) {
-    const newSigma = sharpenSigma(mem.sigma);
+    const domSize = domainSizeMap.get(mem.domain) ?? 10;
+    const newSigma = sharpenSigma(mem.sigma, 0.85, 0.15, mem.contradiction, domSize);
     await env.DB.prepare(
       'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
     ).bind(now, serializeSigma(newSigma), mem.id).run();
@@ -343,6 +346,142 @@ async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number 
   if (pruneIds.length) await env.VECTORIZE.deleteByIds(pruneIds);
 
   return { decayed, pruned };
+}
+
+async function deduplicateRecentMemories(env: Env, windowSec = 86400, threshold = 0.90): Promise<string> {
+  const since = Math.floor(Date.now() / 1000) - windowSec;
+  const recent = await env.DB.prepare(
+    'SELECT id, text FROM memories WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 200'
+  ).bind(since).all<{ id: string; text: string }>();
+
+  const rows = recent.results ?? [];
+  if (rows.length === 0) return 'No recent memories to dedup.';
+
+  const mus = await batchEmbed(rows.map(r => r.text), env);
+  const toDelete: string[] = [];
+  const deleted = new Set<string>();
+
+  for (let i = 0; i < rows.length; i++) {
+    if (deleted.has(rows[i].id)) continue;
+    const results = await env.VECTORIZE.query(mus[i], { topK: 2 });
+    for (const match of results.matches) {
+      if (match.id !== rows[i].id && (match.score ?? 0) >= threshold && !deleted.has(match.id)) {
+        // rows[i] is newer — delete it, keep the established memory
+        toDelete.push(rows[i].id);
+        deleted.add(rows[i].id);
+        break;
+      }
+    }
+  }
+
+  if (toDelete.length === 0) return 'No duplicates in last 24h.';
+
+  for (let i = 0; i < toDelete.length; i += 500) {
+    await env.DB.batch(
+      toDelete.slice(i, i + 500).map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id))
+    );
+  }
+  await env.VECTORIZE.deleteByIds(toDelete);
+  return `Deduped ${toDelete.length} duplicate memories from last 24h.`;
+}
+
+async function cleanupSingletons(env: Env, minCount = 3): Promise<string> {
+  await ensureDomainColumns(env);
+
+  const domainCounts = await env.DB.prepare(
+    'SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain'
+  ).all<{ domain: string; cnt: number }>();
+  const countMap = new Map<string, number>();
+  for (const row of domainCounts.results ?? []) countMap.set(row.domain, row.cnt);
+
+  const allAnchors = await env.DB.prepare(
+    'SELECT name, embedding, memory_count FROM domain_anchors'
+  ).all<{ name: string; embedding: string; memory_count: number }>();
+  const allAnchorList = allAnchors.results ?? [];
+
+  const anchoredDomains = allAnchorList.filter(a => (countMap.get(a.name) ?? 0) >= minCount);
+  if (anchoredDomains.length === 0) return 'No anchored domains — run memory_rebuild_domains first.';
+
+  const singletonNames: string[] = allAnchorList
+    .filter(a => (countMap.get(a.name) ?? 0) < minCount)
+    .map(a => a.name);
+
+  const anchoredSet = new Set(allAnchorList.map(a => a.name));
+  for (const [domain, cnt] of countMap) {
+    if (!anchoredSet.has(domain) && cnt < minCount) singletonNames.push(domain);
+  }
+
+  if (singletonNames.length === 0) return `No singleton domains (all have >= ${minCount} memories).`;
+
+  let totalReassigned = 0;
+  const d1Updates: ReturnType<typeof env.DB.prepare>[] = [];
+  const vectorizeUpdates: { id: string; values: number[]; metadata: Record<string, string> }[] = [];
+
+  const anchoredParsed = anchoredDomains.map(a => ({
+    name: a.name,
+    centroid: JSON.parse(a.embedding) as number[],
+  }));
+
+  for (const singletonName of singletonNames) {
+    const memories = await env.DB.prepare(
+      'SELECT id, text, memory_type FROM memories WHERE domain = ?'
+    ).bind(singletonName).all<{ id: string; text: string; memory_type: string }>();
+
+    const batch = memories.results ?? [];
+    if (batch.length === 0) continue;
+
+    const mus = await batchEmbed(batch.map(r => r.text), env);
+
+    for (let i = 0; i < batch.length; i++) {
+      const mu = Array.from(mus[i]);
+      let bestDomain = anchoredParsed[0].name;
+      let bestSim = -1;
+      for (const anchor of anchoredParsed) {
+        const sim = dotProduct(mu, anchor.centroid);
+        if (sim > bestSim) { bestSim = sim; bestDomain = anchor.name; }
+      }
+      d1Updates.push(
+        env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(bestDomain, batch[i].id)
+      );
+      vectorizeUpdates.push({
+        id: batch[i].id, values: mu,
+        metadata: { domain: bestDomain, memory_type: batch[i].memory_type },
+      });
+      totalReassigned++;
+    }
+  }
+
+  for (let i = 0; i < d1Updates.length; i += 500) await env.DB.batch(d1Updates.slice(i, i + 500));
+  if (vectorizeUpdates.length > 0) await env.VECTORIZE.upsert(vectorizeUpdates);
+
+  for (const name of singletonNames) {
+    await env.DB.prepare('DELETE FROM domain_anchors WHERE name = ?').bind(name).run();
+  }
+
+  const remaining = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+  return `Cleaned ${singletonNames.length} singleton domains, reassigned ${totalReassigned} memories. Domains remaining: ${remaining?.n ?? 0}.`;
+}
+
+async function refreshStaleDomainSummaries(env: Env): Promise<void> {
+  const counts = await env.DB.prepare(
+    'SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain'
+  ).all<{ domain: string; cnt: number }>();
+  const countMap = new Map<string, number>();
+  for (const r of counts.results ?? []) countMap.set(r.domain, r.cnt);
+
+  const anchors = await env.DB.prepare(
+    'SELECT name, last_summarized_count FROM domain_anchors WHERE memory_count >= 5 ORDER BY memory_count DESC LIMIT 20'
+  ).all<{ name: string; last_summarized_count: number }>();
+
+  for (const a of anchors.results ?? []) {
+    const actual = countMap.get(a.name) ?? 0;
+    const lastSummarized = a.last_summarized_count ?? 0;
+    // Refresh if count grew >20% or was never summarized
+    if (actual === 0) continue;
+    if (lastSummarized === 0 || actual > lastSummarized * 1.2) {
+      await refreshDomainSummary(a.name, actual, env).catch(() => {});
+    }
+  }
 }
 
 async function synthesizeIdentityProfile(env: Env): Promise<void> {
@@ -553,18 +692,28 @@ async function updateDomainCentroid(domainName: string, mu: Float32Array, env: E
 }
 
 async function refreshDomainSummary(domainName: string, newCount: number, env: Env): Promise<void> {
+  // Prefer recent memories (last 90 days) to avoid stale/misclassified content polluting the summary
+  const cutoff = Math.floor(Date.now() / 1000) - 90 * 86400;
   const rows = await env.DB.prepare(
-    'SELECT text FROM memories WHERE domain = ? ORDER BY access_count DESC, timestamp DESC LIMIT 12'
-  ).bind(domainName).all<{ text: string }>();
-  const facts = (rows.results ?? []).map(r => r.text).join('\n');
+    'SELECT text FROM memories WHERE domain = ? AND timestamp > ? ORDER BY access_count DESC, timestamp DESC LIMIT 15'
+  ).bind(domainName, cutoff).all<{ text: string }>();
+
+  // Fall back to all-time top if no recent memories
+  const fallback = (rows.results ?? []).length === 0
+    ? await env.DB.prepare(
+        'SELECT text FROM memories WHERE domain = ? ORDER BY access_count DESC LIMIT 10'
+      ).bind(domainName).all<{ text: string }>()
+    : null;
+
+  const facts = ((fallback ?? rows).results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
   const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
     messages: [
-      { role: 'system', content: 'Summarize these memory facts into 2-3 sentences capturing key themes, decisions, and context. Be specific and concise. No preamble.' },
+      { role: 'system', content: 'Summarize what this person is working on and their preferences in this area. 2 sentences, specific and factual. No speculation or preamble.' },
       { role: 'user', content: facts },
     ],
-    max_tokens: 150,
+    max_tokens: 120,
   }) as any;
 
   const summary = result?.response?.trim();
@@ -1091,105 +1240,8 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
     }
 
     case 'memory_cleanup_singletons': {
-      await ensureDomainColumns(env);
       const minCount = (args.min_count as number) ?? 3;
-
-      // Count actual memories per domain from memories table (source of truth)
-      const domainCounts = await env.DB.prepare(
-        'SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain'
-      ).all<{ domain: string; cnt: number }>();
-      const countMap = new Map<string, number>();
-      for (const row of domainCounts.results ?? []) countMap.set(row.domain, row.cnt);
-
-      // Get all domain anchors with their centroids
-      const allAnchors = await env.DB.prepare(
-        'SELECT name, embedding, memory_count FROM domain_anchors'
-      ).all<{ name: string; embedding: string; memory_count: number }>();
-      const allAnchorList = allAnchors.results ?? [];
-
-      // Anchored = actual memory count >= minCount
-      const anchoredDomains = allAnchorList.filter(a => (countMap.get(a.name) ?? 0) >= minCount);
-
-      if (anchoredDomains.length === 0) {
-        return 'No anchored domains found — run memory_rebuild_domains first.';
-      }
-
-      // Singletons = domains in domain_anchors with actual count < minCount
-      const singletonNames = allAnchorList
-        .filter(a => (countMap.get(a.name) ?? 0) < minCount)
-        .map(a => a.name);
-
-      // Also handle orphaned domains: in memories table but not in domain_anchors
-      const anchoredSet = new Set(allAnchorList.map(a => a.name));
-      for (const [domain, cnt] of countMap) {
-        if (!anchoredSet.has(domain) && cnt < minCount) {
-          singletonNames.push(domain);
-        }
-      }
-
-      if (singletonNames.length === 0) {
-        return `No singleton domains found (all domains have >= ${minCount} memories).`;
-      }
-
-      // For each singleton domain, get its memories and reassign to nearest anchored domain
-      let totalReassigned = 0;
-      const d1Updates: ReturnType<typeof env.DB.prepare>[] = [];
-      const vectorizeUpdates: { id: string; values: number[]; metadata: Record<string, string> }[] = [];
-
-      for (const singletonName of singletonNames) {
-        const memories = await env.DB.prepare(
-          'SELECT id, text, memory_type FROM memories WHERE domain = ?'
-        ).bind(singletonName).all<{ id: string; text: string; memory_type: string }>();
-
-        const batch = memories.results ?? [];
-        if (batch.length === 0) continue;
-
-        // Embed all memories in this singleton domain
-        const mus = await batchEmbed(batch.map(r => r.text), env);
-
-        // Parse anchored centroids once
-        const anchoredParsed = anchoredDomains.map(a => ({
-          name: a.name,
-          centroid: JSON.parse(a.embedding) as number[],
-          count: a.memory_count,
-        }));
-
-        for (let i = 0; i < batch.length; i++) {
-          const mu = Array.from(mus[i]);
-          // Find nearest anchored domain by cosine similarity
-          let bestDomain = anchoredParsed[0].name;
-          let bestSim = -1;
-          for (const anchor of anchoredParsed) {
-            const sim = dotProduct(mu, anchor.centroid);
-            if (sim > bestSim) { bestSim = sim; bestDomain = anchor.name; }
-          }
-          d1Updates.push(
-            env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(bestDomain, batch[i].id)
-          );
-          vectorizeUpdates.push({
-            id: batch[i].id,
-            values: mu,
-            metadata: { domain: bestDomain, memory_type: batch[i].memory_type },
-          });
-          totalReassigned++;
-        }
-      }
-
-      // Write D1 updates in batches of 500
-      for (let i = 0; i < d1Updates.length; i += 500) {
-        await env.DB.batch(d1Updates.slice(i, i + 500));
-      }
-      if (vectorizeUpdates.length > 0) {
-        await env.VECTORIZE.upsert(vectorizeUpdates);
-      }
-
-      // Delete singleton domain anchors
-      for (const name of singletonNames) {
-        await env.DB.prepare('DELETE FROM domain_anchors WHERE name = ?').bind(name).run();
-      }
-
-      const remaining = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-      return `Cleaned up ${singletonNames.length} singleton domains. Reassigned ${totalReassigned} memories. Domains remaining: ${remaining?.n ?? 0}.`;
+      return await cleanupSingletons(env, minCount);
     }
 
     case 'memory_rebuild_domains': {
@@ -1395,6 +1447,9 @@ export default {
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
     await updateDecay(env);
+    await deduplicateRecentMemories(env);
+    await cleanupSingletons(env, 3);
+    await refreshStaleDomainSummaries(env);
     // One rebuild batch nightly — slowly consolidates singleton domains over time
     // Reuses same KV offset logic as memory_rebuild_domains tool
     await ensureDomainColumns(env);

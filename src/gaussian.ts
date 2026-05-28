@@ -42,8 +42,22 @@ export function shouldMerge(
   return bhattacharyyaDistance(muA, sigmaA, muB, sigmaB) < threshold;
 }
 
-export function sharpenSigma(sigma: Float32Array, factor = 0.85, floor = 0.15): Float32Array {
-  return sigma.map(s => Math.max(s * factor, floor)) as Float32Array;
+// contradicted=true: memory conflicts with others — increase uncertainty instead of sharpen
+// domainSize: sparse domains (low count) get a higher floor, keeping memories fuzzier longer
+export function sharpenSigma(
+  sigma: Float32Array,
+  factor = 0.85,
+  floor = 0.15,
+  contradicted = false,
+  domainSize = 10
+): Float32Array {
+  if (contradicted) {
+    // Widen sigma on contradiction — opposite of sharpening
+    return sigma.map(s => Math.min(s * 1.2, 1.5)) as Float32Array;
+  }
+  // Sparse domains keep a higher floor so memories don't collapse prematurely
+  const adaptiveFloor = domainSize < 5 ? 0.35 : domainSize < 15 ? 0.25 : floor;
+  return sigma.map(s => Math.max(s * factor, adaptiveFloor)) as Float32Array;
 }
 
 export function decaySigma(sigma: Float32Array, delta = 0.02): Float32Array {
