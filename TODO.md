@@ -6,9 +6,10 @@
 - [x] Cross-domain dedup fix — tighter merge thresholds deployed (May 26)
 - [x] Domain rebuild #2 — 3449 memories → 55 anchored domains (May 26)
 - [x] Singleton domain cleanup — memory_cleanup_singletons tool deployed, 131 domains → 48 anchored domains (May 27)
-- [ ] Add spreading activation — memory_edges table in D1, one-hop traversal on retrieve, boosts related memories
+- [x] Spreading activation — already implemented inline in retrieve() via anchor-based neighborhood scoring (May 27)
+- [x] Stop hook quality fix — JSON bleed filter, min length 20, intra-batch dedup at 0.92 cosine threshold (May 27)
 - [ ] Receipt logging — retrieve hook emits privacy-safe receipt (query_hash, result_count, score_buckets, injected=true/false, latency_ms) to local log file
-- [ ] Verify stop hook quality — check what this session stored, confirm priority categories (decisions/problems/context) vs old flat extraction
+- [ ] Verify stop hook quality — check tonight's session output, confirm dedup fix worked
 
 ## Quality / Signal
 - [ ] Test retrieval quality after a week of L'Oreal sessions — are relevant memories surfacing?
@@ -28,6 +29,16 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Analytics endpoint `/stats` (already 80% there via memory_stats)
 - [ ] Blog post: "Self-hosted Bayesian memory for Claude Code with spreading activation" — HN + Cloudflare audience
 - [ ] Platform import tool: accept JSON exports from mem0/SuperMemory so users don't lose history when switching
+
+## Visualization (pre-ship demo)
+- [ ] Domain graph — D3.js or canvas, nodes sized by memory count, edges between related domains by centroid cosine similarity
+- [ ] Activation overlay — highlight which nodes lit up during a retrieve() call, show spreading activation in real time
+- [ ] Ship as `/viz` endpoint on the worker or standalone HTML — embed in README + use in Twitter demo video
+
+## Differentiators vs SuperMemory (ship separately with blog/Twitter)
+- [ ] Decision trails — store not just what happened but why: decision + context + alternatives considered. Surface "last time you faced this tradeoff you chose Y because Z." No other memory system does this.
+- [ ] Belief drift over time — expose the Gaussian uncertainty model: "3 months ago you thought X, now your behavior suggests Y — here's what changed." Key-value stores can't do this.
+- [ ] Contradiction surfacing (already built) — "you said you prefer X but you keep doing Y." Stateful probabilistic model detects this; a key-value store can't. Needs to be marketed as a feature.
 
 ## Done — May 26 2026
 - [x] Upgraded to Cloudflare Workers Paid ($5/month) — removed 10K neuron/day cap
