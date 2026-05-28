@@ -160,7 +160,7 @@ function distributionalScore(cosineSim: number, querySigma: number, memorySigma:
 
 async function retrieve(
   query: string, domain: string | null, topK: number, env: Env
-): Promise<{ score: number; text: string; domain: string; type: string }[]> {
+): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean }[]> {
   const qvec = await embed(query, env);
 
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
@@ -186,7 +186,7 @@ async function retrieve(
   }
 
   // Stage 2: Vector search, optionally filtered to active domains
-  const queryOpts: any = { topK: topK * 4, returnValues: true, returnMetadata: 'all' };
+  const queryOpts: any = { topK: topK * 2, returnValues: true, returnMetadata: 'all' };
   if (activeDomains && activeDomains.length > 0) {
     queryOpts.filter = activeDomains.length === 1
       ? { domain: activeDomains[0] }
@@ -284,13 +284,67 @@ async function retrieve(
   });
 
   scored.sort((a, b) => b.score - a.score);
+
+  // True spreading activation: second Vectorize pass from top-3 anchors
+  // Activated memories SUPPLEMENT direct results — they don't compete within top-K
+  const seenIds = new Set(candidates.map(c => c.id));
+  const activationAnchors = scored.slice(0, 3).filter(c => c.vector.length > 0);
+  const activatedExtras: typeof scored = [];
+
+  if (activationAnchors.length > 0) {
+    const neighborQueries = activationAnchors.map(anchor =>
+      env.VECTORIZE.query(anchor.vector, { topK: 6, returnValues: false, returnMetadata: 'all' })
+    );
+    const neighborResults = await Promise.all(neighborQueries);
+
+    const newMatches: { id: string; score: number }[] = [];
+    for (const result of neighborResults) {
+      for (const m of result.matches ?? []) {
+        if (!seenIds.has(m.id) && (m.score ?? 0) >= 0.75) {
+          newMatches.push({ id: m.id, score: m.score ?? 0 });
+          seenIds.add(m.id);
+        }
+      }
+    }
+
+    if (newMatches.length > 0) {
+      const newIds = newMatches.map(m => m.id);
+      const newRows = await env.DB.prepare(
+        `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
+         FROM memories WHERE id IN (${newIds.map(() => '?').join(',')})`
+      ).bind(...newIds).all<{
+        id: string; text: string; domain: string; memory_type: string;
+        sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
+      }>();
+
+      const newScoreMap = new Map(newMatches.map(m => [m.id, m.score]));
+      for (const row of newRows.results ?? []) {
+        const memSigma = deserializeSigma(row.sigma_diagonal);
+        const anchorSim = newScoreMap.get(row.id) ?? 0;
+        const isFileEdit = /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text);
+        if (isFileEdit) continue;
+        activatedExtras.push({
+          id: row.id, text: row.text, domain: row.domain, type: row.memory_type,
+          sigma: memSigma, primaryScore: anchorSim, score: anchorSim,
+          vector: [], contradiction: row.contradiction_flag === 1,
+          fresh: false, isFileEdit: false, activated: true,
+        } as any);
+      }
+      activatedExtras.sort((a, b) => b.score - a.score);
+    }
+  }
+
+  // Direct top-K + up to 2 best activated associations appended
   const top = scored.slice(0, topK);
 
+  // Append up to 2 activated associations (one-hop neighbors not in direct results)
+  top.push(...activatedExtras.slice(0, 2));
+
   // De-biasing: surface one high-value contradiction that got penalty-suppressed
-  const suppressed = scored.slice(topK).find(c => c.contradiction && c.primaryScore > 0.7);
+  const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
   if (suppressed) top.push(suppressed);
 
-  // Sharpen accessed memories — widen sigma if contradicted, adaptive floor by domain size
+  // Sharpen accessed memories
   const now = Math.floor(Date.now() / 1000);
   for (const mem of top) {
     const domSize = domainSizeMap.get(mem.domain) ?? 10;
@@ -305,6 +359,7 @@ async function retrieve(
     text: m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text,
     domain: m.domain,
     type: m.type,
+    activated: (m as any).activated ?? false,
   }));
 }
 
@@ -968,7 +1023,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
           const mems = results.filter(r => r.domain === d);
           const lines: string[] = [`[DOMAIN: ${d}]`];
           if (summaries[d]) lines.push(`Summary: ${summaries[d]}`);
-          lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`));
+          lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.text}`));
           return lines.join('\n');
         });
         return sections.join('\n\n');
@@ -991,7 +1046,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
       }
 
-      return preamble + results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
+      return preamble + results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.text}`).join('\n');
     }
 
     case 'memory_list': {
