@@ -9,6 +9,7 @@ export interface Env {
   DB: D1Database;
   VECTORIZE: VectorizeIndex;
   KV: KVNamespace;
+  AUTH_TOKEN?: string;
 }
 
 // ── Embedding ─────────────────────────────────────────────────────────────────
@@ -1453,6 +1454,17 @@ export default {
 
     if (request.method !== 'POST') {
       return new Response('Gaussian Memory MCP Server', { status: 200 });
+    }
+
+    // API key auth — skip if AUTH_TOKEN not set (local dev / first deploy)
+    if (env.AUTH_TOKEN) {
+      const authHeader = request.headers.get('Authorization') ?? '';
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+      if (token !== env.AUTH_TOKEN) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401, headers: { 'Content-Type': 'application/json' },
+        });
+      }
     }
 
     const body = await request.json() as any;
