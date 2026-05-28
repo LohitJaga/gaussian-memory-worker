@@ -8,19 +8,25 @@
 - [x] Singleton domain cleanup — memory_cleanup_singletons tool deployed, 131 domains → 48 anchored domains (May 27)
 - [x] Spreading activation — already implemented inline in retrieve() via anchor-based neighborhood scoring (May 27)
 - [x] Stop hook quality fix — JSON bleed filter, min length 20, intra-batch dedup at 0.92 cosine threshold (May 27)
+- [x] Sigma fix — sharpenSigma contradiction-aware (widen ×1.2) + adaptive floor for sparse domains (May 27)
+- [x] Nightly cron fully automated — decay → cross-batch dedup (0.90) → singleton cleanup → summary refresh → identity synthesis (May 27)
+- [x] Domain summary refresh — nightly sweep of top-20 stale domains, 90-day recency filter, better prompt (May 27)
+- [x] Hook injection fix — project-aware keyword routing (gaussian/loreal/leetcode/bayer), dynamic fallback queries from prompt words, threshold 0.85→0.90 (May 27)
 - [ ] Receipt logging — retrieve hook emits privacy-safe receipt (query_hash, result_count, score_buckets, injected=true/false, latency_ms) to local log file
-- [ ] Verify stop hook quality — check tonight's session output, confirm dedup fix worked
+- [ ] True spreading activation — second Vectorize pass on anchor embeddings to pull in out-of-pool neighbors (currently only re-ranks within initial result set)
 
 ## Quality / Signal
 - [ ] Test retrieval quality after a week of L'Oreal sessions — are relevant memories surfacing?
 - [ ] Track semantic memory % weekly (now ~115/2254, target 10-15%)
 - [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface
 - [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — domain rebuild + better scoring should fix
+- [ ] PostToolUse quality gate — skip storing diffs below minimum semantic entropy (one-liners, version bumps, shell commands with no content). 57% cold memories suggests too much low-value episodic capture.
 
 ## Ship Goal — July 1 2026
 BYOC model: users deploy to their own Cloudflare account, pay their own $5/month, own their data.
 Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] `npx gaussian-memory init` — one command: clone worker, wrangler deploy, install MCP config + hooks
+- [ ] Generalize for BYOC: worker URL auto-written to hooks on deploy, keyword list in gaussian.config.json, cold-start 5-question interview seeds CLAUDE.md equivalent for new users. No personal info hardcoded.
 - [ ] Spreading activation graph (differentiator from SuperMemory — they don't have this)
 - [ ] Retrieval receipts — privacy-preserving debug artifact, another differentiator
 - [ ] Cold start onboarding: 5-10 question interview seeds semantic memories on first run
