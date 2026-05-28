@@ -27,6 +27,8 @@ BYOC model: users deploy to their own Cloudflare account, pay their own $5/month
 Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] `npx gaussian-memory init` — one command: clone worker, wrangler deploy, install MCP config + hooks
 - [ ] Generalize for BYOC: worker URL auto-written to hooks on deploy, keyword list in gaussian.config.json, cold-start 5-question interview seeds CLAUDE.md equivalent for new users. No personal info hardcoded.
+- [ ] Hook safety + UX: print exact hook content before installing, require y/N confirmation, add --max-time 2 to all curl calls so Claude never hangs if worker is down
+- [ ] Code quality pass on index.ts before ship — typed interfaces, no silent error swallowing, readable enough for a staff eng to audit in 30s. Currently too long and hackathon-looking.
 - [ ] Spreading activation graph (differentiator from SuperMemory — they don't have this)
 - [ ] Retrieval receipts — privacy-preserving debug artifact, another differentiator
 - [ ] Cold start onboarding: 5-10 question interview seeds semantic memories on first run
