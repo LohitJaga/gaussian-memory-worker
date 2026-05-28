@@ -161,7 +161,7 @@ function distributionalScore(cosineSim: number, querySigma: number, memorySigma:
 
 async function retrieve(
   query: string, domain: string | null, topK: number, env: Env
-): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean }[]> {
+): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   const qvec = await embed(query, env);
 
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
@@ -361,6 +361,7 @@ async function retrieve(
     domain: m.domain,
     type: m.type,
     activated: (m as any).activated ?? false,
+    sigma: parseFloat(meanSigma(m.sigma).toFixed(3)),
   }));
 }
 
@@ -1024,7 +1025,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
           const mems = results.filter(r => r.domain === d);
           const lines: string[] = [`[DOMAIN: ${d}]`];
           if (summaries[d]) lines.push(`Summary: ${summaries[d]}`);
-          lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.text}`));
+          lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : ''} ${r.text}`));
           return lines.join('\n');
         });
         return sections.join('\n\n');
@@ -1047,7 +1048,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
       }
 
-      return preamble + results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.text}`).join('\n');
+      return preamble + results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : ''} ${r.text}`).join('\n');
     }
 
     case 'memory_list': {
@@ -1456,11 +1457,12 @@ export default {
       return new Response('Gaussian Memory MCP Server', { status: 200 });
     }
 
-    // API key auth — skip if AUTH_TOKEN not set (local dev / first deploy)
+    // API key auth — accepts Bearer header OR ?token= query param (for MCP clients that don't support headers)
     if (env.AUTH_TOKEN) {
       const authHeader = request.headers.get('Authorization') ?? '';
-      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-      if (token !== env.AUTH_TOKEN) {
+      const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+      const urlToken = new URL(request.url).searchParams.get('token') ?? '';
+      if (headerToken !== env.AUTH_TOKEN && urlToken !== env.AUTH_TOKEN) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401, headers: { 'Content-Type': 'application/json' },
         });
