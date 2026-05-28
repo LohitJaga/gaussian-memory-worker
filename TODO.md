@@ -21,6 +21,8 @@
 - [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface
 - [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — domain rebuild + better scoring should fix
 - [ ] PostToolUse quality gate — skip storing diffs below minimum semantic entropy (one-liners, version bumps, shell commands with no content). 57% cold memories suggests too much low-value episodic capture.
+- [ ] End-to-end test suite — real test cases covering store → retrieve → sigma update → dedup → decay pipeline. Verify no silent data loss paths.
+- [ ] Safety checks for users — D1 backup strategy, Vectorize consistency checks (D1 row exists but no vector = orphan), graceful degradation if worker is unreachable. No memory loss on deploy or migration.
 
 ## Ship Goal — July 1 2026
 BYOC model: users deploy to their own Cloudflare account, pay their own $5/month, own their data.
@@ -29,7 +31,8 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Generalize for BYOC: worker URL auto-written to hooks on deploy, keyword list in gaussian.config.json, cold-start 5-question interview seeds CLAUDE.md equivalent for new users. No personal info hardcoded.
 - [ ] Hook safety + UX: print exact hook content before installing, require y/N confirmation, add --max-time 2 to all curl calls so Claude never hangs if worker is down
 - [ ] Code quality pass on index.ts before ship — typed interfaces, no silent error swallowing, readable enough for a staff eng to audit in 30s. Currently too long and hackathon-looking.
-- [ ] Spreading activation graph (differentiator from SuperMemory — they don't have this)
+- [x] Spreading activation — true second Vectorize pass from top-3 anchors, activated neighbors marked with ~ in output (May 28)
+- [ ] Spreading activation graph visualization (D3.js, pre-ship demo)
 - [ ] Retrieval receipts — privacy-preserving debug artifact, another differentiator
 - [ ] Cold start onboarding: 5-10 question interview seeds semantic memories on first run
 - [ ] Multi-user isolation via Durable Objects (per-user SQLite, Vectorize filter by user_id)
