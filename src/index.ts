@@ -41,8 +41,9 @@ function isContradiction(newText: string, existingText: string, cosineSim: numbe
 async function storeMemory(
   text: string, memoryType: string, domain: string,
   emotionalIntensity: number, env: Env,
-  precomputedMu?: Float32Array
-): Promise<{ action: string; id: string }> {
+  precomputedMu?: Float32Array,
+  project: string = 'default'
+): Promise<{ action: string; id: string; conflict_candidates?: Array<{ id: string; text: string; score: number }> }> {
   const mu = precomputedMu ?? await embed(text, env);
   const dim = mu.length;
   const sigma = initialSigma(domain, emotionalIntensity, dim);
@@ -53,7 +54,7 @@ async function storeMemory(
   const results = await env.VECTORIZE.query(Array.from(mu), {
     topK: 10,
     returnValues: false,
-    returnMetadata: 'all',
+    returnMetadata: 'indexed',
   });
 
   let bestId: string | null = null;
@@ -62,17 +63,38 @@ async function storeMemory(
   let bestText: string | null = null;
   let bestScore = 0;
 
-  for (const match of results.matches) {
-    // Allow cross-domain contradiction detection but restrict merging to same domain
-    const matchDomain = (match.metadata as any)?.domain as string | undefined;
-    const row = await env.DB.prepare(
-      'SELECT sigma_diagonal, text FROM memories WHERE id = ?'
-    ).bind(match.id).first<{ sigma_diagonal: string; text: string }>();
+  // Batch fetch all candidate rows in one D1 query instead of N sequential selects
+  const candidateIds = results.matches.map(m => m.id);
+  const placeholders = candidateIds.map(() => '?').join(',');
+  const rows = candidateIds.length > 0
+    ? await env.DB.prepare(
+        `SELECT id, sigma_diagonal, text FROM memories WHERE id IN (${placeholders})`
+      ).bind(...candidateIds).all<{ id: string; sigma_diagonal: string; text: string }>()
+    : { results: [] };
+  const rowMap = new Map(rows.results.map(r => [r.id, r]));
 
-    if (!row) continue;
+  // Graphiti-style fast path: exact normalized match skips Bhattacharyya entirely.
+  // Catches same-text re-ingestion with trivial surface differences (case, punctuation).
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+  const normalizedNew = normalize(text);
+  for (const row of rows.results) {
+    if (normalize(row.text) === normalizedNew) {
+      const existingSigma = deserializeSigma(row.sigma_diagonal);
+      const [, newSigma] = kalmanMerge(mu, existingSigma, mu, existingSigma);
+      await env.DB.prepare(
+        'UPDATE memories SET sigma_diagonal = ?, last_accessed = ?, access_count = access_count + 1 WHERE id = ?'
+      ).bind(serializeSigma(newSigma), Math.floor(Date.now() / 1000), row.id).run();
+      return { action: 'merged', id: row.id };
+    }
+  }
+
+  for (const match of results.matches) {
+    const matchDomain = (match.metadata as any)?.domain as string | undefined;
     // Cross-domain dedup: if cosine similarity is very high (>0.97), merge regardless of domain
-    // This prevents near-identical memories from spawning in different domains
     if (matchDomain && matchDomain !== domain && match.score < 0.97) continue;
+
+    const row = rowMap.get(match.id);
+    if (!row) continue;
 
     const existingSigma = deserializeSigma(row.sigma_diagonal);
     const approxDist = 0.5 * (1 - match.score);
@@ -95,10 +117,10 @@ async function storeMemory(
     await env.DB.prepare(`
       INSERT INTO memories
         (id, text, sigma_diagonal, timestamp, last_accessed,
-         access_count, memory_type, domain, emotional_intensity, contradiction_flag)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1)
-    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity).run();
-    await env.VECTORIZE.upsert([{ id, values: Array.from(mu), metadata: { domain, memory_type: memoryType } }]);
+         access_count, memory_type, domain, emotional_intensity, contradiction_flag, project)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
+    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project).run();
+    await env.VECTORIZE.upsert([{ id, values: Array.from(mu), metadata: { domain, memory_type: memoryType, project } }]);
     return { action: 'contradiction', id };
   }
 
@@ -129,17 +151,36 @@ async function storeMemory(
   await env.DB.prepare(`
     INSERT INTO memories
       (id, text, sigma_diagonal, timestamp, last_accessed,
-       access_count, memory_type, domain, emotional_intensity)
-    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
-  `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity).run();
+       access_count, memory_type, domain, emotional_intensity, project)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+  `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project).run();
 
   await env.VECTORIZE.upsert([{
     id,
     values: Array.from(mu),
-    metadata: { domain, memory_type: memoryType },
+    metadata: { domain, memory_type: memoryType, project },
   }]);
 
-  return { action: 'spawned', id };
+  // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
+  const nearMissIds = results.matches
+    .filter(m => m.score > 0.85 && m.id !== id)
+    .map(m => m.id);
+
+  let conflict_candidates: Array<{ id: string; text: string; score: number }> | undefined;
+  if (nearMissIds.length > 0) {
+    const placeholders = nearMissIds.map(() => '?').join(',');
+    const nearRows = await env.DB.prepare(
+      `SELECT id, text FROM memories WHERE id IN (${placeholders})`
+    ).bind(...nearMissIds).all<{ id: string; text: string }>();
+    const scoreMap = new Map(results.matches.map(m => [m.id, m.score]));
+    conflict_candidates = nearRows.results.map(r => ({
+      id: r.id,
+      text: r.text.slice(0, 100),
+      score: scoreMap.get(r.id) ?? 0,
+    }));
+  }
+
+  return { action: 'spawned', id, conflict_candidates };
 }
 
 function dotProduct(a: number[], b: number[]): number {
@@ -160,7 +201,7 @@ function distributionalScore(cosineSim: number, querySigma: number, memorySigma:
 }
 
 async function retrieve(
-  query: string, domain: string | null, topK: number, env: Env
+  query: string, domain: string | null, topK: number, env: Env, project: string = 'default'
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   const qvec = await embed(query, env);
 
@@ -187,7 +228,8 @@ async function retrieve(
   }
 
   // Stage 2: Vector search, optionally filtered to active domains
-  const queryOpts: any = { topK: topK * 2, returnValues: true, returnMetadata: 'all' };
+  // topK * 4 to compensate for project filter reducing D1 candidates post-fetch
+  const queryOpts: any = { topK: topK * 4, returnValues: true, returnMetadata: 'indexed' };
   if (activeDomains && activeDomains.length > 0) {
     queryOpts.filter = activeDomains.length === 1
       ? { domain: activeDomains[0] }
@@ -198,7 +240,7 @@ async function retrieve(
   // Fallback: if domain filter gave too few results, try global search
   if (activeDomains && (vecResults.matches?.length ?? 0) < topK) {
     vecResults = await env.VECTORIZE.query(Array.from(qvec), {
-      topK: topK * 3, returnValues: true, returnMetadata: 'all',
+      topK: topK * 3, returnValues: true, returnMetadata: 'indexed',
     });
   }
 
@@ -208,10 +250,11 @@ async function retrieve(
 
   const ids = results.matches.map(m => m.id);
   const placeholders = ids.map(() => '?').join(',');
+  // Filter by current project + legacy 'default' bucket so old untagged memories still surface
   const rows = await env.DB.prepare(
     `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-     FROM memories WHERE id IN (${placeholders})`
-  ).bind(...ids).all<{
+     FROM memories WHERE id IN (${placeholders}) AND (project = ? OR project = 'default')`
+  ).bind(...ids, project).all<{
     id: string; text: string; domain: string; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
   }>();
@@ -294,7 +337,7 @@ async function retrieve(
 
   if (activationAnchors.length > 0) {
     const neighborQueries = activationAnchors.map(anchor =>
-      env.VECTORIZE.query(anchor.vector, { topK: 6, returnValues: false, returnMetadata: 'all' })
+      env.VECTORIZE.query(anchor.vector, { topK: 6, returnValues: false, returnMetadata: 'indexed' })
     );
     const neighborResults = await Promise.all(neighborQueries);
 
@@ -355,9 +398,21 @@ async function retrieve(
     ).bind(now, serializeSigma(newSigma), mem.id).run();
   }
 
+  // Check memory_relations: mark superseded memories so caller knows they've been replaced
+  const topIds = top.map(m => m.id);
+  const supersededSet = new Set<string>();
+  if (topIds.length > 0) {
+    const relRows = await env.DB.prepare(
+      `SELECT to_id FROM memory_relations WHERE relation_type = 'supersedes' AND to_id IN (${topIds.map(() => '?').join(',')})`
+    ).bind(...topIds).all<{ to_id: string }>();
+    (relRows.results ?? []).forEach(r => supersededSet.add(r.to_id));
+  }
+
   return top.map(m => ({
     score: m.score,
-    text: m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text,
+    text: supersededSet.has(m.id)
+      ? `[SUPERSEDED] ${m.text}`
+      : m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text,
     domain: m.domain,
     type: m.type,
     activated: (m as any).activated ?? false,
@@ -366,16 +421,25 @@ async function retrieve(
 }
 
 async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const SIXTY_DAYS = 60 * 86400;
+
   const rows = await env.DB.prepare(
-    'SELECT id, sigma_diagonal FROM memories'
-  ).all<{ id: string; sigma_diagonal: string }>();
+    'SELECT id, sigma_diagonal, access_count, timestamp FROM memories'
+  ).all<{ id: string; sigma_diagonal: string; access_count: number; timestamp: number }>();
 
   let decayed = 0, pruned = 0;
   const updateStmts: D1PreparedStatement[] = [];
   const pruneIds: string[] = [];
 
   for (const row of rows.results ?? []) {
-    const sigma = decaySigma(deserializeSigma(row.sigma_diagonal));
+    let sigma = decaySigma(deserializeSigma(row.sigma_diagonal));
+    // Accelerated decay: cold memories older than 60 days decay 1.5× faster —
+    // gets dead weight to pruning threshold without touching accessed memories
+    const isOld = (nowSec - (row.timestamp ?? 0)) > SIXTY_DAYS;
+    if ((row.access_count ?? 0) === 0 && isOld) {
+      sigma = decaySigma(sigma); // apply decay twice = 1.5× effective rate
+    }
     if (meanSigma(sigma) > 2.0) {
       pruneIds.push(row.id);
       pruned++;
@@ -403,6 +467,141 @@ async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number 
   if (pruneIds.length) await env.VECTORIZE.deleteByIds(pruneIds);
 
   return { decayed, pruned };
+}
+
+// Nightly domain rebuild — batch-10 GLM classification, time-budget guarded.
+// Processes up to rowLimit memories per run using KV offset for resumption.
+// At 2000 rows/night with 10-per-GLM-call: ~200 calls × 1.5s = 5 min, full cycle in ~4 nights.
+async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number): Promise<void> {
+  const start = Date.now();
+  await ensureDomainColumns(env);
+
+  const offsetRaw = await env.KV.get('REBUILD_OFFSET');
+  if (offsetRaw === null) {
+    await env.DB.prepare('DELETE FROM domain_anchors').run();
+  }
+  const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+
+  const rows = await env.DB.prepare(
+    'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
+  ).bind(rowLimit, offset).all<{ id: string; text: string; memory_type: string }>();
+
+  const batch = rows.results ?? [];
+  if (!batch.length) {
+    await env.KV.delete('REBUILD_OFFSET');
+    return;
+  }
+
+  const mus = await batchEmbed(batch.map(r => r.text), env);
+
+  const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
+    .all<{ name: string }>()).results?.map(r => r.name) ?? [];
+  const canCreate = existingDomains.length < 50;
+
+  const GROUP = 10;
+  const domainAssignments: string[] = new Array(batch.length).fill('general');
+
+  for (let g = 0; g < batch.length; g += GROUP) {
+    if (Date.now() - start > timeBudgetMs) break; // stop before wall-clock limit
+    const group = batch.slice(g, g + GROUP);
+    const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
+    const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+      messages: [
+        {
+          role: 'system',
+          content: `Classify each memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+        },
+        { role: 'user', content: numbered },
+      ],
+      max_tokens: 120,
+    }) as any;
+
+    const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+    const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
+    try {
+      const match = raw.match(/\[[\s\S]*?\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]) as string[];
+        for (let j = 0; j < group.length && j < parsed.length; j++) {
+          const d = (parsed[j] ?? '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
+          if (d.length >= 2) {
+            domainAssignments[g + j] = d;
+            if (!existingDomains.includes(d) && existingDomains.length < 50) existingDomains.push(d);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Batch D1 updates + Vectorize upserts + centroid accumulation
+  const d1Updates = batch.map((row, i) =>
+    env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(domainAssignments[i], row.id)
+  );
+  for (let i = 0; i < d1Updates.length; i += 500) {
+    await env.DB.batch(d1Updates.slice(i, i + 500));
+  }
+  await env.VECTORIZE.upsert(batch.map((row, i) => ({
+    id: row.id, values: Array.from(mus[i]),
+    metadata: { domain: domainAssignments[i], memory_type: row.memory_type },
+  })));
+
+  const centroidAccum = new Map<string, { sum: number[]; count: number }>();
+  for (let i = 0; i < batch.length; i++) {
+    const domain = domainAssignments[i];
+    const acc = centroidAccum.get(domain) ?? { sum: new Array(mus[i].length).fill(0), count: 0 };
+    mus[i].forEach((v, j) => { acc.sum[j] = (acc.sum[j] ?? 0) + v; });
+    acc.count++;
+    centroidAccum.set(domain, acc);
+  }
+  for (const [domain, { sum, count }] of centroidAccum) {
+    const existing = await env.DB.prepare(
+      'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
+    ).bind(domain).first<{ embedding: string; memory_count: number }>();
+    if (!existing) {
+      const total = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+      if ((total?.n ?? 0) < 50) {
+        const norm = Math.sqrt(sum.reduce((s, v) => s + v * v, 0));
+        await env.DB.prepare(
+          'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, ?, 0)'
+        ).bind(domain, JSON.stringify(sum.map(v => v / (norm || 1))), count).run();
+      }
+    } else {
+      const n = existing.memory_count ?? 0;
+      const old: number[] = JSON.parse(existing.embedding);
+      const updated = old.map((v, j) => (v * n + (sum[j] ?? 0)) / (n + count));
+      const norm = Math.sqrt(updated.reduce((s, v) => s + v * v, 0));
+      await env.DB.prepare(
+        'UPDATE domain_anchors SET embedding = ?, memory_count = ? WHERE name = ?'
+      ).bind(JSON.stringify(updated.map(v => v / (norm || 1))), n + count, domain).run();
+    }
+  }
+
+  await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
+}
+
+// Prune low-signal junk: cold episodic memories that are short, old, and never accessed.
+// Catches tool artifacts (git ops, file refs) and chat filler that slipped past SKIP rules.
+// Conservative criteria: all four must be true to avoid deleting real short facts.
+async function pruneJunkMemories(env: Env): Promise<number> {
+  const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400; // older than 30 days
+  const rows = await env.DB.prepare(`
+    SELECT id FROM memories
+    WHERE access_count = 0
+      AND memory_type = 'episodic'
+      AND length(text) < 80
+      AND timestamp < ?
+  `).bind(cutoff).all<{ id: string }>();
+
+  const ids = (rows.results ?? []).map(r => r.id);
+  if (!ids.length) return 0;
+
+  const CHUNK = 500;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    await env.DB.batch(chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)));
+    await env.VECTORIZE.deleteByIds(chunk);
+  }
+  return ids.length;
 }
 
 async function deduplicateRecentMemories(env: Env, windowSec = 86400, threshold = 0.90): Promise<string> {
@@ -440,6 +639,46 @@ async function deduplicateRecentMemories(env: Env, windowSec = 86400, threshold 
   }
   await env.VECTORIZE.deleteByIds(toDelete);
   return `Deduped ${toDelete.length} duplicate memories from last 24h.`;
+}
+
+// Daily cold dedup: checks 500 oldest never-accessed memories against full corpus.
+// Higher threshold (0.93) than the daily 24h pass (0.90) — conservative to avoid
+// false-positives on short memories. Runs oldest-first so domain-bleeding duplicates
+// from weeks ago get hit immediately rather than waiting for a full cycle.
+async function deduplicateColdMemories(env: Env): Promise<string> {
+  const rows = await env.DB.prepare(
+    'SELECT id, text FROM memories WHERE access_count = 0 ORDER BY timestamp ASC LIMIT 500'
+  ).all<{ id: string; text: string }>();
+
+  const cold = rows.results ?? [];
+  if (!cold.length) return 'No cold memories to dedup.';
+
+  const mus = await batchEmbed(cold.map(r => r.text), env);
+  const toDelete: string[] = [];
+  const deleted = new Set<string>();
+
+  for (let i = 0; i < cold.length; i++) {
+    if (deleted.has(cold[i].id)) continue;
+    const results = await env.VECTORIZE.query(mus[i], { topK: 3, returnMetadata: 'indexed' });
+    for (const match of results.matches ?? []) {
+      if (match.id !== cold[i].id && (match.score ?? 0) >= 0.93 && !deleted.has(cold[i].id)) {
+        toDelete.push(cold[i].id);
+        deleted.add(cold[i].id);
+        break;
+      }
+    }
+  }
+
+  if (!toDelete.length) return 'No cold duplicates found.';
+
+  const CHUNK = 500;
+  for (let i = 0; i < toDelete.length; i += CHUNK) {
+    await env.DB.batch(toDelete.slice(i, i + CHUNK).map(id =>
+      env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)
+    ));
+  }
+  await env.VECTORIZE.deleteByIds(toDelete);
+  return `Cold dedup: removed ${toDelete.length} duplicates from oldest cold memories.`;
 }
 
 async function cleanupSingletons(env: Env, minCount = 3): Promise<string> {
@@ -550,7 +789,7 @@ async function synthesizeIdentityProfile(env: Env): Promise<void> {
   const facts = (rows.results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+  const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
     messages: [
       {
         role: 'system',
@@ -672,25 +911,37 @@ async function classifyDomainWithLlama(text: string, env: Env, precomputedMu?: F
   const rows = await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid').all<{ name: string }>();
   const existing = (rows.results ?? []).map(r => r.name);
 
-  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+  const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
     messages: [
       {
         role: 'system',
-        content: `Classify this memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words (e.g. "gaussian-memory-dev", "loreal-internship", "stats-coursework", "career-goals", "personal-life", "cloudflare-dev", "bayer-research").\nStrongly prefer existing domains — only create a new one if NONE of the existing domains reasonably fit. Broad domains are better than narrow ones. Keep total domain count small.\nExisting domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}\nReturn ONLY JSON: {"domain":"name"}`,
+        content: `You are a memory classifier. Assign this memory to a semantic domain.
+
+RULES (follow strictly):
+1. ALWAYS pick from the existing domain list if ANY of them reasonably fits — even loosely.
+2. Only create a new domain if the memory is completely unrelated to ALL existing domains.
+3. New domain names must be 2-4 lowercase hyphenated words. NO single words. NO verbs. NO leading hyphens. NO punctuation. Examples: "gaussian-memory-dev", "loreal-internship", "career-goals".
+4. Never output a domain that starts with "-" or contains uppercase letters or spaces.
+5. When in doubt, pick the closest existing domain.
+
+Existing domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}
+
+Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
       },
       { role: 'user', content: text.slice(0, 300) },
     ],
-    max_tokens: 25,
+    max_tokens: 30,
   }) as any;
 
-  const raw = (result?.response ?? '').trim();
+  const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+  const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
   try {
     const match = raw.match(/\{[^}]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]);
       if (parsed.domain && typeof parsed.domain === 'string') {
         const clean = parsed.domain.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
-        if (clean.length >= 2) return clean;
+        if (clean.length >= 2 && !clean.startsWith('-')) return clean;
       }
     }
   } catch {}
@@ -765,9 +1016,9 @@ async function refreshDomainSummary(domainName: string, newCount: number, env: E
   const facts = ((fallback ?? rows).results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+  const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
     messages: [
-      { role: 'system', content: 'Summarize what this person is working on and their preferences in this area. 2 sentences, specific and factual. No speculation or preamble.' },
+      { role: 'system', content: `Summarize what this person knows, does, or prefers specifically in the "${domainName}" domain. Focus only on what distinguishes this domain from others. 2 sentences, specific and factual. No speculation or preamble.` },
       { role: 'user', content: facts },
     ],
     max_tokens: 120,
@@ -804,7 +1055,7 @@ function inferTypeAndIntensity(text: string): { memory_type: string; emotional_i
 const TOOLS = [
   {
     name: 'memory_store',
-    description: 'Store a memory with explicit domain and type.',
+    description: 'Store a memory with explicit domain and type. Pass topic_key to upsert by logical key — same key updates in place instead of spawning a duplicate. revision_count tracks how many times a keyed memory has been revised.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -812,6 +1063,8 @@ const TOOLS = [
         domain: { type: 'string', default: 'general' },
         memory_type: { type: 'string', default: 'episodic' },
         emotional_intensity: { type: 'number', default: 0.0 },
+        topic_key: { type: 'string' },
+        project: { type: 'string' },
       },
       required: ['text'],
     },
@@ -873,6 +1126,48 @@ const TOOLS = [
     name: 'memory_stats',
     description: 'System health: total memories, domain/type breakdown, sigma distribution, access heat.',
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'memory_orphan_check',
+    description: 'Detect D1 memories with no Vectorize vector (silent data loss). Pass repair=true to re-embed and fix orphans.',
+    inputSchema: {
+      type: 'object',
+      properties: { repair: { type: 'boolean', default: false } },
+    },
+  },
+  {
+    name: 'memory_judge',
+    description: 'Judge relationships between a memory and its nearest neighbours. Returns supersedes/conflicts_with/compatible/extends verdicts and stores them in memory_relations. Pass memory_id to judge one memory; omit to auto-judge all flagged contradictions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        memory_id: { type: 'string' },
+        top_k: { type: 'number', default: 5 },
+      },
+    },
+  },
+  {
+    name: 'memory_capture_passive',
+    description: 'Parse structured notes and bulk-store each item as a memory. Looks for sections like "## Key Learnings:", "## Decisions:", "## Problems Solved:" and stores each bullet. Ideal for end-of-session notes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string' },
+        project: { type: 'string' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'memory_timeline',
+    description: 'Chronological view of memories in a domain — shows how knowledge evolved over time, sigma trajectory, and any supersede/conflict markers. Pass domain to scope it; omit for a cross-domain timeline of the most-accessed memories.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string' },
+        limit: { type: 'number', default: 20 },
+      },
+    },
   },
   {
     name: 'memory_delete',
@@ -947,11 +1242,45 @@ const TOOLS = [
 async function handleToolCall(name: string, args: any, env: Env): Promise<string> {
   switch (name) {
     case 'memory_store': {
-      const { action, id } = await storeMemory(
+      const topicKey = args.topic_key as string | undefined;
+      const project = (args.project as string) ?? 'default';
+      const now = Math.floor(Date.now() / 1000);
+
+      // topic_key upsert: if a memory with this key exists, update in place
+      if (topicKey) {
+        const existing = await env.DB.prepare(
+          'SELECT id, revision_count, domain, memory_type FROM memories WHERE topic_key = ? AND (project = ? OR project = \'default\') LIMIT 1'
+        ).bind(topicKey, project).first<{ id: string; revision_count: number; domain: string; memory_type: string }>();
+
+        if (existing) {
+          const mu = await embed(args.text, env);
+          const revisions = (existing.revision_count ?? 0) + 1;
+          await env.DB.prepare(
+            'UPDATE memories SET text = ?, last_accessed = ?, access_count = access_count + 1, revision_count = ? WHERE id = ?'
+          ).bind(args.text, now, revisions, existing.id).run();
+          await env.VECTORIZE.upsert([{
+            id: existing.id, values: Array.from(mu),
+            metadata: { domain: existing.domain, memory_type: existing.memory_type, project },
+          }]);
+          return `REVISED (r${revisions}): '${args.text.slice(0, 60)}' topic_key='${topicKey}' (id=${existing.id.slice(0, 8)})`;
+        }
+      }
+
+      // No topic_key or no existing match — normal store path
+      const { action, id, conflict_candidates } = await storeMemory(
         args.text, args.memory_type ?? 'episodic',
-        args.domain ?? 'general', args.emotional_intensity ?? 0.0, env
+        args.domain ?? 'general', args.emotional_intensity ?? 0.0, env,
+        undefined, project
       );
-      return `${action.toUpperCase()}: '${args.text.slice(0, 60)}' in domain='${args.domain ?? 'general'}' (id=${id.slice(0, 8)})`;
+
+      // Persist topic_key on the new memory if provided
+      if (topicKey && action === 'spawned') {
+        await env.DB.prepare('UPDATE memories SET topic_key = ? WHERE id = ?').bind(topicKey, id).run();
+      }
+
+      let out = `${action.toUpperCase()}: '${args.text.slice(0, 60)}' in domain='${args.domain ?? 'general'}'${topicKey ? ` topic_key='${topicKey}'` : ''} (id=${id.slice(0, 8)})`;
+      if (conflict_candidates?.length) out += `\nconflict_candidates: ${JSON.stringify(conflict_candidates)}`;
+      return out;
     }
 
     case 'memory_auto_store': {
@@ -959,13 +1288,17 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       const domain = await classifyDomainWithLlama(args.text, env, mu);
       const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(args.text);
       const emotional_intensity = Math.max(args.emotional_intensity ?? 0.0, inferred);
-      const { action, id } = await storeMemory(
-        args.text, memory_type, domain, emotional_intensity, env, mu
+      const { action, id, conflict_candidates } = await storeMemory(
+        args.text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default'
       );
       if (action === 'spawned') {
         await updateDomainCentroid(domain, mu, env).catch(() => {});
       }
-      return `${action.toUpperCase()}: '${args.text.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
+      let out = `${action.toUpperCase()}: '${args.text.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
+      if (conflict_candidates?.length) {
+        out += `\nconflict_candidates: ${JSON.stringify(conflict_candidates)}`;
+      }
+      return out;
     }
 
     case 'memory_store_diff': {
@@ -978,14 +1311,30 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       } else if (args.file_path || args.new_string) {
         const filePath = (args.file_path as string) ?? '';
         const file = filePath.split('/').pop() ?? 'unknown';
-        const project = filePath.match(/\/([^/]+)\/(?:src|lib|app)\//)?.[1] ?? '';
+        const projectFromPath = filePath.match(/\/([^/]+)\/(?:src|lib|app)\//)?.[1] ?? '';
         const oldSnip = ((args.old_string as string) ?? '').trim().replace(/\s+/g, ' ').slice(0, 150);
         const newSnip = ((args.new_string as string) ?? '').trim().replace(/\s+/g, ' ').slice(0, 150);
-        diffContext = `File: ${project ? project + '/' : ''}${file}\nBefore: ${oldSnip}\nAfter: ${newSnip}`;
+        diffContext = `File: ${projectFromPath ? projectFromPath + '/' : ''}${file}\nBefore: ${oldSnip}\nAfter: ${newSnip}`;
       }
       if (!diffContext) return 'SKIP: no diff context provided';
 
+      // Semantic entropy gate: skip diffs where old and new are mechanically identical
+      // after stripping digits, punctuation, whitespace — catches version bumps, count
+      // changes, semicolon fixes, blank line additions that have zero semantic content.
+      if (args.old_string != null && args.new_string != null) {
+        const strip = (s: string) => s.replace(/[\d\s.,;:'"()\[\]{}\-_=+!?@#$%^&*|\\/<>]/g, '').toLowerCase();
+        const strippedOld = strip(args.old_string as string);
+        const strippedNew = strip(args.new_string as string);
+        // Only skip if both sides have content that strips to the same thing —
+        // avoids skipping new-file writes where old is genuinely empty
+        if (strippedOld === strippedNew && (strippedOld.length > 0 || (args.old_string as string).length > 0)) {
+          return 'SKIP: trivial mechanical change (digits/punctuation only)';
+        }
+      }
+
+
       // Ask Llama to describe the change semantically in one sentence
+      // Llama 3.1 8B for diff description — GLM fails on short/minimal diffs (returns {})
       const descResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
         messages: [
           {
@@ -998,17 +1347,17 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       }) as any;
 
       const description = ((descResult?.response ?? '') as string).trim();
-      if (!description || description.length < 10) return 'SKIP: Llama returned empty description';
+      if (!description || description.length < 10) return 'SKIP: model returned empty description';
 
       const mu = await embed(description, env);
       const domain = await classifyDomainWithLlama(description, env, mu);
-      const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu);
+      const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu, args.project ?? 'default');
       if (action === 'spawned') await updateDomainCentroid(domain, mu, env).catch(() => {});
       return `${action.toUpperCase()}: '${description.slice(0, 60)}' -> (${domain}/episodic, id=${id.slice(0, 8)})`;
     }
 
     case 'memory_retrieve': {
-      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env);
+      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default');
       if (!results.length) return 'No memories found.';
 
       // Fetch domain summaries for domains present in results
@@ -1024,7 +1373,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         const sections = domainsHit.map(d => {
           const mems = results.filter(r => r.domain === d);
           const lines: string[] = [`[DOMAIN: ${d}]`];
-          if (summaries[d]) lines.push(`Summary: ${summaries[d]}`);
+          if (summaries[d] && mems.length >= 2) lines.push(`Summary: ${summaries[d]}`);
           lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : ''} ${r.text}`));
           return lines.join('\n');
         });
@@ -1037,7 +1386,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
           && results[0].score > 0.85
           && (results[0].score - results[1].score) < 0.04) {
         const blendInput = results.slice(0, 3).map(r => r.text).join('\n');
-        const blend = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        const blend = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
           messages: [
             { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
             { role: 'user', content: blendInput },
@@ -1063,6 +1412,314 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         const sigma = deserializeSigma(r.sigma_diagonal);
         return `[${r.id.slice(0, 8)}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 60)}`;
       }).join('\n');
+    }
+
+    case 'memory_orphan_check': {
+      const repair = args.repair === true;
+      // Fetch all D1 IDs + text in batches
+      const allRows = await env.DB.prepare(
+        'SELECT id, text, domain, memory_type FROM memories ORDER BY rowid'
+      ).all<{ id: string; text: string; domain: string; memory_type: string }>();
+
+      const rows = allRows.results ?? [];
+      if (!rows.length) return 'No memories found.';
+
+      // Check Vectorize in batches of 20 (API hard limit for getByIds)
+      const CHUNK = 20;
+      const orphanIds: string[] = [];
+      const orphanRows: typeof rows = [];
+
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK);
+        const ids = chunk.map(r => r.id);
+        const vecResult = await (env.VECTORIZE as any).getByIds(ids);
+        const foundIds = new Set((vecResult ?? []).map((v: any) => v.id));
+        for (const row of chunk) {
+          if (!foundIds.has(row.id)) {
+            orphanIds.push(row.id);
+            orphanRows.push(row);
+          }
+        }
+      }
+
+      if (!orphanIds.length) return `No orphans found. All ${rows.length} D1 rows have Vectorize vectors.`;
+
+      if (!repair) {
+        return `Found ${orphanIds.length} orphans (D1 rows with no Vectorize vector) out of ${rows.length} total.\nFirst 5: ${orphanIds.slice(0, 5).join(', ')}\nCall with repair=true to re-embed and fix.`;
+      }
+
+      // Repair: re-embed orphans and upsert into Vectorize
+      let fixed = 0;
+      const EMBED_BATCH = 20;
+      for (let i = 0; i < orphanRows.length; i += EMBED_BATCH) {
+        const batch = orphanRows.slice(i, i + EMBED_BATCH);
+        const mus = await batchEmbed(batch.map(r => r.text), env);
+        await env.VECTORIZE.upsert(batch.map((row, j) => ({
+          id: row.id,
+          values: Array.from(mus[j]),
+          metadata: { domain: row.domain, memory_type: row.memory_type },
+        })));
+        fixed += batch.length;
+      }
+      return `Repaired ${fixed} orphans — re-embedded and upserted to Vectorize.`;
+    }
+
+    case 'memory_capture_passive': {
+      const rawText = args.text as string;
+      const project = (args.project as string) ?? 'default';
+
+      // Section headers that indicate storable content
+      const SECTION_PATTERNS = [
+        /^#{1,3}\s*(key\s*learnings?|learnings?)/i,
+        /^#{1,3}\s*(decisions?(\s+made)?)/i,
+        /^#{1,3}\s*(problems?\s*(solved|fixed|resolved))/i,
+        /^#{1,3}\s*(insights?|takeaways?)/i,
+        /^#{1,3}\s*(todo|action\s*items?|next\s*steps?)/i,
+        /^#{1,3}\s*(context|notes?|summary)/i,
+      ];
+
+      // Parse: split into lines, find section headers, collect bullets under them
+      const lines = rawText.split('\n');
+      const items: { text: string; type: string }[] = [];
+      let inSection = false;
+      let sectionType = 'episodic';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Check if this line is a matching section header
+        if (SECTION_PATTERNS.some(p => p.test(trimmed))) {
+          inSection = true;
+          // Infer memory type from section name
+          if (/preference|style|habit|always|never/i.test(trimmed)) sectionType = 'procedural';
+          else if (/belief|value|insight|principle/i.test(trimmed)) sectionType = 'semantic';
+          else sectionType = 'episodic';
+          continue;
+        }
+
+        // Non-matching header resets section context
+        if (/^#{1,3}\s/.test(trimmed)) { inSection = false; continue; }
+
+        if (!inSection) continue;
+
+        // Collect bullet points and numbered list items
+        const bullet = trimmed.replace(/^[-*+•]\s+/, '').replace(/^\d+[.)]\s+/, '').trim();
+        if (bullet.length >= 20 && bullet.split(' ').length >= 4) {
+          items.push({ text: bullet, type: sectionType });
+        }
+      }
+
+      if (!items.length) return 'No storable items found. Use headers like "## Key Learnings:", "## Decisions:", "## Problems Solved:" with bullet points underneath.';
+
+      // Embed + classify + store each item
+      let stored = 0, skipped = 0;
+      const storedMus: Float32Array[] = [];
+
+      for (const item of items.slice(0, 20)) { // cap at 20 per call
+        const mu = await embed(item.text, env);
+        const tooSimilar = storedMus.some(prev => dotProduct(Array.from(mu), Array.from(prev)) > 0.92);
+        if (tooSimilar) { skipped++; continue; }
+
+        const domain = await classifyDomainWithLlama(item.text, env, mu);
+        const { memory_type: inferred, emotional_intensity } = inferTypeAndIntensity(item.text);
+        const memType = item.type !== 'episodic' ? item.type : inferred;
+        const { action } = await storeMemory(item.text, memType, domain, emotional_intensity, env, mu, project);
+        if (action === 'spawned') {
+          await updateDomainCentroid(domain, mu, env).catch(() => {});
+          storedMus.push(mu);
+          stored++;
+        } else {
+          skipped++;
+        }
+      }
+
+      return `Captured ${stored} memories from structured notes (${skipped} skipped — duplicates or intra-batch similar).`;
+    }
+
+    case 'memory_timeline': {
+      const limit = Math.min((args.limit as number) ?? 20, 50);
+      const domain = args.domain as string | undefined;
+
+      const rows = await env.DB.prepare(
+        domain
+          ? `SELECT id, text, domain, memory_type, sigma_diagonal, access_count,
+                    contradiction_flag, timestamp
+             FROM memories WHERE domain = ?
+             ORDER BY timestamp ASC LIMIT ?`
+          : `SELECT id, text, domain, memory_type, sigma_diagonal, access_count,
+                    contradiction_flag, timestamp
+             FROM memories
+             ORDER BY access_count DESC, timestamp ASC LIMIT ?`
+      ).bind(...(domain ? [domain, limit] : [limit]))
+       .all<{ id: string; text: string; domain: string; memory_type: string;
+              sigma_diagonal: string; access_count: number;
+              contradiction_flag: number; timestamp: number }>();
+
+      const memories = rows.results ?? [];
+      if (!memories.length) return domain ? `No memories in domain "${domain}".` : 'No memories found.';
+
+      // Fetch supersede relations for these IDs in one query
+      const ids = memories.map(m => m.id);
+      const relRows = await env.DB.prepare(
+        `SELECT from_id, to_id, relation_type FROM memory_relations
+         WHERE relation_type IN ('supersedes','conflicts_with')
+           AND (from_id IN (${ids.map(() => '?').join(',')})
+             OR to_id IN (${ids.map(() => '?').join(',')}))`
+      ).bind(...ids, ...ids).all<{ from_id: string; to_id: string; relation_type: string }>();
+
+      const supersededIds = new Set(
+        (relRows.results ?? [])
+          .filter(r => r.relation_type === 'supersedes')
+          .map(r => r.to_id)
+      );
+      const conflictIds = new Set(
+        (relRows.results ?? []).flatMap(r =>
+          r.relation_type === 'conflicts_with' ? [r.from_id, r.to_id] : []
+        )
+      );
+
+      // Group by month for readability
+      const groups = new Map<string, typeof memories>();
+      for (const m of memories) {
+        const d = new Date((m.timestamp ?? 0) * 1000);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(m);
+      }
+
+      const lines: string[] = [
+        domain ? `TIMELINE: ${domain} (${memories.length} memories)` : `TIMELINE: top ${memories.length} most-accessed memories`,
+        '',
+      ];
+
+      for (const [month, mems] of groups) {
+        lines.push(`── ${month} ──`);
+        for (const m of mems) {
+          const sigma = meanSigma(deserializeSigma(m.sigma_diagonal));
+          const conf = sigma < 0.3 ? '●' : sigma < 0.5 ? '◑' : '○';
+          const marker = supersededIds.has(m.id) ? '[SUPERSEDED] '
+            : conflictIds.has(m.id) ? '[CONFLICT] '
+            : m.contradiction_flag ? '[FLAGGED] '
+            : '';
+          const day = new Date((m.timestamp ?? 0) * 1000).toISOString().slice(0, 10);
+          const accessed = m.access_count > 0 ? ` · ${m.access_count}x` : '';
+          lines.push(`  ${day} ${conf} σ=${sigma.toFixed(2)}${accessed}  ${marker}${m.text}`);
+        }
+        lines.push('');
+      }
+
+      return lines.join('\n').trimEnd();
+    }
+
+    case 'memory_judge': {
+      const topK = (args.top_k as number) ?? 5;
+      const now = Math.floor(Date.now() / 1000);
+
+      // Build candidate list: explicit ID or all unflagged contradiction memories
+      let targets: { id: string; text: string }[] = [];
+      if (args.memory_id) {
+        // Support both full UUIDs and 8-char display prefixes shown in tool output
+        const memId = args.memory_id as string;
+        const isPrefix = memId.length === 8 && !memId.includes('-');
+        const row = isPrefix
+          ? await env.DB.prepare('SELECT id, text FROM memories WHERE id LIKE ?')
+              .bind(memId + '%').first<{ id: string; text: string }>()
+          : await env.DB.prepare('SELECT id, text FROM memories WHERE id = ?')
+              .bind(memId).first<{ id: string; text: string }>();
+        if (!row) return `Not found: ${memId}`;
+        targets = [row];
+      } else {
+        const rows = await env.DB.prepare(
+          'SELECT id, text FROM memories WHERE contradiction_flag = 1 LIMIT 20'
+        ).all<{ id: string; text: string }>();
+        targets = rows.results ?? [];
+        if (!targets.length) return 'No flagged contradictions to judge.';
+      }
+
+      const results: string[] = [];
+
+      for (const target of targets) {
+        // Find nearest neighbours via Vectorize
+        const mu = await embed(target.text, env);
+        const vecResults = await env.VECTORIZE.query(Array.from(mu), {
+          topK: topK + 1, returnValues: false, returnMetadata: 'indexed',
+        });
+
+        const candidateIds = (vecResults.matches ?? [])
+          .filter(m => m.id !== target.id && (m.score ?? 0) >= 0.70)
+          .slice(0, topK)
+          .map(m => m.id);
+
+        if (!candidateIds.length) {
+          results.push(`${target.id.slice(0, 8)}: no candidates above 0.70`);
+          continue;
+        }
+
+        const candRows = await env.DB.prepare(
+          `SELECT id, text FROM memories WHERE id IN (${candidateIds.map(() => '?').join(',')})`
+        ).bind(...candidateIds).all<{ id: string; text: string }>();
+
+        for (const cand of candRows.results ?? []) {
+          // Check if relation already judged
+          const existing = await env.DB.prepare(
+            'SELECT id FROM memory_relations WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)'
+          ).bind(target.id, cand.id, cand.id, target.id).first();
+          if (existing) continue;
+
+          // LLM verdict — Llama 3.3 70B for reliability
+          const judgeResult = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+            messages: [
+              {
+                role: 'system',
+                content: `Compare two memories and return their relationship.
+Verdicts:
+- "supersedes": Memory A is a newer/more accurate version of B (A replaces B)
+- "conflicts_with": A and B make contradictory claims about the same topic
+- "extends": A adds detail to B without contradicting it
+- "compatible": A and B are about different things, no conflict
+
+Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible","confidence":0.0-1.0,"reason":"one sentence"}`,
+              },
+              {
+                role: 'user',
+                content: `Memory A: ${target.text}\nMemory B: ${cand.text}`,
+              },
+            ],
+            max_tokens: 80,
+            temperature: 0,
+          }) as any;
+
+          const rawVVal = judgeResult?.response ?? judgeResult?.choices?.[0]?.message?.content ?? '';
+          const rawV = (typeof rawVVal === 'string' ? rawVVal : JSON.stringify(rawVVal)).trim();
+          let verdict = 'compatible', confidence = 0.5, reason = '';
+          try {
+            const match = rawV.match(/\{[^}]*\}/);
+            if (match) {
+              const parsed = JSON.parse(match[0]);
+              if (['supersedes','conflicts_with','extends','compatible'].includes(parsed.verdict)) {
+                verdict = parsed.verdict;
+                confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0.5));
+                reason = (parsed.reason ?? '').slice(0, 200);
+              }
+            }
+          } catch {}
+
+          await env.DB.prepare(
+            'INSERT INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+          ).bind(crypto.randomUUID(), target.id, cand.id, verdict, confidence, reason, now).run();
+
+          // If supersedes: flag old memory for decay acceleration
+          if (verdict === 'supersedes') {
+            await env.DB.prepare('UPDATE memories SET contradiction_flag = 1 WHERE id = ?')
+              .bind(cand.id).run();
+          }
+
+          results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${verdict} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
+        }
+      }
+
+      return results.length ? results.join('\n') : 'All relations already judged.';
     }
 
     case 'memory_decay': {
@@ -1177,48 +1834,42 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
           return true;
         })
         .join(' | ')
-        .slice(-4000);
+        .slice(0, 60000); // GLM has 131K context — was 4000 for Llama 3.1 8B, now captures full sessions
 
-      const extraction = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+      // Llama 3.3 70B for extraction — GLM fails on complex multi-object JSON with long prompts.
+      // Extraction runs once per session end so cost vs Llama 3.1 8B is negligible.
+      const extraction = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
         messages: [
           {
             role: 'system',
-            content: `Extract memorable facts from this session log for long-term personal memory storage. Prioritize in this order:
+            content: `Extract facts from this session log for long-term memory. Today: ${new Date().toISOString().slice(0, 10)}. Resolve relative dates to ISO 8601.
 
-1. DECISIONS — architectural, career, or project direction choices made and why
-2. PROBLEMS SOLVED — what broke, how it was diagnosed, what fixed it
-3. PROJECT CONTEXT — current state of active work, goals, constraints, blockers
-4. PREFERENCES — stated opinions about tools, methods, working style
+EXTRACT (up to 12 total, prioritized):
+1. Decisions — exact technology/approach chosen and why
+2. Problems solved — what broke, exact fix
+3. Project context — concrete state, named blockers
+4. Preferences — specific tools/methods opinions
 
-Extract up to 4 facts per category (up to 12 total). Quality over quantity — skip a category if nothing meaningful happened.
+RULES:
+- Preserve exact names, numbers, technologies ("GLM-4.7-flash" not "a model")
+- Each fact must stand alone without reading the session
+- Third-person factual sentence only
 
-SKIP ALL of these — do not store them under any circumstances:
-- Raw conversational messages ("ok", "yea", "sure", "what do u think", "can u", "how about")
-- Questions directed at the assistant ("can you verify", "give full summary")
-- Pasted external content (CI output, PR descriptions, error logs, API responses)
-- Generic status ("successfully", "completed", "updated", "done", "it works")
-- Filler and reactions ("lol", "mf", "ig", "tbh", "idk", "bruh")
-- Tool outputs and command results
-- Anything under 15 words that isn't a clear factual statement
+SKIP: vague intent (Wants to/Is considering/Is planning/Is trying), raw chat (ok/yea/lol/ig/tbh/idk), generic status (done/updated/it works), questions, pasted content, anything under 15 words
 
-Each stored fact must be a complete, third-person factual sentence about the person or their work. NOT a question. NOT raw chat.
-
-Classify each fact:
-- "episodic": specific event or session outcome
-- "semantic": belief, value, or personality trait
-- "procedural": preference or working style
-
-Return ONLY a JSON array, no other text.
-Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
+Return ONLY valid JSON array:
+[{"text":"Chose Cloudflare D1 over PlanetScale — zero egress fees, edge-native","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
           },
           { role: 'user', content: filteredLog },
         ],
-        max_tokens: 500,
+        max_tokens: 800,
+        temperature: 0,
       }) as any;
 
       interface ExtractedFact { text: string; type?: string }
       let facts: ExtractedFact[] = [];
-      const raw = extraction?.response?.trim() ?? '';
+      const rawVal = extraction?.response ?? extraction?.choices?.[0]?.message?.content ?? '';
+      const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
       try {
         const match = raw.match(/\[[\s\S]*\]/);
         if (match) {
@@ -1273,7 +1924,7 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
           ? fact.type : null;
         const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
         const memory_type = llmType ?? inferredType;
-        const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu);
+        const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default');
         if (action === 'spawned') {
           await updateDomainCentroid(domain, mu, env).catch(() => {});
           storedMus.push(mu);
@@ -1340,7 +1991,7 @@ Example: [{"text":"Chose Durable Objects over shared D1 for per-user isolation",
         const group = batch.slice(g, g + GROUP);
         const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
 
-        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
           messages: [
             {
               role: 'system',
@@ -1515,30 +2166,13 @@ export default {
 
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    await pruneJunkMemories(env);
     await updateDecay(env);
     await deduplicateRecentMemories(env);
+    await deduplicateColdMemories(env);
     await cleanupSingletons(env, 3);
     await refreshStaleDomainSummaries(env);
-    // One rebuild batch nightly — slowly consolidates singleton domains over time
-    // Reuses same KV offset logic as memory_rebuild_domains tool
-    await ensureDomainColumns(env);
-    const offsetRaw = await env.KV.get('REBUILD_OFFSET');
-    const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
-    const rows = await env.DB.prepare(
-      'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT 30 OFFSET ?'
-    ).bind(offset).all<{ id: string; text: string; memory_type: string }>();
-    if ((rows.results ?? []).length > 0) {
-      const mus = await batchEmbed((rows.results ?? []).map(r => r.text), env);
-      for (let i = 0; i < (rows.results ?? []).length; i++) {
-        const row = (rows.results ?? [])[i];
-        const domain = await classifyDomainWithLlama(row.text, env, mus[i]);
-        await env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(domain, row.id).run();
-        await updateDomainCentroid(domain, mus[i], env).catch(() => {});
-      }
-      await env.KV.put('REBUILD_OFFSET', String(offset + 30));
-    } else {
-      await env.KV.delete('REBUILD_OFFSET');
-    }
+    await cronRebuildBatch(env, 2000, 10 * 60 * 1000);
     await synthesizeIdentityProfile(env);
   },
 };
