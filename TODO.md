@@ -12,17 +12,45 @@
 - [x] Nightly cron fully automated — decay → cross-batch dedup (0.90) → singleton cleanup → summary refresh → identity synthesis (May 27)
 - [x] Domain summary refresh — nightly sweep of top-20 stale domains, 90-day recency filter, better prompt (May 27)
 - [x] Hook injection fix — project-aware keyword routing (gaussian/loreal/leetcode/bayer), dynamic fallback queries from prompt words, threshold 0.85→0.90 (May 27)
-- [ ] Receipt logging — retrieve hook emits privacy-safe receipt (query_hash, result_count, score_buckets, injected=true/false, latency_ms) to local log file
-- [ ] True spreading activation — second Vectorize pass on anchor embeddings to pull in out-of-pool neighbors (currently only re-ranks within initial result set)
+- [x] Receipt logging — see May 29 sprint below
+- [x] True spreading activation — second Vectorize pass from top-3 anchors, ~ markers (May 28)
+
+## ✅ May 29 — Quality + Maintenance Sprint (DONE)
+- [x] GLM-4.7-flash swap — all Llama 3.1 8B calls replaced except memory_store_diff (GLM fails for short-prompt tasks), ~4.7× cheaper on input tokens
+- [x] Stop hook truncation removed — full sessions now captured up to 30K chars via GLM 131K context (was head+tail 4500 char hack)
+- [x] Domain summary threshold guard — summary only shown if ≥2 memories from domain in results (was showing for every domain including 1-memory hits)
+- [x] Domain-specific summary prompt — prompt now includes domain name so summaries stop converging to generic text
+- [x] Per-project isolation — `project` column in D1, Vectorize metadata, all 3 hooks auto-detect git root via `git rev-parse`. Retrieval filters to [current_project, 'default']. Legacy memories stay in 'default' pool and surface as fallback
+- [x] PostToolUse quality gate — (1) Edit/Write: skip new_string < 30 chars, (2) Bash: expanded skip list (git ops, npm/pip install, mkdir/touch/chmod/rm/mv/cp), output < 15 chars skipped, (3) Worker: semantic entropy check strips digits/punctuation, skips if old=new after stripping
+- [x] Exact normalized match fast path in storeMemory — Graphiti-style: before Bhattacharyya, check normalized text equality on Vectorize candidates. Catches re-ingestion with trivial surface diffs, zero extra API calls
+- [x] Nightly junk pruning — `pruneJunkMemories` in cron: cold episodic < 80 chars > 30 days old auto-cleared every night
+- [x] Accelerated decay 1.5× — cold memories (access_count=0, age>60 days) get decaySigma applied twice per cron run. Dead weight hits σ>2.0 pruning threshold ~2× faster
+- [x] Daily cold dedup — `deduplicateColdMemories`: 500 oldest cold memories at 0.93 threshold every night. Oldest-first so domain-bleeding duplicates from weeks ago get hit immediately. Our differentiator vs competitors (all use MD5/exact match only)
+- [x] Cron rebuild 30→2000 rows/night — `cronRebuildBatch` ports batch-10 GLM classification from tool handler. Time-budget guard (10 min). Full reclassify in ~4 nights vs 213 days
+- [x] 49 garbage memories deleted — file ops (.png, .ipynb, git LFS, staged), raw chat filler
+- [x] Timeline fixed — Week 3 was misdated June 2–4, corrected to June 14–20
+- [x] Cold memory R2 archive tier — added to nightly consolidation plan: nightly Llama compress cold σ>1.5 → R2 artifact, drop from D1/Vectorize, lazy retrieval fallback
+- [x] Bug fix: GLM response parsing — added `choices[0].message.content` fallback across all GLM call sites
+- [x] Bug fix: entropy check null safety — `!= null` instead of truthiness so empty old_string doesn't bypass check
+
+## Usability Blockers — fix before Week 2 tools matter
+- [x] Receipt logging — done May 29, see Quality Issues section
+- [x] Orphan check / repair tool — done May 29, see Quality Issues section
+
+## Quality Issues — fix before Week 2
+- [x] Receipt logging — `~/.claude/gaussian-receipts.jsonl`, JSONL per prompt: ts, project, query_hash, topic, latency_ms, injected, results, score_buckets. Async subshell, never blocks injection. Rotates at 500 lines (May 29)
+- [x] Extraction prompt SKIP rules — added vague intent SKIP ("Wants to", "Is considering", "Is planning", etc.), specificity rule (preserve exact names/numbers/technologies), standalone test, aspirational noise rule. Also fixed `.slice(-4000)` → `.slice(0, 60000)` — was silently dropping first 26K chars of every long session at worker level (May 29)
+- [x] Orphan check / repair tool — `memory_orphan_check` tool: getByIds in batches of 20 (Vectorize hard limit), reports count + IDs, repair=true re-embeds and upserts. Found 1 orphan out of 6,431, repaired (May 29)
+- [x] GLM guardrails for memory_store_diff — JSON output format (`{"description":"..."}`) + temperature:0 + fallback raw text. Working. Drops from $0.282/M to $0.060/M input on every PostToolUse call (May 29)
 
 ## Quality / Signal
 - [ ] Test retrieval quality after a week of L'Oreal sessions — are relevant memories surfacing?
 - [ ] Track semantic memory % weekly (now ~115/2254, target 10-15%)
 - [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface
 - [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — domain rebuild + better scoring should fix
-- [ ] PostToolUse quality gate — skip storing diffs below minimum semantic entropy (one-liners, version bumps, shell commands with no content). 57% cold memories suggests too much low-value episodic capture.
+- [x] PostToolUse quality gate — deployed May 29: length filter + expanded bash skip + semantic entropy check + junk pruning cron
 - [ ] End-to-end test suite — real test cases covering store → retrieve → sigma update → dedup → decay pipeline. Verify no silent data loss paths.
-- [ ] Orphan check — detect D1 rows with no corresponding Vectorize entry, surface via memory_stats or a repair tool.
+- [x] Orphan check — `memory_orphan_check` tool deployed May 29
 - [ ] Safety checks for users — D1 backup strategy, Vectorize consistency checks, graceful degradation if worker is unreachable. No memory loss on deploy or migration.
 - [ ] Auth: API key on worker endpoints (check Authorization header against env secret). Currently the worker URL is unauthenticated — anyone who discovers it can read/write/delete all memories. Blocker before sharing URL publicly.
 - [ ] Indirect prompt injection hardening — stop hook captures arbitrary text from sessions; malicious content (e.g. from a website visited) could get stored and later retrieved into context. Add a sanitization pass that strips instruction-like patterns before storage.
@@ -31,20 +59,61 @@
 ## Ship Goal — July 1 2026
 BYOC model: users deploy to their own Cloudflare account, pay their own $5/month, own their data.
 Open source + blog post + one-command setup. Not commercial, not hosted.
-- [ ] `npx gaussian-memory init` — one command: clone worker, wrangler deploy, install MCP config + hooks
-- [ ] Generalize for BYOC: worker URL auto-written to hooks on deploy, keyword list in gaussian.config.json, cold-start 5-question interview seeds CLAUDE.md equivalent for new users. No personal info hardcoded.
-- [ ] Hook safety + UX: print exact hook content before installing, require y/N confirmation, add --max-time 2 to all curl calls so Claude never hangs if worker is down
-- [ ] Code quality pass on index.ts before ship — typed interfaces, no silent error swallowing, readable enough for a staff eng to audit in 30s. Currently too long and hackathon-looking.
-- [x] Spreading activation — true second Vectorize pass from top-3 anchors, activated neighbors marked with ~ in output (May 28)
-- [ ] Spreading activation graph visualization (D3.js, pre-ship demo)
-- [ ] Retrieval receipts — privacy-preserving debug artifact, another differentiator
-- [ ] Cold start onboarding: 5-10 question interview seeds semantic memories on first run
-- [ ] Multi-user isolation via Durable Objects (per-user SQLite, Vectorize filter by user_id)
-- [ ] Auth: API key per user (BYOC done — Bearer token via AUTH_TOKEN worker secret + GAUSSIAN_AUTH_TOKEN env var in hooks)
-- [ ] DO version security (post-BYOC ship): JWT per user (not global API key), strict user_id scoping on all Vectorize queries (missing filter = full leak), rate limiting per DO, admin tools scoped per user, handle DO hibernation state loss
-- [ ] Analytics endpoint `/stats` (already 80% there via memory_stats)
-- [ ] Blog post: "Self-hosted Bayesian memory for Claude Code with spreading activation" — HN + Cloudflare audience
-- [ ] Platform import tool: accept JSON exports from mem0/SuperMemory so users don't lose history when switching
+
+### ✅ Week 1 (May 28) — DONE
+- [x] Batch D1 reads (`WHERE id IN`) — 10 sequential queries → 1 (May 28)
+- [x] Domain filter before sigma deserialization (May 28)
+- [x] `mu` reuse in memory_auto_store — embed once, reuse for classify (May 28)
+- [x] `returnMetadata: 'indexed'` on all 4 Vectorize query paths (May 28)
+- [x] `memory_store` returns conflict candidates on cosine > 0.85 (May 28)
+- [x] Temporal grounding — ISO date injected into Llama extraction prompt (May 28)
+- [x] Spreading activation — true second Vectorize pass from top-3 anchors, ~ markers (May 28)
+
+### Week 2 (June 7–13) — New Tools
+- [x] `memory_judge` — conflicts_with / supersedes / compatible / extends + memory_relations table (D1). LLM verdict via Llama 3.3 70B. Auto-judges all contradiction_flag=1 memories or single ID. Superseded memories marked [SUPERSEDED] at retrieve time. (May 29)
+- [x] `memory_capture_passive` — parses Key Learnings/Decisions/Problems Solved/Insights/Action Items headers + bullets. Intra-batch dedup at 0.92. Section type → memory_type inference. Caps at 20/call. (May 29)
+- [x] `memory_timeline` — chronological view per domain (or top accessed cross-domain). Groups by month, shows date/sigma/access_count/conflict markers. Superseded and conflict memories flagged inline. (May 29)
+- [x] `memory_store` structured params — topic_key upsert (prevents proliferation, same key updates in place) + revision_count tracking. Prefix ID lookup support. D1 migration: topic_key TEXT, revision_count INTEGER. (May 29)
+- [x] Per-project isolation — done May 29, see Quality + Maintenance Sprint
+- [ ] Nightly consolidation — compress cold σ>1.5 memories via Llama, write compressed artifact to R2, drop from D1/Vectorize. Retrieval falls back to R2 cold archive only if live pool scores below threshold. Live pool stays sharp; cold tier grows cheaply with zero egress cost.
+
+### Week 3 (June 14–20) — Advanced + Ship Infra
+- [ ] D1 FTS5 virtual table — migrate 6461 memories, dual-write on store
+- [ ] RRF scoring — merges Vectorize cosine + FTS5 BM25 + recency + access_freq
+- [ ] Multi-hop BFS spreading activation (configurable depth)
+- [ ] `valid_from`/`valid_to` on memories + schema migration
+- [x] PostToolUse quality gate (skip low-entropy diffs — deployed May 29)
+- [ ] Indirect prompt injection hardening (sanitize stop hook input)
+- [ ] Llama classification injection guard (stricter system prompt)
+- [ ] `npx gaussian-memory init` script (wrangler deploy + MCP config + hooks)
+- [x] Generalize retrieval hook — removed all hardcoded project/keyword mappings. Now purely project-name-anchored (git root → Q2/Q3). Works for any project without config. Short messages (<25 chars) use project-anchored Q1 instead of empty-word fallback. No config file needed — new projects auto-detected. (May 29)
+- [ ] Generalize BYOC worker — no hardcoded personal info in wrangler.toml/index.ts, gaussian.config.json for user identity
+
+### Week 4 (June 21–27) — Polish + Docs
+- [ ] index.ts modularization (typed interfaces, split modules)
+- [ ] README (neuroscience angle, competitor table, tagline)
+- [ ] Blog post (outline at Downloads/blog_post_outline.md)
+- [ ] D3 `/viz` endpoint (domain graph + activation overlay)
+- [ ] Belief drift report — "σ=0.2 → σ=0.6 over 3 months"
+- [ ] Decision trails memory type — {decision, context, alternatives, outcome}
+- [ ] Platform import (`npx gaussian-memory import --from mem0`)
+
+### June 28–July 1 — Test + Security Window
+- [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
+- [x] Orphan check (done May 29 — `memory_orphan_check` with repair flag)
+- [ ] Cold start onboarding (5-question interview seeds day 1)
+- [x] Receipt logging (done May 29 — `~/.claude/gaussian-receipts.jsonl`)
+- [ ] Auth hardening (confirm bearer token on all endpoints)
+- [ ] Retrieval quality spot check (3 queries from last week, verify surfacing)
+- [ ] Hook safety + UX (print hook content before install, y/N confirmation)
+
+### Post-ship (July+)
+- [ ] DO hosted version (per-user isolation, free beta → $1-2/month)
+- [ ] Async write queue (Cloudflare Queues)
+- [ ] BM25 hybrid alongside Vectorize
+- [ ] Multi-user DO isolation
+- [ ] Analytics `/stats` endpoint (80% done via memory_stats)
+- [ ] Rebrand (Mnemo taken, need new name)
 
 ## Visualization (pre-ship demo)
 - [ ] Domain graph — D3.js or canvas, nodes sized by memory count, edges between related domains by centroid cosine similarity
