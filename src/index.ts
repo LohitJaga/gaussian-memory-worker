@@ -139,7 +139,7 @@ async function storeMemory(
     await env.VECTORIZE.upsert([{
       id: bestId,
       values: Array.from(mu),
-      metadata: { domain, memory_type: memoryType },
+      metadata: { domain, memory_type: memoryType, project },
     }]);
 
     return { action: 'merged', id: bestId };
@@ -355,8 +355,8 @@ async function retrieve(
       const newIds = newMatches.map(m => m.id);
       const newRows = await env.DB.prepare(
         `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-         FROM memories WHERE id IN (${newIds.map(() => '?').join(',')})`
-      ).bind(...newIds).all<{
+         FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) AND (project = ? OR project = 'default')`
+      ).bind(...newIds, project).all<{
         id: string; text: string; domain: string; memory_type: string;
         sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
       }>();
