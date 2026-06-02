@@ -257,7 +257,7 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | P6 | Spreading activation no project filter | MEDIUM | ✅ done — revert candidate |
 | P7 | Vectorize metadata loses project on merge | MEDIUM | ✅ done — revert candidate |
 | ~~P8~~ | ~~Retrieve hook timeout too tight~~ | ~~MEDIUM~~ | ✅ done |
-| P9 | PostToolUse signal-to-noise | MEDIUM | 1hr |
+| ~~P9~~ | ~~PostToolUse signal-to-noise~~ | ~~MEDIUM~~ | ✅ done June 2 |
 | P10 | cronRebuildBatch wipes-and-rebuilds | MEDIUM | 1hr |
 | P11 | Default pool no project tagging | LOW | 4hr |
 | P12 | topic_key/revision unused | LOW | 1hr |
