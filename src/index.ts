@@ -225,9 +225,36 @@ function distributionalScore(cosineSim: number, querySigma: number, memorySigma:
 }
 
 async function retrieve(
-  query: string, domain: string | null, topK: number, env: Env, project: string = 'default'
+  query: string, domain: string | null, topK: number, env: Env, project: string = 'default', context?: string
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
-  const qvec = await embed(query, env);
+
+  // Session-aware intent extraction — only for short/vague queries where raw embedding is poor
+  // Llama rewrites to a concrete standalone search intent. 1.5s timeout, fallback to raw query.
+  let searchQuery = query;
+  if (context && query.length < 60) {
+    try {
+      const intentResult = await Promise.race([
+        env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+          messages: [
+            {
+              role: 'system',
+              content: 'Given recent context and a query, extract the user\'s true search intent as a single concrete standalone sentence. No questions, no "I want". If the query is already specific and clear, return it unchanged. Return ONLY the intent sentence, nothing else.',
+            },
+            {
+              role: 'user',
+              content: `Recent context: ${context.slice(0, 300)}\nQuery: ${query}\nIntent:`,
+            },
+          ],
+          max_tokens: 60,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+      ]) as any;
+      const intent = (intentResult?.response ?? intentResult?.choices?.[0]?.message?.content ?? '').trim();
+      if (intent && intent.length > 5 && intent.length < 200) searchQuery = intent;
+    } catch {}
+  }
+
+  const qvec = await embed(searchQuery, env);
 
   // Entity extraction — Mem0-style: pull capitalized tokens + known patterns as entity candidates
   // These become extra Vectorize queries; matching memories get a score boost
@@ -1473,7 +1500,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
     }
 
     case 'memory_retrieve': {
-      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default');
+      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default', args.context as string | undefined);
       if (!results.length) return 'No memories found.';
 
       // Fetch domain summaries for domains present in results
