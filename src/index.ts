@@ -1356,6 +1356,28 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       }
 
 
+      // GLM quality gate: is this diff worth storing as a long-term memory?
+      // Replaces hardcoded skip lists — generalizes to any user's workflow.
+      // Runs before Llama description to avoid wasting tokens on low-signal diffs.
+      const gateResult = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+        messages: [
+          {
+            role: 'system',
+            content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions, non-trivial logic changes, bug fixes, architecture choices, meaningful outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate.',
+          },
+          { role: 'user', content: diffContext },
+        ],
+        max_tokens: 1024,
+        temperature: 0,
+      }) as any;
+      // GLM-4.7-flash is a thinking model: reasoning goes into reasoning_content,
+      // the final answer is in choices[0].message.content (null until reasoning completes).
+      // Must use max_tokens >= 1024 so the model can finish reasoning and emit content.
+      const choice = gateResult?.choices?.[0]?.message;
+      const rawGate = (gateResult?.response ?? choice?.content ?? '') as string;
+      const gateAnswer = rawGate.trim().toUpperCase();
+      if (!gateAnswer.startsWith('YES')) return 'SKIP: low signal (GLM quality gate)';
+
       // Ask Llama to describe the change semantically in one sentence
       // Llama 3.1 8B for diff description — GLM fails on short/minimal diffs (returns {})
       const descResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
