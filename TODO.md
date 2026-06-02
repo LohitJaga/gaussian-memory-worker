@@ -83,7 +83,7 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] `npx gaussian-memory init` script (wrangler deploy + MCP config + hooks)
 - [x] Generalize retrieval hook — removed all hardcoded project/keyword mappings. Now purely project-name-anchored (git root → Q2/Q3). Works for any project without config. Short messages (<25 chars) use project-anchored Q1 instead of empty-word fallback. No config file needed — new projects auto-detected. (May 29)
 - [ ] Generalize BYOC worker — no hardcoded personal info in wrangler.toml/index.ts, gaussian.config.json for user identity
-- [ ] Session-aware retrieval — hook runs a fast GLM call on {recent_turns + current_prompt} to extract a 1-sentence intent query before hitting Vectorize. Raw prompt is a bad embedding target for short/ambiguous messages; intent query is far better. Fixes "what should I do next" surfacing wrong domain.
+- [x] Session-aware retrieval — Llama 3.1-8b rewrites short queries (<60 chars) using prompt context before embedding. 1.5s timeout, fallback to raw query. Hook passes PROMPT as context on Q1. (June 2)
 - [x] Session summary memories — second GLM pass in memory_extract_and_store synthesizes session into: worked on / decided / still open. Stored as memory_type='session' with emotional_intensity=0.9 (tight sigma, slow decay). +0.20 retrieval boost. type preserved on all merge paths. (June 1)
 - [ ] Compaction-triggered extraction — Claude Code doesn't expose a compaction hook yet. When context fills mid-session, memories before compaction are currently lost until Stop. Future: hook into compaction event to run memory_extract_and_store on pre-compaction context.
 - [ ] Entity graph retrieval — `memory_relations` table (already exists from memory_judge) extended to subject/predicate/object triples. Retrieval does graph traversal: query hits named entity (person/project/tool) → pull all related memories first. Proper Mem0-style, not just cosine blob matching.
@@ -123,7 +123,7 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 ## Competitor Techniques to Steal
 
 ### From Mem0 (researched June 2, 2026)
-- [ ] **Entity boost** — Mem0 maintains a separate entity_store vector space. Named entities (people/projects/tools) queried separately, boost linked memories by up to 0.5 points. Fixes Bayer bleeding into Gaussian Memory queries. Implementation: extract entities from query text, query Vectorize with entity as search term, boost scores of memories that mention those entities.
+- [x] **Entity boost** — Mem0-style: extract capitalized tokens + @cf/ patterns + CW SKUs from query (max 3 entities). Embed each, query Vectorize topK=10, boost matching memory scores by min(0.25, 0.5/spread). GLM memory score 0.89→0.98 on entity queries. (June 2)
 - [ ] **Over-fetch + rerank** — Mem0 fetches `max(topK * 4, 60)` candidates, then reranks with BM25 + entity scores before returning top-k. We return raw Vectorize top-k with no reranking. Cheap win.
 - [ ] **BM25 hybrid** — Mem0 lemmatizes query, runs keyword search alongside semantic. Already in Week 3 TODO (FTS5) but worth prioritizing — keyword search catches exact SKU names, function names, etc. that cosine misses.
 - [ ] **Context at storage not retrieval** — Mem0 uses last 10 messages during extraction (storage), not retrieval. Their retrieval is pure semantic + entity. Our session-aware retrieval plan (GLM intent extraction) is the opposite approach — worth testing both.
