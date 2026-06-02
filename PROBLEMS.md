@@ -253,7 +253,7 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | ~~P2~~ | ~~distributionalScore is dead code~~ | ~~CRITICAL~~ | ✅ done June 2 |
 | ~~P3~~ | ~~Domain routing as hard filter~~ | ~~HIGH~~ | ✅ done — revert candidate |
 | ~~P4~~ | ~~No session summary memories~~ | ~~CRITICAL~~ | ✅ done June 2 |
-| P5 | memory_judge pipeline dormant | HIGH | 2hr |
+| ~~P5~~ | ~~memory_judge pipeline dormant~~ | ~~HIGH~~ | ✅ done June 2 — near-miss pairs queued as pending_judge at store time, cron processes 20/night |
 | P6 | Spreading activation no project filter | MEDIUM | ✅ done — revert candidate |
 | P7 | Vectorize metadata loses project on merge | MEDIUM | ✅ done — revert candidate |
 | ~~P8~~ | ~~Retrieve hook timeout too tight~~ | ~~MEDIUM~~ | ✅ done |
@@ -261,11 +261,13 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | ~~P10~~ | ~~cronRebuildBatch wipes-and-rebuilds~~ | ~~MEDIUM~~ | ✅ done June 2 |
 | P11 | Default pool no project tagging | LOW | 4hr |
 | P12 | topic_key/revision unused | LOW | 1hr |
-| P13 | Domain layer over-engineered | HIGH | rewrite |
-| P14 | deduplicateRecentMemories logic bug | MEDIUM | 30min |
-| ~~P15~~ | ~~Spreading activation calibration~~ | ~~MEDIUM~~ | ✅ done June 2 — 3 anchors restored, topK 6→2, threshold 0.75→0.65, 0.6 decay (Collins & Loftus) |
-| P16 | classifyDomainFromCache dead code | LOW | delete |
-| P17 | cronRebuildBatch/memory_rebuild_domains duplicate logic | LOW | 1hr |
-| P18 | updateDomainCentroid cap inconsistency (75 vs 50) | LOW | 5min |
-| ~~NEW~~ | ~~GLM model misuse — identity synthesis, domain summary, blend synthesis used GLM (thinking model) with result?.response (Llama format). All returned null. Switched to llama-3.1-8b~~ | ~~CRITICAL~~ | ✅ done June 2 |
-| ~~NEW~~ | ~~Domain classification silently failing — memory_rebuild_domains used GLM with max_tokens:120, content always null. Root cause: thinking model needs tokens for reasoning before emitting content. Switched to llama-3.1-8b~~ | ~~CRITICAL~~ | ✅ done June 2 |
+| P13 | Domain layer over-engineered | HIGH | rewrite — post-ship |
+| ~~P14~~ | ~~deduplicateRecentMemories cross-project dedup~~ | ~~MEDIUM~~ | ✅ done June 2 — project filter added |
+| ~~P15~~ | ~~Spreading activation calibration~~ | ~~MEDIUM~~ | ✅ done June 2 — 3 anchors, topK 6→2, threshold 0.75→0.65, 0.6 decay |
+| ~~P16~~ | ~~classifyDomainFromCache dead code~~ | ~~LOW~~ | ✅ done June 2 — deleted |
+| ~~P17~~ | ~~cronRebuildBatch/memory_rebuild_domains duplicate logic~~ | ~~LOW~~ | ✅ done June 2 — classifyBatchDomains() shared helper |
+| ~~P18~~ | ~~updateDomainCentroid cap inconsistency (75 vs 50)~~ | ~~LOW~~ | ✅ done June 2 |
+| ~~NEW~~ | ~~GLM model misuse — identity synthesis, domain summary, blend synthesis returned null. Switched to llama-3.1-8b~~ | ~~CRITICAL~~ | ✅ done June 2 |
+| ~~NEW~~ | ~~Domain classification silently failing — GLM thinking model, max_tokens too low, content always null. Switched to llama-3.1-8b~~ | ~~CRITICAL~~ | ✅ done June 2 |
+| ~~NEW~~ | ~~Domain micro-fragmentation — classifyDomain() created unlimited micro-domains past 50-cap, invisible to retrieval. Cap enforced + remapToAnchoredDomains() added~~ | ~~CRITICAL~~ | ✅ done June 2 |
+| ~~NEW~~ | ~~Targeted rebuild pagination bug — OFFSET on mutable result set skipped rows. Removed OFFSET from targeted mode~~ | ~~MEDIUM~~ | ✅ done June 2 |
