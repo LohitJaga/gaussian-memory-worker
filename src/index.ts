@@ -1363,7 +1363,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         messages: [
           {
             role: 'system',
-            content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions, non-trivial logic changes, bug fixes, architecture choices, meaningful outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate.',
+            content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions with rationale (why X was chosen over Y), non-trivial logic changes, bug fixes, architecture choices, meaningful command outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate.',
           },
           { role: 'user', content: diffContext },
         ],
