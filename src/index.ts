@@ -549,6 +549,37 @@ async function classifyBatchDomains(
   return assignments;
 }
 
+// Remap any domain assignments that have no anchor to the nearest existing anchor.
+// Uses pre-computed embeddings (mus) so no extra embed calls needed.
+// Prevents memories from being assigned micro-domains invisible to two-stage retrieval.
+async function remapToAnchoredDomains(
+  assignments: string[],
+  mus: Float32Array[],
+  env: Env,
+): Promise<string[]> {
+  const anchorRows = await env.DB.prepare('SELECT name, embedding FROM domain_anchors')
+    .all<{ name: string; embedding: string }>();
+  const anchors = (anchorRows.results ?? []).map(r => ({
+    name: r.name,
+    emb: JSON.parse(r.embedding) as number[],
+  }));
+  if (!anchors.length) return assignments;
+
+  const anchoredNames = new Set(anchors.map(a => a.name));
+  for (let i = 0; i < assignments.length; i++) {
+    if (anchoredNames.has(assignments[i])) continue;
+    const muArr = Array.from(mus[i]);
+    let best = anchors[0].name;
+    let bestSim = -1;
+    for (const anchor of anchors) {
+      const sim = dotProduct(muArr, anchor.emb);
+      if (sim > bestSim) { bestSim = sim; best = anchor.name; }
+    }
+    assignments[i] = best;
+  }
+  return assignments;
+}
+
 // Nightly domain rebuild — classifies only domain='general' memories, time-budget guarded.
 async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number): Promise<void> {
   const start = Date.now();
@@ -569,7 +600,8 @@ async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number
   const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
     .all<{ name: string }>()).results?.map(r => r.name) ?? [];
 
-  const domainAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env, timeBudgetMs, start);
+  const rawAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env, timeBudgetMs, start);
+  const domainAssignments = await remapToAnchoredDomains(rawAssignments, mus, env);
 
   // Batch D1 updates + Vectorize upserts + centroid accumulation
   const d1Updates = batch.map((row, i) =>
@@ -2079,7 +2111,8 @@ Return ONLY valid JSON array:
       const mus = await batchEmbed(batch.map(r => r.text), env);
       const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
         .all<{ name: string }>()).results?.map(r => r.name) ?? [];
-      const domainAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env);
+      const rawAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env);
+      const domainAssignments = await remapToAnchoredDomains(rawAssignments, mus, env);
 
       // Batch D1 updates + centroid accumulation
       const d1Updates: D1PreparedStatement[] = [];
