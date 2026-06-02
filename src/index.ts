@@ -276,8 +276,10 @@ async function retrieve(
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
-  // Build candidates — primary score: 0.6*cosine + 0.25*recency + 0.15*access_freq
-  // Spreads scores across a wider range than Bhattacharyya, better differentiation
+  // Build candidates — Gaussian-aware primary score
+  // Sharp memories (low sigma) rank at full cosine weight.
+  // Fuzzy memories are penalized proportional to how much their sigma exceeds the query sigma.
+  // This wires the Gaussian model into actual ranking — previously distributionalScore() was dead code.
   const nowSec = Math.floor(Date.now() / 1000);
   const NINETY_DAYS = 90 * 24 * 3600;
   const candidates = (rows.results ?? []).map(row => {
@@ -286,7 +288,9 @@ async function retrieve(
     const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
     const recency = Math.max(0, 1 - (nowSec - lastAccessed) / NINETY_DAYS);
     const accessFreq = Math.min(1, (row.access_count ?? 0) / 50);
-    const primaryScore = 0.6 * cosineSim + 0.25 * recency + 0.15 * accessFreq;
+    const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
+    const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
+    const primaryScore = 0.6 * cosineWeighted + 0.25 * recency + 0.15 * accessFreq;
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
