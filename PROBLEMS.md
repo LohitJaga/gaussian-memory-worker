@@ -259,7 +259,7 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | ~~P8~~ | ~~Retrieve hook timeout too tight~~ | ~~MEDIUM~~ | ✅ done |
 | ~~P9~~ | ~~PostToolUse signal-to-noise~~ | ~~MEDIUM~~ | ✅ done June 2 |
 | ~~P10~~ | ~~cronRebuildBatch wipes-and-rebuilds~~ | ~~MEDIUM~~ | ✅ done June 2 |
-| P11 | Default pool no project tagging | LOW | 4hr |
+| ~~P11~~ | ~~Default pool no project tagging~~ | ~~LOW~~ | ✅ done June 2 — 5,202 memories retagged via SQL patterns, default pool 6,426→3 |
 | P12 | topic_key/revision unused | LOW | 1hr |
 | P13 | Domain layer over-engineered | HIGH | rewrite — post-ship |
 | ~~P14~~ | ~~deduplicateRecentMemories cross-project dedup~~ | ~~MEDIUM~~ | ✅ done June 2 — project filter added |
