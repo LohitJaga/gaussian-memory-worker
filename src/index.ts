@@ -229,6 +229,14 @@ async function retrieve(
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   const qvec = await embed(query, env);
 
+  // Entity extraction — Mem0-style: pull capitalized tokens + known patterns as entity candidates
+  // These become extra Vectorize queries; matching memories get a score boost
+  const entityTokens = [
+    ...new Set(
+      query.match(/\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g) ?? []
+    )
+  ].slice(0, 3); // cap at 3 entities to limit extra queries
+
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
   const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
 
@@ -272,6 +280,24 @@ async function retrieve(
 
   if (!results.matches.length) return [];
 
+  // Entity boost — Mem0-style: embed each entity, query Vectorize, boost memories that appear
+  // Attenuated by spread (more entity hits = lower individual boost, same as Mem0)
+  const entityBoostMap = new Map<string, number>();
+  if (entityTokens.length > 0) {
+    const entityVecs = await batchEmbed(entityTokens, env);
+    const entityQueries = entityVecs.map(ev =>
+      env.VECTORIZE.query(Array.from(ev), { topK: 10, returnValues: false, returnMetadata: 'none' })
+    );
+    const entityResults = await Promise.all(entityQueries);
+    for (const er of entityResults) {
+      const matches = er.matches ?? [];
+      const boost = Math.min(0.25, 0.5 / Math.max(1, matches.length)); // attenuate by spread
+      for (const m of matches) {
+        entityBoostMap.set(m.id, (entityBoostMap.get(m.id) ?? 0) + boost);
+      }
+    }
+  }
+
   const ids = results.matches.map(m => m.id);
   const placeholders = ids.map(() => '?').join(',');
   // Filter by current project + legacy 'default' bucket so old untagged memories still surface
@@ -300,7 +326,8 @@ async function retrieve(
     const accessFreq = Math.min(1, (row.access_count ?? 0) / 50);
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
     const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
-    const primaryScore = 0.6 * cosineWeighted + 0.25 * recency + 0.15 * accessFreq;
+    const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
+    const primaryScore = 0.6 * cosineWeighted + 0.25 * recency + 0.15 * accessFreq + entityBoost;
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
