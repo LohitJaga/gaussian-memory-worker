@@ -237,7 +237,7 @@ Additionally: re-embedding all memories nightly is wasteful when vectors are alr
 **Revised priority order:**
 P4    session summary memories — THE stated goal, not implemented at all (CRITICAL, was mislabeled HIGH)
 P1    batchEmbed chunking — cron is broken every night (CRITICAL, 30min fix)
-P2    wire sigma into scoring — Gaussian model is cosmetic without this
+~~P2~~ ✅ done June 2 — cosineWeighted = cos * max(0.75, 1 - 0.25 * sigExcess). Sharp memories unaffected, fuzzy penalized. 0/5000 fuzzy beats sharp.
 P10   cronRebuildBatch — only rebuild domain='general' rows, not full wipe
 P9    PostToolUse noise — 53% of episodic memories never accessed, corpus polluted
 P5    memory_judge into cron
@@ -250,7 +250,7 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | # | Problem | Priority | Effort |
 |---|---------|----------|--------|
 | ~~P1~~ | ~~Cron fails nightly (batchEmbed)~~ | ~~CRITICAL~~ | ✅ done June 2 |
-| P2 | distributionalScore is dead code | CRITICAL | 2hr |
+| ~~P2~~ | ~~distributionalScore is dead code~~ | ~~CRITICAL~~ | ✅ done June 2 |
 | ~~P3~~ | ~~Domain routing as hard filter~~ | ~~HIGH~~ | ✅ done — revert candidate |
 | ~~P4~~ | ~~No session summary memories~~ | ~~CRITICAL~~ | ✅ done June 2 |
 | P5 | memory_judge pipeline dormant | HIGH | 2hr |
