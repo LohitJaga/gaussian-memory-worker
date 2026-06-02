@@ -624,8 +624,8 @@ async function pruneJunkMemories(env: Env): Promise<number> {
 async function deduplicateRecentMemories(env: Env, windowSec = 86400, threshold = 0.90): Promise<string> {
   const since = Math.floor(Date.now() / 1000) - windowSec;
   const recent = await env.DB.prepare(
-    'SELECT id, text FROM memories WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 200'
-  ).bind(since).all<{ id: string; text: string }>();
+    'SELECT id, text, project FROM memories WHERE timestamp > ? ORDER BY timestamp DESC LIMIT 200'
+  ).bind(since).all<{ id: string; text: string; project: string }>();
 
   const rows = recent.results ?? [];
   if (rows.length === 0) return 'No recent memories to dedup.';
@@ -633,13 +633,16 @@ async function deduplicateRecentMemories(env: Env, windowSec = 86400, threshold 
   const mus = await batchEmbed(rows.map(r => r.text), env);
   const toDelete: string[] = [];
   const deleted = new Set<string>();
+  const projectMap = new Map(rows.map(r => [r.id, r.project]));
 
   for (let i = 0; i < rows.length; i++) {
     if (deleted.has(rows[i].id)) continue;
-    const results = await env.VECTORIZE.query(mus[i], { topK: 2 });
+    const results = await env.VECTORIZE.query(mus[i], { topK: 2, returnMetadata: 'indexed' });
     for (const match of results.matches) {
-      if (match.id !== rows[i].id && (match.score ?? 0) >= threshold && !deleted.has(match.id)) {
-        // rows[i] is newer — delete it, keep the established memory
+      const matchProject = (match.metadata as any)?.project ?? 'default';
+      const rowProject = rows[i].project ?? 'default';
+      // Only dedup within same project — never delete a memory from a different project
+      if (match.id !== rows[i].id && (match.score ?? 0) >= threshold && !deleted.has(match.id) && matchProject === rowProject) {
         toDelete.push(rows[i].id);
         deleted.add(rows[i].id);
         break;
