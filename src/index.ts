@@ -499,21 +499,15 @@ async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number
   const start = Date.now();
   await ensureDomainColumns(env);
 
-  const offsetRaw = await env.KV.get('REBUILD_OFFSET');
-  if (offsetRaw === null) {
-    await env.DB.prepare('DELETE FROM domain_anchors').run();
-  }
-  const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
-
+  // Only reclassify memories stuck in domain='general' — these failed initial classification.
+  // No wipe-and-rebuild: domain anchors stay intact, no multi-night inconsistency window.
+  // No KV offset needed: general bucket stays small (~100-200 rows), runs in one cron tick.
   const rows = await env.DB.prepare(
-    'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
-  ).bind(rowLimit, offset).all<{ id: string; text: string; memory_type: string }>();
+    "SELECT id, text, memory_type FROM memories WHERE domain = 'general' ORDER BY rowid LIMIT ?"
+  ).bind(rowLimit).all<{ id: string; text: string; memory_type: string }>();
 
   const batch = rows.results ?? [];
-  if (!batch.length) {
-    await env.KV.delete('REBUILD_OFFSET');
-    return;
-  }
+  if (!batch.length) return;
 
   const mus = await batchEmbed(batch.map(r => r.text), env);
 
@@ -599,7 +593,6 @@ async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number
     }
   }
 
-  await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
 }
 
 // Prune low-signal junk: cold episodic memories that are short, old, and never accessed.
