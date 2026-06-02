@@ -503,36 +503,23 @@ async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number 
   return { decayed, pruned };
 }
 
-// Nightly domain rebuild — batch-10 GLM classification, time-budget guarded.
-// Processes up to rowLimit memories per run using KV offset for resumption.
-// At 2000 rows/night with 10-per-GLM-call: ~200 calls × 1.5s = 5 min, full cycle in ~4 nights.
-async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number): Promise<void> {
-  const start = Date.now();
-  await ensureDomainColumns(env);
-
-  // Only reclassify memories stuck in domain='general' — these failed initial classification.
-  // No wipe-and-rebuild: domain anchors stay intact, no multi-night inconsistency window.
-  // No KV offset needed: general bucket stays small (~100-200 rows), runs in one cron tick.
-  const rows = await env.DB.prepare(
-    "SELECT id, text, memory_type FROM memories WHERE domain = 'general' ORDER BY rowid LIMIT ?"
-  ).bind(rowLimit).all<{ id: string; text: string; memory_type: string }>();
-
-  const batch = rows.results ?? [];
-  if (!batch.length) return;
-
-  const mus = await batchEmbed(batch.map(r => r.text), env);
-
-  const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
-    .all<{ name: string }>()).results?.map(r => r.name) ?? [];
-  const canCreate = existingDomains.length < 50;
-
+// Shared Llama batch classifier — used by both cronRebuildBatch and memory_rebuild_domains.
+// Takes batch of texts + existing domain list, returns domain assignment per row.
+async function classifyBatchDomains(
+  texts: string[],
+  existingDomains: string[],
+  env: Env,
+  timeBudgetMs = Infinity,
+  startTime = Date.now(),
+): Promise<string[]> {
   const GROUP = 10;
-  const domainAssignments: string[] = new Array(batch.length).fill('general');
+  const canCreate = existingDomains.length < 50;
+  const assignments: string[] = new Array(texts.length).fill('general');
 
-  for (let g = 0; g < batch.length; g += GROUP) {
-    if (Date.now() - start > timeBudgetMs) break; // stop before wall-clock limit
-    const group = batch.slice(g, g + GROUP);
-    const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
+  for (let g = 0; g < texts.length; g += GROUP) {
+    if (Date.now() - startTime > timeBudgetMs) break;
+    const group = texts.slice(g, g + GROUP);
+    const numbered = group.map((t, j) => `${j + 1}. ${t.slice(0, 150)}`).join('\n');
     const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
       messages: [
         {
@@ -551,15 +538,38 @@ async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number
       if (match) {
         const parsed = JSON.parse(match[0]) as string[];
         for (let j = 0; j < group.length && j < parsed.length; j++) {
-          const d = (parsed[j] ?? '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
-          if (d.length >= 2) {
-            domainAssignments[g + j] = d;
-            if (!existingDomains.includes(d) && existingDomains.length < 50) existingDomains.push(d);
-          }
+          let d = (parsed[j] ?? '').toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+          if (d.length === 0) d = 'unclassified';
+          assignments[g + j] = d.slice(0, 40);
+          if (!existingDomains.includes(d) && existingDomains.length < 50) existingDomains.push(d.slice(0, 40));
         }
       }
     } catch {}
   }
+  return assignments;
+}
+
+// Nightly domain rebuild — classifies only domain='general' memories, time-budget guarded.
+async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number): Promise<void> {
+  const start = Date.now();
+  await ensureDomainColumns(env);
+
+  // Only reclassify memories stuck in domain='general' — these failed initial classification.
+  // No wipe-and-rebuild: domain anchors stay intact, no multi-night inconsistency window.
+  // No KV offset needed: general bucket stays small (~100-200 rows), runs in one cron tick.
+  const rows = await env.DB.prepare(
+    "SELECT id, text, memory_type FROM memories WHERE domain = 'general' ORDER BY rowid LIMIT ?"
+  ).bind(rowLimit).all<{ id: string; text: string; memory_type: string }>();
+
+  const batch = rows.results ?? [];
+  if (!batch.length) return;
+
+  const mus = await batchEmbed(batch.map(r => r.text), env);
+
+  const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
+    .all<{ name: string }>()).results?.map(r => r.name) ?? [];
+
+  const domainAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env, timeBudgetMs, start);
 
   // Batch D1 updates + Vectorize upserts + centroid accumulation
   const d1Updates = batch.map((row, i) =>
@@ -884,26 +894,6 @@ function deriveAnchorName(text: string): string {
   return `cluster_${Date.now().toString(36).slice(-4)}`;
 }
 
-function classifyDomainFromCache(
-  mu: Float32Array,
-  text: string,
-  anchorCache: Map<string, number[]>,
-): { domain: string; newAnchor?: { name: string; embedding: number[] } } {
-  const muArr = Array.from(mu);
-  let bestName = '';
-  let bestSim = -1;
-
-  for (const [name, anchorEmb] of anchorCache) {
-    const sim = dotProduct(muArr, anchorEmb);
-    if (sim > bestSim) { bestSim = sim; bestName = name; }
-  }
-
-  if (bestSim >= 0.82) return { domain: bestName };
-
-  const name = deriveAnchorName(text);
-  anchorCache.set(name, muArr);
-  return { domain: name, newAnchor: { name, embedding: muArr } };
-}
 
 async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise<string> {
   const muArr = Array.from(mu);
@@ -990,7 +980,7 @@ async function updateDomainCentroid(domainName: string, mu: Float32Array, env: E
   if (!existing) {
     // Enforce 50-domain cap: if at cap, redirect centroid update to nearest existing domain
     const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-    if ((totalDomains?.n ?? 0) >= 75) {
+    if ((totalDomains?.n ?? 0) >= 50) {
       const allAnchors = await env.DB.prepare('SELECT name, embedding FROM domain_anchors').all<{ name: string; embedding: string }>();
       const muArr = Array.from(mu);
       let bestName = '';
@@ -2063,53 +2053,11 @@ Return ONLY valid JSON array:
         return `Done. ${total?.n ?? 0} memories reclassified into ${anchors?.n ?? 0} domains.`;
       }
 
-      // Batch embed all texts in one AI call
+      // Batch embed + classify using shared helper
       const mus = await batchEmbed(batch.map(r => r.text), env);
-
-      // Batch Llama classification: 10 memories per Llama call
-      const GROUP = 10;
-      const domainAssignments: string[] = new Array(batch.length).fill('general');
-
-      // Load current domain list once (shared across all Llama calls in this batch)
       const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
         .all<{ name: string }>()).results?.map(r => r.name) ?? [];
-      const canCreate = existingDomains.length < 50;
-
-      for (let g = 0; g < batch.length; g += GROUP) {
-        const group = batch.slice(g, g + GROUP);
-        const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
-
-        // Llama (not GLM) for classification — GLM is a thinking model, too slow/expensive for batch JSON tasks
-        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
-          messages: [
-            {
-              role: 'system',
-              content: `Classify each memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
-            },
-            { role: 'user', content: numbered },
-          ],
-          max_tokens: 256,
-        }) as any;
-
-        const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-        const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
-        try {
-          const match = raw.match(/\[[\s\S]*?\]/);
-          if (match) {
-            const parsed = JSON.parse(match[0]) as string[];
-            for (let j = 0; j < group.length && j < parsed.length; j++) {
-              let d = (parsed[j] ?? '').toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-              if (d.length === 0) d = 'unclassified';
-              domainAssignments[g + j] = d.slice(0, 40);
-              if (!existingDomains.includes(d) && existingDomains.length < 50) {
-                existingDomains.push(d.slice(0, 40));
-              }
-            }
-          }
-        } catch (e) {
-          console.error('[rebuild_domains] GLM parse error:', raw.slice(0, 200), e);
-        }
-      }
+      const domainAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env);
 
       // Batch D1 updates + centroid accumulation
       const d1Updates: D1PreparedStatement[] = [];
