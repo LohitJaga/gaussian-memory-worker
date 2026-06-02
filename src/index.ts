@@ -2091,13 +2091,15 @@ Return ONLY valid JSON array:
       if (offsetRaw === null && !targeted) {
         await env.DB.prepare('DELETE FROM domain_anchors').run();
       }
+      // Targeted mode uses no OFFSET — rows disappear from result set as they're fixed,
+      // so OFFSET-based pagination skips rows. Just LIMIT without offset, keep calling until empty.
       const rows = await env.DB.prepare(
         targeted
           ? `SELECT id, text, memory_type FROM memories
              WHERE domain = 'general' OR domain NOT IN (SELECT name FROM domain_anchors)
-             ORDER BY rowid LIMIT ? OFFSET ?`
+             ORDER BY rowid LIMIT ?`
           : 'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
-      ).bind(BATCH, offset).all<{ id: string; text: string; memory_type: string }>();
+      ).bind(...(targeted ? [BATCH] : [BATCH, offset])).all<{ id: string; text: string; memory_type: string }>();
 
       const batch = rows.results ?? [];
       if (!batch.length) {
