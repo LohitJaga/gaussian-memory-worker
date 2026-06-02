@@ -913,6 +913,12 @@ async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise
 
   if (bestSim >= 0.82) return bestName;
 
+  // At cap: return nearest existing anchor instead of creating a new micro-domain
+  const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
+  if ((totalDomains?.n ?? 0) >= 50) {
+    return bestName || 'general';
+  }
+
   const name = deriveAnchorName(text);
   await env.DB.prepare(
     'INSERT OR REPLACE INTO domain_anchors (name, embedding) VALUES (?, ?)'
@@ -961,7 +967,16 @@ Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
       const parsed = JSON.parse(match[0]);
       if (parsed.domain && typeof parsed.domain === 'string') {
         const clean = parsed.domain.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
-        if (clean.length >= 2 && !clean.startsWith('-')) return clean;
+        if (clean.length >= 2 && !clean.startsWith('-')) {
+          // If Llama chose an existing anchor, accept it
+          if (existing.includes(clean)) return clean;
+          // If cap hit and Llama invented a new domain, fall through to cosine fallback
+          if (existing.length >= 50) {
+            const mu2 = precomputedMu ?? await embed(text, env);
+            return classifyDomain(mu2, text, env);
+          }
+          return clean;
+        }
       }
     }
   } catch {}
@@ -2041,8 +2056,14 @@ Return ONLY valid JSON array:
       }
 
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+      // targeted=true: only reclassify memories in unanchored micro-domains or 'general'
+      const targeted = args.targeted !== false;
       const rows = await env.DB.prepare(
-        'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
+        targeted
+          ? `SELECT id, text, memory_type FROM memories
+             WHERE domain = 'general' OR domain NOT IN (SELECT name FROM domain_anchors)
+             ORDER BY rowid LIMIT ? OFFSET ?`
+          : 'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
       ).bind(BATCH, offset).all<{ id: string; text: string; memory_type: string }>();
 
       const batch = rows.results ?? [];
