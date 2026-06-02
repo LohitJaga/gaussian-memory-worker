@@ -217,29 +217,53 @@ Additionally: re-embedding all memories nightly is wasteful when vectors are alr
 
 ---
 
+## New findings — June 1 architecture audit
+
+| # | Problem | Priority | Effort |
+|---|---------|----------|--------|
+| P13 | Domain layer over-engineered — two LLMs classify inconsistently, 4 subsystems depend on it, simple tag column would suffice | HIGH | rewrite |
+| P14 | deduplicateRecentMemories logic bug — re-embeds each row individually despite batchEmbed, no project filter, cross-project dedup | MEDIUM | 30min |
+| P15 | Spreading activation = 4 Vectorize queries for 2 extra results — marginal signal, real latency cost | MEDIUM | 30min |
+| P16 | classifyDomainFromCache — dead code, no callers, in-memory Map never seeded | LOW | delete |
+| P17 | cronRebuildBatch + memory_rebuild_domains duplicate ~80 lines of GLM classification logic | LOW | 1hr |
+| P18 | updateDomainCentroid cap inconsistency — code gates at 75, comment says 50, all other guards use 50 | LOW | 5min |
+
+## Reassessment — June 1
+
+**P3 (done tonight): REVERT CANDIDATE.** Project filter is correct architecture but 6,426 legacy memories in `default` undermine it. Default pool still surfaces everything. Real fix requires P11 (retag legacy) which is low priority. Net benefit minimal until then. Consider reverting index.ts changes and keeping only PROBLEMS.md doc.
+
+**P6 + P7 (done May 30): REVERT CANDIDATES.** P6 added project filter to spreading activation. P15 above says spreading activation itself is marginal (4 queries, 2 results). If spreading activation gets removed or simplified, P6 fix is moot. P7 (merge path Vectorize metadata) is correct but harmless to revert if project isolation is being deprioritized.
+
+**Revised priority order:**
+P4    session summary memories — THE stated goal, not implemented at all (CRITICAL, was mislabeled HIGH)
+P1    batchEmbed chunking — cron is broken every night (CRITICAL, 30min fix)
+P2    wire sigma into scoring — Gaussian model is cosmetic without this
+P10   cronRebuildBatch — only rebuild domain='general' rows, not full wipe
+P9    PostToolUse noise — 53% of episodic memories never accessed, corpus polluted
+P5    memory_judge into cron
+P13   domain layer simplification — long-term, post-ship
+P15   remove or cap spreading activation — latency win
+P11, P12, P14, P16, P17, P18 — cleanup
+
 ## Summary by priority
 
 | # | Problem | Priority | Effort |
 |---|---------|----------|--------|
-| P1 | Cron fails nightly (batchEmbed) | CRITICAL | 30min |
+| ~~P1~~ | ~~Cron fails nightly (batchEmbed)~~ | ~~CRITICAL~~ | ✅ done June 2 |
 | P2 | distributionalScore is dead code | CRITICAL | 2hr |
-| P3 | Domain routing as hard filter | HIGH | 2hr |
-| P4 | No session summary memories | HIGH | 3hr |
+| ~~P3~~ | ~~Domain routing as hard filter~~ | ~~HIGH~~ | ✅ done — revert candidate |
+| ~~P4~~ | ~~No session summary memories~~ | ~~CRITICAL~~ | ✅ done June 2 |
 | P5 | memory_judge pipeline dormant | HIGH | 2hr |
-| P6 | Spreading activation no project filter | MEDIUM | 15min |
-| P7 | Vectorize metadata loses project on merge | MEDIUM | 5min |
-| P8 | Retrieve hook timeout too tight | MEDIUM | 5min |
+| P6 | Spreading activation no project filter | MEDIUM | ✅ done — revert candidate |
+| P7 | Vectorize metadata loses project on merge | MEDIUM | ✅ done — revert candidate |
+| ~~P8~~ | ~~Retrieve hook timeout too tight~~ | ~~MEDIUM~~ | ✅ done |
 | P9 | PostToolUse signal-to-noise | MEDIUM | 1hr |
 | P10 | cronRebuildBatch wipes-and-rebuilds | MEDIUM | 1hr |
 | P11 | Default pool no project tagging | LOW | 4hr |
 | P12 | topic_key/revision unused | LOW | 1hr |
-
-**Recommended fix order:**
-~~P6, P7, P8~~ ✅ done May 30
-P3 → P2    drop domain routing + wire sigma scoring (retrieval quality, do together)
-P1 + P10   batchEmbed chunking + cronRebuildBatch to domain='general' only (do together)
-P4         session summary memories (biggest UX win, the stated goal)
-P5         memory_judge into cron pipeline
-P9         PostToolUse noise reduction
-FTS5/RRF   Week 3 — hybrid retrieval, biggest competitive gap
-P11, P12   low priority, post-ship cleanup
+| P13 | Domain layer over-engineered | HIGH | rewrite |
+| P14 | deduplicateRecentMemories logic bug | MEDIUM | 30min |
+| P15 | Spreading activation 4x query cost | MEDIUM | 30min |
+| P16 | classifyDomainFromCache dead code | LOW | delete |
+| P17 | cronRebuildBatch/memory_rebuild_domains duplicate logic | LOW | 1hr |
+| P18 | updateDomainCentroid cap inconsistency (75 vs 50) | LOW | 5min |

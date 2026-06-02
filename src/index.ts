@@ -22,11 +22,16 @@ async function embed(text: string, env: Env): Promise<Float32Array> {
 }
 
 async function batchEmbed(texts: string[], env: Env): Promise<Float32Array[]> {
-  const result = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: texts }) as any;
-  return (result.data as number[][]).map(vec => {
-    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-    return new Float32Array(vec.map(v => v / norm));
-  });
+  const CHUNK = 100; // Workers AI bge-base-en-v1.5 hard limit
+  const out: Float32Array[] = [];
+  for (let i = 0; i < texts.length; i += CHUNK) {
+    const result = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: texts.slice(i, i + CHUNK) }) as any;
+    for (const vec of result.data as number[][]) {
+      const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+      out.push(new Float32Array(vec.map(v => v / norm)));
+    }
+  }
+  return out;
 }
 
 // ── Core memory ops ──────────────────────────────────────────────────────────
@@ -81,9 +86,13 @@ async function storeMemory(
     if (normalize(row.text) === normalizedNew) {
       const existingSigma = deserializeSigma(row.sigma_diagonal);
       const [, newSigma] = kalmanMerge(mu, existingSigma, mu, existingSigma);
+      const exactTypeClause = memoryType === 'session' ? ', memory_type = ?' : '';
+      const exactTypeParams = memoryType === 'session'
+        ? [serializeSigma(newSigma), Math.floor(Date.now() / 1000), 'session', row.id]
+        : [serializeSigma(newSigma), Math.floor(Date.now() / 1000), row.id];
       await env.DB.prepare(
-        'UPDATE memories SET sigma_diagonal = ?, last_accessed = ?, access_count = access_count + 1 WHERE id = ?'
-      ).bind(serializeSigma(newSigma), Math.floor(Date.now() / 1000), row.id).run();
+        `UPDATE memories SET sigma_diagonal = ?, last_accessed = ?, access_count = access_count + 1${exactTypeClause} WHERE id = ?`
+      ).bind(...exactTypeParams).run();
       return { action: 'merged', id: row.id };
     }
   }
@@ -129,12 +138,17 @@ async function storeMemory(
   if (bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold)) {
     const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
 
+    // Preserve 'session' type on merge — session summaries must not silently become episodic
+    const typeUpdate = memoryType === 'session' ? ', memory_type = ?' : '';
+    const typeParams = memoryType === 'session'
+      ? [serializeSigma(newSigma), now, text, 'session', bestId]
+      : [serializeSigma(newSigma), now, text, bestId];
     await env.DB.prepare(`
       UPDATE memories SET
         sigma_diagonal = ?, last_accessed = ?,
-        access_count = access_count + 1, text = ?
+        access_count = access_count + 1, text = ?${typeUpdate}
       WHERE id = ?
-    `).bind(serializeSigma(newSigma), now, text, bestId).run();
+    `).bind(...typeParams).run();
 
     await env.VECTORIZE.upsert([{
       id: bestId,
@@ -312,6 +326,10 @@ async function retrieve(
     // Domain alignment boost
     const domainBoost = (domain && c.domain === domain) ? 0.05 : 0;
 
+    // Session memory boost: session summaries are the highest-value retrieval target
+    // for "what were we working on" queries — give them a strong lift over atomic facts
+    const sessionBoost = c.type === 'session' ? 0.20 : 0;
+
     // Recency boost: memories stored in this session (last 30 min) get a lift
     const recencyBoost = c.fresh ? 0.12 : 0;
 
@@ -322,6 +340,7 @@ async function retrieve(
     const activation = (c.primaryScore
       + 0.4 * neighborScore * sigmaWeight * contradictionFactor
       + domainBoost
+      + sessionBoost
       + recencyBoost) * fileEditPenalty;
 
     return { ...c, score: activation };
@@ -1931,6 +1950,26 @@ Return ONLY valid JSON array:
         }
         stored++;
       }
+
+      // Session summary — compose from extracted facts, no extra LLM call.
+      // Avoids rate limit failures after N domain classification calls.
+      // Stored as memory_type='session' so it gets +0.20 retrieval boost and slow decay.
+      if (cleanFacts.length >= 2) {
+        try {
+          const date = new Date().toISOString().slice(0, 10);
+          const summaryText = `Session ${date}: ${cleanFacts.slice(0, 5).map(f => f.text).join(' | ')}`;
+          const summaryMu = await embed(summaryText, env);
+          const summaryDomain = await classifyDomainWithLlama(summaryText, env, summaryMu);
+          const { action: sAction } = await storeMemory(
+            summaryText, 'session', summaryDomain, 0.9, env, summaryMu, args.project ?? 'default'
+          );
+          if (sAction === 'spawned') {
+            await updateDomainCentroid(summaryDomain, summaryMu, env).catch(() => {});
+            stored++;
+          }
+        } catch {}
+      }
+
       return `Extracted ${facts.length} facts, stored ${stored}.`;
     }
 
