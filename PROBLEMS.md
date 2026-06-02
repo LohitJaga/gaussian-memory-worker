@@ -263,7 +263,7 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | P12 | topic_key/revision unused | LOW | 1hr |
 | P13 | Domain layer over-engineered | HIGH | rewrite |
 | P14 | deduplicateRecentMemories logic bug | MEDIUM | 30min |
-| P15 | Spreading activation 4x query cost | MEDIUM | 30min |
+| ~~P15~~ | ~~Spreading activation 4x query cost~~ | ~~MEDIUM~~ | ✅ done June 2 |
 | P16 | classifyDomainFromCache dead code | LOW | delete |
 | P17 | cronRebuildBatch/memory_rebuild_domains duplicate logic | LOW | 1hr |
 | P18 | updateDomainCentroid cap inconsistency (75 vs 50) | LOW | 5min |
