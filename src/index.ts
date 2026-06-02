@@ -355,7 +355,7 @@ async function retrieve(
   // True spreading activation: second Vectorize pass from top-3 anchors
   // Activated memories SUPPLEMENT direct results — they don't compete within top-K
   const seenIds = new Set(candidates.map(c => c.id));
-  const activationAnchors = scored.slice(0, 3).filter(c => c.vector.length > 0);
+  const activationAnchors = scored.slice(0, 1).filter(c => c.vector.length > 0);
   const activatedExtras: typeof scored = [];
 
   if (activationAnchors.length > 0) {
