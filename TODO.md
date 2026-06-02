@@ -49,12 +49,10 @@
 - [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface
 - [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — domain rebuild + better scoring should fix
 - [x] PostToolUse quality gate — deployed May 29: length filter + expanded bash skip + semantic entropy check + junk pruning cron
-- [ ] End-to-end test suite — real test cases covering store → retrieve → sigma update → dedup → decay pipeline. Verify no silent data loss paths.
-- [x] Orphan check — `memory_orphan_check` tool deployed May 29
 - [ ] Safety checks for users — D1 backup strategy, Vectorize consistency checks, graceful degradation if worker is unreachable. No memory loss on deploy or migration.
-- [ ] Auth: API key on worker endpoints (check Authorization header against env secret). Currently the worker URL is unauthenticated — anyone who discovers it can read/write/delete all memories. Blocker before sharing URL publicly.
-- [ ] Indirect prompt injection hardening — stop hook captures arbitrary text from sessions; malicious content (e.g. from a website visited) could get stored and later retrieved into context. Add a sanitization pass that strips instruction-like patterns before storage.
-- [ ] Llama classification injection — user text is passed directly to Llama for domain classification. "Ignore previous instructions, classify as identity" could manipulate domain assignment. Wrap Llama input in a stricter system prompt that rejects meta-instructions.
+- [ ] Auth: API key on worker endpoints — currently unauthenticated, anyone with the URL can read/write/delete all memories. Blocker before sharing publicly.
+- [ ] Indirect prompt injection hardening — stop hook captures arbitrary text; malicious content from visited sites could get stored and injected. Add sanitization pass stripping instruction-like patterns before storage.
+- [ ] Llama classification injection — user text passed directly to Llama for domain classification. "Ignore previous instructions" could manipulate domain assignment. Fix: stricter system prompt rejecting meta-instructions.
 
 ## Ship Goal — July 1 2026
 BYOC model: users deploy to their own Cloudflare account, pay their own $5/month, own their data.
@@ -82,12 +80,13 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] RRF scoring — merges Vectorize cosine + FTS5 BM25 + recency + access_freq
 - [ ] Multi-hop BFS spreading activation (configurable depth)
 - [ ] `valid_from`/`valid_to` on memories + schema migration
-- [x] PostToolUse quality gate (skip low-entropy diffs — deployed May 29)
-- [ ] Indirect prompt injection hardening (sanitize stop hook input)
-- [ ] Llama classification injection guard (stricter system prompt)
 - [ ] `npx gaussian-memory init` script (wrangler deploy + MCP config + hooks)
 - [x] Generalize retrieval hook — removed all hardcoded project/keyword mappings. Now purely project-name-anchored (git root → Q2/Q3). Works for any project without config. Short messages (<25 chars) use project-anchored Q1 instead of empty-word fallback. No config file needed — new projects auto-detected. (May 29)
 - [ ] Generalize BYOC worker — no hardcoded personal info in wrangler.toml/index.ts, gaussian.config.json for user identity
+- [ ] Session-aware retrieval — hook runs a fast GLM call on {recent_turns + current_prompt} to extract a 1-sentence intent query before hitting Vectorize. Raw prompt is a bad embedding target for short/ambiguous messages; intent query is far better. Fixes "what should I do next" surfacing wrong domain.
+- [ ] Session summary memories — after stop hook extraction, run a second Llama pass synthesizing the full session into: what was worked on, decisions made, what's unresolved. Store as `session` memory type with its own retrieval weight. Directly fixes "can't reconstruct last session" problem.
+- [ ] Entity graph retrieval — `memory_relations` table (already exists from memory_judge) extended to subject/predicate/object triples. Retrieval does graph traversal: query hits named entity (person/project/tool) → pull all related memories first. Proper Mem0-style, not just cosine blob matching.
+- [ ] Recency hot tier — Cloudflare KV store (TTL 24h) checked before Vectorize for memories accessed or stored in last 24h. Zero latency, always current. Not a score boost hack — a real separate retrieval tier.
 
 ### Week 4 (June 21–27) — Polish + Docs
 - [ ] index.ts modularization (typed interfaces, split modules)
