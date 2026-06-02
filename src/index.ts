@@ -2050,14 +2050,15 @@ Return ONLY valid JSON array:
       const BATCH = 30;  // Smaller batch — 3 Llama calls per invocation (10 texts each)
       const offsetRaw = await env.KV.get('REBUILD_OFFSET');
 
-      // First call: clear all domain anchors so clean ones emerge from Llama
-      if (offsetRaw === null) {
+      const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+      // targeted=true (default): only reclassify unanchored/general memories, keep existing anchors
+      // targeted=false: full wipe-and-rebuild (pass targeted=false explicitly)
+      const targeted = args.targeted !== false;
+
+      // Only wipe anchors on full rebuild, not targeted pass
+      if (offsetRaw === null && !targeted) {
         await env.DB.prepare('DELETE FROM domain_anchors').run();
       }
-
-      const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
-      // targeted=true: only reclassify memories in unanchored micro-domains or 'general'
-      const targeted = args.targeted !== false;
       const rows = await env.DB.prepare(
         targeted
           ? `SELECT id, text, memory_type FROM memories
