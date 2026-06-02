@@ -263,7 +263,9 @@ P11, P12, P14, P16, P17, P18 — cleanup
 | P12 | topic_key/revision unused | LOW | 1hr |
 | P13 | Domain layer over-engineered | HIGH | rewrite |
 | P14 | deduplicateRecentMemories logic bug | MEDIUM | 30min |
-| ~~P15~~ | ~~Spreading activation 4x query cost~~ | ~~MEDIUM~~ | ✅ done June 2 |
+| ~~P15~~ | ~~Spreading activation calibration~~ | ~~MEDIUM~~ | ✅ done June 2 — 3 anchors restored, topK 6→2, threshold 0.75→0.65, 0.6 decay (Collins & Loftus) |
 | P16 | classifyDomainFromCache dead code | LOW | delete |
 | P17 | cronRebuildBatch/memory_rebuild_domains duplicate logic | LOW | 1hr |
 | P18 | updateDomainCentroid cap inconsistency (75 vs 50) | LOW | 5min |
+| ~~NEW~~ | ~~GLM model misuse — identity synthesis, domain summary, blend synthesis used GLM (thinking model) with result?.response (Llama format). All returned null. Switched to llama-3.1-8b~~ | ~~CRITICAL~~ | ✅ done June 2 |
+| ~~NEW~~ | ~~Domain classification silently failing — memory_rebuild_domains used GLM with max_tokens:120, content always null. Root cause: thinking model needs tokens for reasoning before emitting content. Switched to llama-3.1-8b~~ | ~~CRITICAL~~ | ✅ done June 2 |

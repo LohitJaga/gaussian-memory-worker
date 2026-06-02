@@ -355,20 +355,21 @@ async function retrieve(
   // True spreading activation: second Vectorize pass from top-3 anchors
   // Activated memories SUPPLEMENT direct results — they don't compete within top-K
   const seenIds = new Set(candidates.map(c => c.id));
-  const activationAnchors = scored.slice(0, 1).filter(c => c.vector.length > 0);
+  const activationAnchors = scored.slice(0, 3).filter(c => c.vector.length > 0);
   const activatedExtras: typeof scored = [];
 
   if (activationAnchors.length > 0) {
     const neighborQueries = activationAnchors.map(anchor =>
-      env.VECTORIZE.query(anchor.vector, { topK: 6, returnValues: false, returnMetadata: 'indexed' })
+      env.VECTORIZE.query(anchor.vector, { topK: 2, returnValues: false, returnMetadata: 'indexed' })
     );
     const neighborResults = await Promise.all(neighborQueries);
 
     const newMatches: { id: string; score: number }[] = [];
     for (const result of neighborResults) {
       for (const m of result.matches ?? []) {
-        if (!seenIds.has(m.id) && (m.score ?? 0) >= 0.75) {
-          newMatches.push({ id: m.id, score: m.score ?? 0 });
+        // Lower threshold (0.65) captures weak associations per Collins & Loftus; 0.6 decay = empirical priming slope
+        if (!seenIds.has(m.id) && (m.score ?? 0) >= 0.65) {
+          newMatches.push({ id: m.id, score: (m.score ?? 0) * 0.6 });
           seenIds.add(m.id);
         }
       }
@@ -522,7 +523,7 @@ async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number
     if (Date.now() - start > timeBudgetMs) break; // stop before wall-clock limit
     const group = batch.slice(g, g + GROUP);
     const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
-    const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+    const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
       messages: [
         {
           role: 'system',
@@ -530,7 +531,7 @@ async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs: number
         },
         { role: 'user', content: numbered },
       ],
-      max_tokens: 120,
+      max_tokens: 256,
     }) as any;
 
     const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
@@ -805,7 +806,7 @@ async function synthesizeIdentityProfile(env: Env): Promise<void> {
   const facts = (rows.results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
     messages: [
       {
         role: 'system',
@@ -816,7 +817,7 @@ async function synthesizeIdentityProfile(env: Env): Promise<void> {
     max_tokens: 700,
   }) as any;
 
-  const profile = result?.response?.trim();
+  const profile = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
   if (profile) {
     await env.KV.put('IDENTITY_PROFILE', profile);
   }
@@ -1032,7 +1033,7 @@ async function refreshDomainSummary(domainName: string, newCount: number, env: E
   const facts = ((fallback ?? rows).results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
     messages: [
       { role: 'system', content: `Summarize what this person knows, does, or prefers specifically in the "${domainName}" domain. Focus only on what distinguishes this domain from others. 2 sentences, specific and factual. No speculation or preamble.` },
       { role: 'user', content: facts },
@@ -1040,7 +1041,7 @@ async function refreshDomainSummary(domainName: string, newCount: number, env: E
     max_tokens: 120,
   }) as any;
 
-  const summary = result?.response?.trim();
+  const summary = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
   if (summary) {
     await env.KV.put(`domain_summary:${domainName}`, summary);
     await env.DB.prepare('UPDATE domain_anchors SET last_summarized_count = ? WHERE name = ?')
@@ -1424,14 +1425,14 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
           && results[0].score > 0.85
           && (results[0].score - results[1].score) < 0.04) {
         const blendInput = results.slice(0, 3).map(r => r.text).join('\n');
-        const blend = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+        const blend = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
           messages: [
             { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
             { role: 'user', content: blendInput },
           ],
           max_tokens: 100,
         }) as any;
-        const blended = blend?.response?.trim();
+        const blended = (blend?.response ?? blend?.choices?.[0]?.message?.content ?? '').trim();
         if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
       }
 
@@ -2049,7 +2050,8 @@ Return ONLY valid JSON array:
         const group = batch.slice(g, g + GROUP);
         const numbered = group.map((r, j) => `${j + 1}. ${r.text.slice(0, 150)}`).join('\n');
 
-        const result = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+        // Llama (not GLM) for classification — GLM is a thinking model, too slow/expensive for batch JSON tasks
+        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
           messages: [
             {
               role: 'system',
@@ -2057,25 +2059,27 @@ Return ONLY valid JSON array:
             },
             { role: 'user', content: numbered },
           ],
-          max_tokens: 120,
+          max_tokens: 256,
         }) as any;
 
-        const raw = (result?.response ?? '').trim();
+        const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+        const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
         try {
           const match = raw.match(/\[[\s\S]*?\]/);
           if (match) {
             const parsed = JSON.parse(match[0]) as string[];
             for (let j = 0; j < group.length && j < parsed.length; j++) {
-              const d = (parsed[j] ?? '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
-              if (d.length >= 2) {
-                domainAssignments[g + j] = d;
-                if (!existingDomains.includes(d) && existingDomains.length < 50) {
-                  existingDomains.push(d);
-                }
+              let d = (parsed[j] ?? '').toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+              if (d.length === 0) d = 'unclassified';
+              domainAssignments[g + j] = d.slice(0, 40);
+              if (!existingDomains.includes(d) && existingDomains.length < 50) {
+                existingDomains.push(d.slice(0, 40));
               }
             }
           }
-        } catch {}
+        } catch (e) {
+          console.error('[rebuild_domains] GLM parse error:', raw.slice(0, 200), e);
+        }
       }
 
       // Batch D1 updates + centroid accumulation
