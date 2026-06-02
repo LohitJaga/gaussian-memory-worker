@@ -192,6 +192,16 @@ async function storeMemory(
       text: r.text.slice(0, 100),
       score: scoreMap.get(r.id) ?? 0,
     }));
+
+    // Queue near-miss pairs for nightly memory_judge — store as pending_judge
+    // so cron can process them without needing isContradiction() to fire
+    const pendingInserts = nearMissIds.map(nearId =>
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at)
+         VALUES (?, ?, ?, 'pending_judge', ?, 'near-miss at store time', ?)`
+      ).bind(crypto.randomUUID(), id, nearId, scoreMap.get(nearId) ?? 0, now)
+    );
+    if (pendingInserts.length > 0) await env.DB.batch(pendingInserts);
   }
 
   return { action: 'spawned', id, conflict_candidates };
@@ -1672,11 +1682,21 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         if (!row) return `Not found: ${memId}`;
         targets = [row];
       } else {
-        const rows = await env.DB.prepare(
-          'SELECT id, text FROM memories WHERE contradiction_flag = 1 LIMIT 20'
+        // Process pending_judge queue first (near-misses queued at store time), then contradiction_flag
+        const pendingRows = await env.DB.prepare(
+          `SELECT DISTINCT m.id, m.text FROM memory_relations mr
+           JOIN memories m ON m.id = mr.from_id
+           WHERE mr.relation_type = 'pending_judge' LIMIT 20`
         ).all<{ id: string; text: string }>();
-        targets = rows.results ?? [];
-        if (!targets.length) return 'No flagged contradictions to judge.';
+        targets = pendingRows.results ?? [];
+
+        if (!targets.length) {
+          const flagged = await env.DB.prepare(
+            'SELECT id, text FROM memories WHERE contradiction_flag = 1 LIMIT 20'
+          ).all<{ id: string; text: string }>();
+          targets = flagged.results ?? [];
+        }
+        if (!targets.length) return 'No pending judgements or flagged contradictions.';
       }
 
       const results: string[] = [];
@@ -1750,6 +1770,12 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
           await env.DB.prepare(
             'INSERT INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
           ).bind(crypto.randomUUID(), target.id, cand.id, verdict, confidence, reason, now).run();
+
+          // Clear pending_judge entry now that verdict is stored
+          await env.DB.prepare(
+            `DELETE FROM memory_relations WHERE relation_type = 'pending_judge'
+             AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
+          ).bind(target.id, cand.id, cand.id, target.id).run();
 
           // If supersedes: flag old memory for decay acceleration
           if (verdict === 'supersedes') {
@@ -2239,5 +2265,7 @@ export default {
     await refreshStaleDomainSummaries(env);
     await cronRebuildBatch(env, 2000, 10 * 60 * 1000);
     await synthesizeIdentityProfile(env);
+    // Process up to 20 pending_judge pairs nightly — feeds memory_relations with verdicts
+    await handleToolCall('memory_judge', {}, env).catch(() => {});
   },
 };
