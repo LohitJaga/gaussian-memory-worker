@@ -120,6 +120,17 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Activation overlay — highlight which nodes lit up during a retrieve() call, show spreading activation in real time
 - [ ] Ship as `/viz` endpoint on the worker or standalone HTML — embed in README + use in Twitter demo video
 
+## Competitor Techniques to Steal
+
+### From Mem0 (researched June 2, 2026)
+- [ ] **Entity boost** — Mem0 maintains a separate entity_store vector space. Named entities (people/projects/tools) queried separately, boost linked memories by up to 0.5 points. Fixes Bayer bleeding into Gaussian Memory queries. Implementation: extract entities from query text, query Vectorize with entity as search term, boost scores of memories that mention those entities.
+- [ ] **Over-fetch + rerank** — Mem0 fetches `max(topK * 4, 60)` candidates, then reranks with BM25 + entity scores before returning top-k. We return raw Vectorize top-k with no reranking. Cheap win.
+- [ ] **BM25 hybrid** — Mem0 lemmatizes query, runs keyword search alongside semantic. Already in Week 3 TODO (FTS5) but worth prioritizing — keyword search catches exact SKU names, function names, etc. that cosine misses.
+- [ ] **Context at storage not retrieval** — Mem0 uses last 10 messages during extraction (storage), not retrieval. Their retrieval is pure semantic + entity. Our session-aware retrieval plan (GLM intent extraction) is the opposite approach — worth testing both.
+
+### From Zep
+- [ ] **Session graph** — Zep maintains a separate session-level knowledge graph updated each turn. Retrieval queries the graph first, then vector store. More structured than our domain routing but higher maintenance.
+
 ## Differentiators vs SuperMemory (ship separately with blog/Twitter)
 - [ ] Decision trails — store not just what happened but why: decision + context + alternatives considered. Surface "last time you faced this tradeoff you chose Y because Z." No other memory system does this.
 - [ ] Belief drift over time — expose the Gaussian uncertainty model: "3 months ago you thought X, now your behavior suggests Y — here's what changed." Key-value stores can't do this.
