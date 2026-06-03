@@ -300,7 +300,7 @@ async function retrieve(
     env.VECTORIZE.query(Array.from(qvec), queryOpts),
     ftsQuery.length >= 3
       ? env.DB.prepare(
-          `SELECT id FROM memories_fts WHERE memories_fts MATCH ? AND project = ? OR project = 'default' ORDER BY rank LIMIT ?`
+          `SELECT id FROM memories_fts WHERE memories_fts MATCH ? AND (project = ? OR project = 'default') ORDER BY rank LIMIT ?`
         ).bind(ftsQuery, project, topK * 4).all<{ id: string }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] }),
   ]);
@@ -357,15 +357,10 @@ async function retrieve(
   // Merge vector + FTS5-only IDs for D1 fetch
   const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds])];
   const placeholders = allIds.map(() => '?').join(',');
-  // If no project context (default), skip project filter — all memories visible
-  const projectFilter = project === 'default'
-    ? ''
-    : 'AND (project = ? OR project = \'default\')';
-  const projectBindings = project === 'default' ? [] : [project];
   const rows = await env.DB.prepare(
     `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-     FROM memories WHERE id IN (${placeholders}) ${projectFilter}`
-  ).bind(...allIds, ...projectBindings).all<{
+     FROM memories WHERE id IN (${placeholders}) AND (project = ? OR project = 'default')`
+  ).bind(...allIds, project).all<{
     id: string; text: string; domain: string; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
   }>();
