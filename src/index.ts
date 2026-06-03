@@ -175,6 +175,7 @@ async function storeMemory(
     metadata: { domain, memory_type: memoryType, project },
   }]);
   hotTierAdd(id, env); // async, non-blocking
+  extractAndLinkEntities(id, text, env); // async, non-blocking
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
   const nearMissIds = results.matches
@@ -223,11 +224,59 @@ async function hotTierAdd(id: string, env: Env): Promise<void> {
   } catch {}
 }
 
+async function processPendingEntityQueue(env: Env): Promise<void> {
+  try {
+    const raw = await env.KV.get('pending_entity_queue');
+    if (!raw) return;
+    const queue: Array<{id: string; text: string}> = JSON.parse(raw);
+    if (!queue.length) return;
+    const batch = queue.splice(0, 50); // process up to 50 per cron run
+    await env.KV.put('pending_entity_queue', JSON.stringify(queue));
+    const now = Math.floor(Date.now() / 1000);
+    for (const item of batch) {
+      const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        messages: [
+          { role: 'system', content: `Extract named entities. Return ONLY a JSON array of "type:name" strings. Max 4. Types: tool, project, concept, parameter, person. Return [] if none. Example: ["tool:GLM-4.7-flash","concept:spreading activation"]` },
+          { role: 'user', content: item.text },
+        ],
+        max_tokens: 128, temperature: 0,
+      }) as any;
+      const rawEnt = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
+      const match = rawEnt.match(/\[[\s\S]*?\]/);
+      if (!match) continue;
+      const entities = JSON.parse(match[0]) as string[];
+      const ops: any[] = [];
+      for (const ent of entities) {
+        const colonIdx = ent.indexOf(':');
+        if (colonIdx < 0) continue;
+        const type = ent.slice(0, colonIdx).trim();
+        const name = ent.slice(colonIdx + 1).trim();
+        if (!type || !name) continue;
+        const entId = `ent_${type}_${name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`;
+        ops.push(env.DB.prepare(`INSERT OR IGNORE INTO entity_nodes (id, type, canonical_name, last_seen) VALUES (?,?,?,?)`).bind(entId, type, name, now));
+        ops.push(env.DB.prepare(`UPDATE entity_nodes SET last_seen = ? WHERE id = ?`).bind(now, entId));
+        ops.push(env.DB.prepare(`INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, entity_span) VALUES (?,?,?)`).bind(item.id, entId, name));
+      }
+      if (ops.length > 0) await env.DB.batch(ops);
+    }
+  } catch {}
+}
+
 async function hotTierGet(env: Env): Promise<string[]> {
   try {
     const raw = await env.KV.get(HOT_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch { return []; }
+}
+
+async function extractAndLinkEntities(memoryId: string, text: string, env: Env): Promise<void> {
+  // Queue for cron processing — Llama calls too slow for fire-and-forget in Workers context
+  try {
+    const raw = await env.KV.get('pending_entity_queue');
+    const queue: Array<{id: string; text: string}> = raw ? JSON.parse(raw) : [];
+    queue.push({ id: memoryId, text: text.slice(0, 300) });
+    await env.KV.put('pending_entity_queue', JSON.stringify(queue.slice(-200))); // cap at 200
+  } catch {}
 }
 
 function dotProduct(a: number[], b: number[]): number {
@@ -2569,5 +2618,7 @@ export default {
     await synthesizeIdentityProfile(env);
     // Process up to 20 pending_judge pairs nightly — feeds memory_relations with verdicts
     await handleToolCall('memory_judge', {}, env).catch(() => {});
+    // Process pending entity extraction queue (new memories queued during day)
+    await processPendingEntityQueue(env);
   },
 };
