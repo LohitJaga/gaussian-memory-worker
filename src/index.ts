@@ -174,6 +174,7 @@ async function storeMemory(
     values: Array.from(mu),
     metadata: { domain, memory_type: memoryType, project },
   }]);
+  hotTierAdd(id, env); // async, non-blocking
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
   const nearMissIds = results.matches
@@ -205,6 +206,28 @@ async function storeMemory(
   }
 
   return { action: 'spawned', id, conflict_candidates };
+}
+
+// Recency hot tier — KV stores last 100 stored/accessed memory IDs (24h TTL)
+// retrieve() merges hot IDs into candidate pool; high recency score elevates them naturally
+const HOT_KEY = 'hot:recent_ids';
+const HOT_TTL = 86400; // 24h
+const HOT_MAX = 100;
+
+async function hotTierAdd(id: string, env: Env): Promise<void> {
+  try {
+    const raw = await env.KV.get(HOT_KEY);
+    const ids: string[] = raw ? JSON.parse(raw) : [];
+    const updated = [id, ...ids.filter(i => i !== id)].slice(0, HOT_MAX);
+    await env.KV.put(HOT_KEY, JSON.stringify(updated), { expirationTtl: HOT_TTL });
+  } catch {}
+}
+
+async function hotTierGet(env: Env): Promise<string[]> {
+  try {
+    const raw = await env.KV.get(HOT_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
 }
 
 function dotProduct(a: number[], b: number[]): number {
@@ -334,7 +357,12 @@ async function retrieve(
   const vecIds = new Set((vecFinal.matches ?? []).map(m => m.id));
   const ftsOnlyIds = mergedIds.filter(id => !vecIds.has(id));
 
-  if (!results.matches.length && !ftsOnlyIds.length) return [];
+  // Hot tier — inject recently stored/accessed memory IDs into candidate pool
+  const hotIds = await hotTierGet(env);
+  const allCandidateIds = new Set([...mergedIds, ...hotIds]);
+  const hotOnlyIds = hotIds.filter(id => !allCandidateIds.has(id) || !vecIds.has(id));
+
+  if (!results.matches.length && !ftsOnlyIds.length && !hotOnlyIds.length) return [];
 
   // Entity boost — Mem0-style: embed each entity, query Vectorize, boost memories that appear
   // Attenuated by spread (more entity hits = lower individual boost, same as Mem0)
@@ -354,8 +382,8 @@ async function retrieve(
     }
   }
 
-  // Merge vector + FTS5-only IDs for D1 fetch
-  const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds])];
+  // Merge vector + FTS5-only + hot tier IDs for D1 fetch
+  const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds, ...hotOnlyIds])];
   const placeholders = allIds.map(() => '?').join(',');
   // project='default' = no project context (direct MCP call) → search all projects
   const projectClause = project === 'default'
