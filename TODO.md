@@ -76,20 +76,26 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Nightly consolidation — compress cold σ>1.5 memories via Llama, write compressed artifact to R2, drop from D1/Vectorize. Retrieval falls back to R2 cold archive only if live pool scores below threshold. Live pool stays sharp; cold tier grows cheaply with zero egress cost.
 
 ### Week 3 (June 14–20) — Advanced + Ship Infra
-- [ ] D1 FTS5 virtual table — migrate 6461 memories, dual-write on store
-- [ ] RRF scoring — merges Vectorize cosine + FTS5 BM25 + recency + access_freq
+- [x] D1 FTS5 virtual table — 6,366 memories indexed, dual-write triggers (INSERT/UPDATE/DELETE), unicode61 tokenizer. (June 3)
+- [x] RRF scoring — merges Vectorize cosine + FTS5 BM25 with RRF k=60. FTS5-only IDs injected into D1 candidate pool. (June 3)
+- [x] Score normalization — min-max per component (cosine, recency, accessFreq) within result batch before combining. Spread improved from 0.9-1.2 → 0.28-1.33. (June 3)
+- [x] Recency hot tier — KV 'hot:recent_ids' (24h TTL, 100 IDs FIFO). Written on every store, merged into candidate pool on retrieve. Hot memories score 1.52 vs cold 0.28. (June 3)
+- [x] MCP project fix — project='default' now searches all memories (no project filter). Enables direct MCP calls without hook. (June 3)
+- [x] Extraction prompt improved — Mem0-style transition capture "Switched X → Y because Z", exact parameter preservation (topK=2 not "small topK"), 15-80 word range. (June 3)
+- [x] LLM project retag — memory_retag_projects tool, Llama classifies default pool into correct projects. 4,093 → 2,764 default (genuinely ambiguous remainder). (June 3)
+- [x] Sleep command filter — posttool hook now skips sleep/wait/true/false/exit commands. 10 garbage memories deleted. (June 3)
+- [x] Security fixes — SQL injection in project clause (parameterized binding), FTS5 operator precedence (parenthesized project clause). (June 3)
 - [ ] Multi-hop BFS spreading activation (configurable depth)
 - [ ] `valid_from`/`valid_to` on memories + schema migration
 - [ ] `npx gaussian-memory init` script (wrangler deploy + MCP config + hooks)
 - [x] Generalize retrieval hook — removed all hardcoded project/keyword mappings. Now purely project-name-anchored (git root → Q2/Q3). Works for any project without config. Short messages (<25 chars) use project-anchored Q1 instead of empty-word fallback. No config file needed — new projects auto-detected. (May 29)
 - [ ] Generalize BYOC worker — no hardcoded personal info in wrangler.toml/index.ts, gaussian.config.json for user identity
 - [ ] OpenCode hook support — ship hooks/ folder in repo with Claude Code + OpenCode variants. OpenCode is most popular open-source harness, needs native support for BYOC adoption. Research OpenCode extension/plugin format first.
-- [ ] Stop hook extraction: add "implementation decisions with specific parameters" as priority category — retrieval test showed decay thresholds, RRF weights, chunk limits not being captured reliably
+- [x] Stop hook extraction: add "implementation decisions with specific parameters" as priority category — done June 3, extraction prompt updated with Mem0 transition format + parameter precision.
 - [x] Session-aware retrieval — Llama 3.1-8b rewrites short queries (<60 chars) using prompt context before embedding. 1.5s timeout, fallback to raw query. Hook passes PROMPT as context on Q1. (June 2)
 - [x] Session summary memories — second GLM pass in memory_extract_and_store synthesizes session into: worked on / decided / still open. Stored as memory_type='session' with emotional_intensity=0.9 (tight sigma, slow decay). +0.20 retrieval boost. type preserved on all merge paths. (June 1)
 - [ ] Compaction-triggered extraction — Claude Code doesn't expose a compaction hook yet. When context fills mid-session, memories before compaction are currently lost until Stop. Future: hook into compaction event to run memory_extract_and_store on pre-compaction context.
 - [ ] Entity graph retrieval — `memory_relations` table (already exists from memory_judge) extended to subject/predicate/object triples. Retrieval does graph traversal: query hits named entity (person/project/tool) → pull all related memories first. Proper Mem0-style, not just cosine blob matching.
-- [ ] Recency hot tier — Cloudflare KV store (TTL 24h) checked before Vectorize for memories accessed or stored in last 24h. Zero latency, always current. Not a score boost hack — a real separate retrieval tier.
 
 ### Week 4 (June 21–27) — Polish + Docs
 - [ ] index.ts modularization (typed interfaces, split modules)
