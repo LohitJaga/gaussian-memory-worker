@@ -286,26 +286,55 @@ async function retrieve(
     } catch {}
   }
 
-  // Stage 2: Vector search, optionally filtered to active domains
-  // topK * 4 to compensate for project filter reducing D1 candidates post-fetch
+  // Stage 2: Vector search + FTS5 keyword search in parallel (hybrid retrieval)
   const queryOpts: any = { topK: topK * 4, returnValues: true, returnMetadata: 'indexed' };
   if (activeDomains && activeDomains.length > 0) {
     queryOpts.filter = activeDomains.length === 1
       ? { domain: activeDomains[0] }
       : { domain: { $in: activeDomains } };
   }
-  let vecResults = await env.VECTORIZE.query(Array.from(qvec), queryOpts);
 
-  // Fallback: if domain filter gave too few results, try global search
+  // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
+  const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
+  const [vecResults, ftsResults] = await Promise.all([
+    env.VECTORIZE.query(Array.from(qvec), queryOpts),
+    ftsQuery.length >= 3
+      ? env.DB.prepare(
+          `SELECT id FROM memories_fts WHERE memories_fts MATCH ? AND project = ? OR project = 'default' ORDER BY rank LIMIT ?`
+        ).bind(ftsQuery, project, topK * 4).all<{ id: string }>().catch(() => ({ results: [] }))
+      : Promise.resolve({ results: [] }),
+  ]);
+
+  // Fallback: if domain filter gave too few vector results, try global search
+  let vecFinal = vecResults;
   if (activeDomains && (vecResults.matches?.length ?? 0) < topK) {
-    vecResults = await env.VECTORIZE.query(Array.from(qvec), {
+    vecFinal = await env.VECTORIZE.query(Array.from(qvec), {
       topK: topK * 3, returnValues: true, returnMetadata: 'indexed',
     });
   }
 
-  const results = vecResults;
+  // RRF fusion (k=60): combine vector ranks + FTS5 ranks
+  const RRF_K = 60;
+  const rrfScores = new Map<string, number>();
+  (vecFinal.matches ?? []).forEach((m, rank) => {
+    rrfScores.set(m.id, (rrfScores.get(m.id) ?? 0) + 1 / (RRF_K + rank + 1));
+  });
+  (ftsResults.results ?? []).forEach((r, rank) => {
+    rrfScores.set(r.id, (rrfScores.get(r.id) ?? 0) + 1 / (RRF_K + rank + 1));
+  });
 
-  if (!results.matches.length) return [];
+  // Build merged ID set sorted by RRF score, preserve vector metadata for top vector hits
+  const mergedIds = [...rrfScores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topK * 4)
+    .map(([id]) => id);
+
+  const results = vecFinal;
+  // Inject RRF-only IDs (from FTS5) that weren't in vector results
+  const vecIds = new Set((vecFinal.matches ?? []).map(m => m.id));
+  const ftsOnlyIds = mergedIds.filter(id => !vecIds.has(id));
+
+  if (!results.matches.length && !ftsOnlyIds.length) return [];
 
   // Entity boost — Mem0-style: embed each entity, query Vectorize, boost memories that appear
   // Attenuated by spread (more entity hits = lower individual boost, same as Mem0)
@@ -325,13 +354,18 @@ async function retrieve(
     }
   }
 
-  const ids = results.matches.map(m => m.id);
-  const placeholders = ids.map(() => '?').join(',');
-  // Filter by current project + legacy 'default' bucket so old untagged memories still surface
+  // Merge vector + FTS5-only IDs for D1 fetch
+  const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds])];
+  const placeholders = allIds.map(() => '?').join(',');
+  // If no project context (default), skip project filter — all memories visible
+  const projectFilter = project === 'default'
+    ? ''
+    : 'AND (project = ? OR project = \'default\')';
+  const projectBindings = project === 'default' ? [] : [project];
   const rows = await env.DB.prepare(
     `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-     FROM memories WHERE id IN (${placeholders}) AND (project = ? OR project = 'default')`
-  ).bind(...ids, project).all<{
+     FROM memories WHERE id IN (${placeholders}) ${projectFilter}`
+  ).bind(...allIds, ...projectBindings).all<{
     id: string; text: string; domain: string; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
   }>();
@@ -354,7 +388,9 @@ async function retrieve(
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
     const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
-    const primaryScore = 0.6 * cosineWeighted + 0.25 * recency + 0.15 * accessFreq + entityBoost;
+    // RRF boost: FTS5 keyword match lifts score (normalized to ~0-0.15 range)
+    const rrfBoost = Math.min(0.15, (rrfScores.get(row.id) ?? 0) * 10);
+    const primaryScore = 0.6 * cosineWeighted + 0.25 * recency + 0.15 * accessFreq + entityBoost + rrfBoost;
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
