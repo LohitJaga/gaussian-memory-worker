@@ -175,7 +175,7 @@ async function storeMemory(
     metadata: { domain, memory_type: memoryType, project },
   }]);
   hotTierAdd(id, env); // async, non-blocking
-  extractAndLinkEntities(id, text, env); // async, non-blocking
+  await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
   const nearMissIds = results.matches
@@ -1905,6 +1905,16 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       }
 
       return lines.join('\n').trimEnd();
+    }
+
+    case 'memory_process_entity_queue': {
+      const before = await env.KV.get('pending_entity_queue');
+      const beforeCount = before ? JSON.parse(before).length : 0;
+      await processPendingEntityQueue(env);
+      const after = await env.KV.get('pending_entity_queue');
+      const afterCount = after ? JSON.parse(after).length : 0;
+      const entityCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memory_entities').first<{n:number}>();
+      return `Processed ${beforeCount - afterCount} memories. Queue: ${beforeCount} → ${afterCount}. Total entity links: ${entityCount?.n ?? 0}`;
     }
 
     case 'memory_judge': {
