@@ -367,6 +367,23 @@ async function retrieve(
   // Entity boost — Mem0-style: embed each entity, query Vectorize, boost memories that appear
   // Attenuated by spread (more entity hits = lower individual boost, same as Mem0)
   const entityBoostMap = new Map<string, number>();
+
+  // 1-hop entity graph traversal: lookup entity_nodes by name, pull connected memory IDs
+  if (entityTokens.length > 0) {
+    const entityNamePlaceholders = entityTokens.map(() => '?').join(',');
+    const graphRows = await env.DB.prepare(
+      `SELECT me.memory_id, COUNT(*) as shared_entities
+       FROM entity_nodes en
+       JOIN memory_entities me ON en.id = me.entity_id
+       WHERE en.canonical_name IN (${entityNamePlaceholders})
+       GROUP BY me.memory_id`
+    ).bind(...entityTokens).all<{ memory_id: string; shared_entities: number }>().catch(() => ({ results: [] }));
+    for (const r of (graphRows.results ?? [])) {
+      const graphBoost = Math.min(0.2, 0.1 * r.shared_entities);
+      entityBoostMap.set(r.memory_id, (entityBoostMap.get(r.memory_id) ?? 0) + graphBoost);
+    }
+  }
+
   if (entityTokens.length > 0) {
     const entityVecs = await batchEmbed(entityTokens, env);
     const entityQueries = entityVecs.map(ev =>
@@ -1426,6 +1443,11 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'memory_build_entities',
+    description: 'Retroactive entity extraction — processes memories in batches, extracts named entities (tool/project/concept/parameter/person), writes to entity_nodes + memory_entities tables. Call repeatedly until "Done." Enables 1-hop entity graph traversal at retrieve time.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'identity_profile_get',
     description: 'Retrieve the stored CLAUDE.md identity profile from KV. Returns empty string if not set.',
     inputSchema: { type: 'object', properties: {} },
@@ -2213,6 +2235,78 @@ Return ONLY valid JSON array:
     case 'memory_cleanup_singletons': {
       const minCount = (args.min_count as number) ?? 3;
       return await cleanupSingletons(env, minCount);
+    }
+
+    case 'memory_build_entities': {
+      // Retroactive entity extraction — batch processes memories, extracts named entities,
+      // writes to entity_nodes + memory_entities for 1-hop graph traversal at retrieve time
+      const BATCH = 20;
+      const offsetRaw = await env.KV.get('ENTITY_BUILD_OFFSET');
+      const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+
+      const rows = await env.DB.prepare(
+        `SELECT id, text FROM memories ORDER BY access_count DESC, rowid DESC LIMIT ? OFFSET ?`
+      ).bind(BATCH, offset).all<{ id: string; text: string }>();
+
+      const batch = rows.results ?? [];
+      if (!batch.length) {
+        await env.KV.delete('ENTITY_BUILD_OFFSET');
+        const count = await env.DB.prepare('SELECT COUNT(*) as n FROM memory_entities').first<{n:number}>();
+        return `Done. ${count?.n ?? 0} entity links built.`;
+      }
+
+      const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 150)}`).join('\n');
+      const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        messages: [
+          {
+            role: 'system',
+            content: `Extract named entities from each memory. Return ONLY a JSON array of arrays.
+Entity types: tool (specific model/library names like GLM-4.7-flash, D1, Vectorize), project (Gaussian Memory, Color Wow, Bayer), concept (spreading activation, Bhattacharyya), parameter (exact values like topK=2), person (proper names).
+For each memory return up to 4 entities as ["type:canonical_name", ...]. Use empty array [] if no clear entities.
+Example: [["tool:GLM-4.7-flash","concept:spreading activation"],["project:Gaussian Memory","parameter:topK=2"],[]]`,
+          },
+          { role: 'user', content: numbered },
+        ],
+        max_tokens: 512,
+        temperature: 0,
+      }) as any;
+
+      const raw = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
+      try {
+        const match = raw.match(/\[[\s\S]*\]/);
+        if (match) {
+          const parsed = JSON.parse(match[0]) as string[][];
+          const now = Math.floor(Date.now() / 1000);
+          const dbOps: any[] = [];
+
+          for (let i = 0; i < batch.length; i++) {
+            const memId = batch[i].id;
+            const entities = parsed[i] ?? [];
+            for (const ent of entities) {
+              const [type, ...nameParts] = ent.split(':');
+              const name = nameParts.join(':').trim();
+              if (!type || !name) continue;
+              const entId = `ent_${type}_${name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`;
+              dbOps.push(
+                env.DB.prepare(`INSERT OR IGNORE INTO entity_nodes (id, type, canonical_name, last_seen) VALUES (?,?,?,?)`)
+                  .bind(entId, type, name, now)
+              );
+              dbOps.push(
+                env.DB.prepare(`UPDATE entity_nodes SET last_seen = ? WHERE id = ?`).bind(now, entId)
+              );
+              dbOps.push(
+                env.DB.prepare(`INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, entity_span) VALUES (?,?,?)`)
+                  .bind(memId, entId, name)
+              );
+            }
+          }
+          if (dbOps.length > 0) await env.DB.batch(dbOps);
+        }
+      } catch {}
+
+      await env.KV.put('ENTITY_BUILD_OFFSET', String(offset + BATCH));
+      const total = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{n:number}>();
+      return `Processed batch at offset ${offset}. ${total?.n ?? 0} memories total, ~${Math.max(0, (total?.n ?? 0) - offset - BATCH)} remaining.`;
     }
 
     case 'memory_retag_projects': {
