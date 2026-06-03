@@ -1376,6 +1376,11 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'memory_retag_projects',
+    description: 'LLM-based project retagging for memories in the default pool. Llama classifies each memory text into the correct project. Call repeatedly until it returns "Done." ~137 calls for 4k memories.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'identity_profile_get',
     description: 'Retrieve the stored CLAUDE.md identity profile from KV. Returns empty string if not set.',
     inputSchema: { type: 'object', properties: {} },
@@ -2160,6 +2165,71 @@ Return ONLY valid JSON array:
     case 'memory_cleanup_singletons': {
       const minCount = (args.min_count as number) ?? 3;
       return await cleanupSingletons(env, minCount);
+    }
+
+    case 'memory_retag_projects': {
+      const BATCH = 30;
+      const PROJECTS = ['gaussian-memory-worker','bayer-traitprediction','loreal-internship','leetcode-practice','personal','default'];
+      const offsetRaw = await env.KV.get('RETAG_OFFSET');
+      const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+
+      const rows = await env.DB.prepare(
+        `SELECT id, text FROM memories WHERE project = 'default' ORDER BY rowid LIMIT ?`
+      ).bind(BATCH).all<{ id: string; text: string }>();
+
+      const batch = rows.results ?? [];
+      if (!batch.length) {
+        await env.KV.delete('RETAG_OFFSET');
+        const counts = await env.DB.prepare(`SELECT project, COUNT(*) as cnt FROM memories GROUP BY project ORDER BY cnt DESC`).all<{project:string;cnt:number}>();
+        const summary = (counts.results ?? []).map(r => `${r.project}:${r.cnt}`).join(', ');
+        return `Done. ${summary}`;
+      }
+
+      const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 120)}`).join('\n');
+      const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        messages: [
+          {
+            role: 'system',
+            content: `Classify each memory by project. Return ONLY a JSON array of exactly ${batch.length} project name strings.
+
+Projects:
+- gaussian-memory-worker: Cloudflare Workers, D1, Vectorize, MCP server, memory_retrieve, spreading activation, sigma, domain classification, wrangler
+- bayer-traitprediction: UAV imagery, maize, G2F, phenotypic data, CyVerse, shapefiles, field trials, Purdue Data Mine, crop science
+- loreal-internship: Color Wow, SKU anomaly, BigQuery, Gemini, sales digest, GChat, Federici Brands, Sephora, Ulta, Amazon US
+- leetcode-practice: LeetCode, statistics, probability, binomial, z-score, regression, homework, exam, cheat sheet
+- personal: career goals, dating, relationships, health, apartment, fitness, social life, job search, recruiting
+- default: genuinely unclear or cross-project
+
+Return: ["project-name", "project-name", ...]`,
+          },
+          { role: 'user', content: numbered },
+        ],
+        max_tokens: 256,
+      }) as any;
+
+      const raw = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
+      try {
+        const match = raw.match(/\[[\s\S]*?\]/);
+        if (match) {
+          const parsed = JSON.parse(match[0]) as string[];
+          const updates = batch
+            .map((r, i) => {
+              const p = (parsed[i] ?? 'default').trim();
+              return PROJECTS.includes(p) ? { id: r.id, project: p } : null;
+            })
+            .filter(Boolean) as { id: string; project: string }[];
+
+          if (updates.length) {
+            await env.DB.batch(
+              updates.map(u => env.DB.prepare('UPDATE memories SET project = ? WHERE id = ?').bind(u.project, u.id))
+            );
+          }
+        }
+      } catch {}
+
+      await env.KV.put('RETAG_OFFSET', String(offset + BATCH));
+      const remaining = await env.DB.prepare(`SELECT COUNT(*) as n FROM memories WHERE project = 'default'`).first<{n:number}>();
+      return `Processed batch. ~${remaining?.n ?? '?'} default memories remaining.`;
     }
 
     case 'memory_rebuild_domains': {
