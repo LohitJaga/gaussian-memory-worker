@@ -357,10 +357,15 @@ async function retrieve(
   // Merge vector + FTS5-only IDs for D1 fetch
   const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds])];
   const placeholders = allIds.map(() => '?').join(',');
+  // project='default' = no project context (direct MCP call) → search all projects
+  const projectClause = project === 'default'
+    ? ''
+    : 'AND (project = ? OR project = \'default\')';
+  const binds = project === 'default' ? [...allIds] : [...allIds, project];
   const rows = await env.DB.prepare(
     `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-     FROM memories WHERE id IN (${placeholders}) AND (project = ? OR project = 'default')`
-  ).bind(...allIds, project).all<{
+     FROM memories WHERE id IN (${placeholders}) ${projectClause}`
+  ).bind(...binds).all<{
     id: string; text: string; domain: string; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
   }>();
@@ -368,13 +373,12 @@ async function retrieve(
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
-  // Build candidates — Gaussian-aware primary score
-  // Sharp memories (low sigma) rank at full cosine weight.
-  // Fuzzy memories are penalized proportional to how much their sigma exceeds the query sigma.
-  // This wires the Gaussian model into actual ranking — previously distributionalScore() was dead code.
+  // Build candidates — compute raw components first, then normalize within batch
   const nowSec = Math.floor(Date.now() / 1000);
   const NINETY_DAYS = 90 * 24 * 3600;
-  const candidates = (rows.results ?? []).map(row => {
+
+  // Pass 1: compute raw scores
+  const rawCandidates = (rows.results ?? []).map(row => {
     const memSigma = deserializeSigma(row.sigma_diagonal);
     const cosineSim = cosineMap.get(row.id) ?? 0;
     const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
@@ -382,10 +386,23 @@ async function retrieve(
     const accessFreq = Math.min(1, (row.access_count ?? 0) / 50);
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
     const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
+    return { row, memSigma, cosineWeighted, recency, accessFreq };
+  });
+
+  // Min-max normalization within batch — spreads scores across [0,1] per component
+  const minMax = (arr: number[]) => {
+    const mn = Math.min(...arr), mx = Math.max(...arr);
+    return mx === mn ? arr.map(() => 1) : arr.map(v => (v - mn) / (mx - mn));
+  };
+  const normCosine = minMax(rawCandidates.map(c => c.cosineWeighted));
+  const normRecency = minMax(rawCandidates.map(c => c.recency));
+  const normAccess = minMax(rawCandidates.map(c => c.accessFreq));
+
+  // Pass 2: build scored candidates using normalized components
+  const candidates = rawCandidates.map(({ row, memSigma }, i) => {
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
-    // RRF boost: FTS5 keyword match lifts score (normalized to ~0-0.15 range)
-    const rrfBoost = Math.min(0.15, (rrfScores.get(row.id) ?? 0) * 10);
-    const primaryScore = 0.6 * cosineWeighted + 0.25 * recency + 0.15 * accessFreq + entityBoost + rrfBoost;
+    const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
+    const primaryScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost;
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
