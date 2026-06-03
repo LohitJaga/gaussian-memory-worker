@@ -2057,20 +2057,23 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
             content: `Extract facts from this session log for long-term memory. Today: ${new Date().toISOString().slice(0, 10)}. Resolve relative dates to ISO 8601.
 
 EXTRACT (up to 12 total, prioritized):
-1. Decisions — exact technology/approach chosen and why
-2. Problems solved — what broke, exact fix
-3. Project context — concrete state, named blockers
-4. Preferences — specific tools/methods opinions
+1. Decisions — exact technology/approach chosen and WHY. Format transitions as "Switched X → Y because Z" (e.g. "Switched GLM → Llama-3.1-8b because GLM exhausts token budget before emitting content")
+2. Implementation parameters — preserve exact numbers/thresholds ("topK=2, threshold=0.65, decay=0.6" not "adjusted parameters")
+3. Problems solved — what broke, exact fix applied
+4. Project context — concrete state, named blockers, specific counts/dates
+5. Preferences — specific tools/methods/patterns with reasoning
 
 RULES:
-- Preserve exact names, numbers, technologies ("GLM-4.7-flash" not "a model")
+- Preserve exact names, numbers, technologies ("GLM-4.7-flash" not "a model", "topK=2" not "small topK")
+- Capture state transitions: "Changed X from A to B because C"
 - Each fact must stand alone without reading the session
 - Third-person factual sentence only
+- 15–80 words per fact
 
 SKIP: vague intent (Wants to/Is considering/Is planning/Is trying), raw chat (ok/yea/lol/ig/tbh/idk), generic status (done/updated/it works), questions, pasted content, anything under 15 words
 
 Return ONLY valid JSON array:
-[{"text":"Chose Cloudflare D1 over PlanetScale — zero egress fees, edge-native","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
+[{"text":"Chose Cloudflare D1 over PlanetScale — zero egress fees, edge-native","type":"episodic"},{"text":"Switched GLM-4.7-flash → Llama-3.1-8b for batch classification because GLM exhausts token budget on reasoning_content before emitting final content, causing timeouts","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
           },
           { role: 'user', content: filteredLog },
         ],
