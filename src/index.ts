@@ -339,36 +339,17 @@ async function retrieve(
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
   const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
 
-  // Stage 1: Domain routing — score query against domain centroids
-  let activeDomains: string[] | null = null;
+  // Domain routing removed — Vectorize queries globally.
+  // FTS5+RRF+entity graph handles relevance without domain pre-filtering.
+  // Domain labels kept for display and scoring only (small boost if domain matches).
   const domainSizeMap = new Map<string, number>();
-  if (!domain) {
-    try {
-      const anchorRows = await env.DB.prepare(
-        'SELECT name, embedding, memory_count FROM domain_anchors WHERE memory_count >= 3'
-      ).all<{ name: string; embedding: string; memory_count: number }>();
-      if ((anchorRows.results ?? []).length > 0) {
-        for (const r of anchorRows.results ?? []) domainSizeMap.set(r.name, r.memory_count ?? 0);
-        const qArr = Array.from(qvec);
-        const domScores = (anchorRows.results ?? [])
-          .map(r => ({ name: r.name, score: dotProduct(qArr, JSON.parse(r.embedding) as number[]) }))
-          .sort((a, b) => b.score - a.score);
-        activeDomains = domScores.slice(0, 3).filter(d => d.score > 0.25).map(d => d.name);
-      }
-    } catch {}
-  }
 
-  // Stage 2: Vector search + FTS5 keyword search in parallel (hybrid retrieval)
+  // Vector search + FTS5 keyword search in parallel (hybrid retrieval, global scope)
   const queryOpts: any = { topK: topK * 4, returnValues: true, returnMetadata: 'indexed' };
-  if (activeDomains && activeDomains.length > 0) {
-    queryOpts.filter = activeDomains.length === 1
-      ? { domain: activeDomains[0] }
-      : { domain: { $in: activeDomains } };
-  }
 
   // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
   const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
-  const [vecResults, ftsResults] = await Promise.all([
+  const [vecFinal, ftsResults] = await Promise.all([
     env.VECTORIZE.query(Array.from(qvec), queryOpts),
     ftsQuery.length >= 3
       ? env.DB.prepare(
@@ -376,14 +357,6 @@ async function retrieve(
         ).bind(ftsQuery, project, topK * 4).all<{ id: string }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] }),
   ]);
-
-  // Fallback: if domain filter gave too few vector results, try global search
-  let vecFinal = vecResults;
-  if (activeDomains && (vecResults.matches?.length ?? 0) < topK) {
-    vecFinal = await env.VECTORIZE.query(Array.from(qvec), {
-      topK: topK * 3, returnValues: true, returnMetadata: 'indexed',
-    });
-  }
 
   // RRF fusion (k=60): combine vector ranks + FTS5 ranks
   const RRF_K = 60;
