@@ -207,7 +207,8 @@ async function init() {
 
     // Write env vars to a sourceable file
     const envFile = path.join(process.env.HOME, '.gaussian-memory-env');
-    fs.writeFileSync(envFile, `export GAUSSIAN_WORKER_URL="${url}"\nexport GAUSSIAN_AUTH_TOKEN="${token}"\n`);
+    fs.writeFileSync(envFile, `export GAUSSIAN_WORKER_URL="${url}"\nexport GAUSSIAN_AUTH_TOKEN="${token}"\n`, { mode: 0o600 });
+    fs.chmodSync(envFile, 0o600); // restrict to owner only — file contains auth token
 
     console.log('\n' + '━'.repeat(60));
     console.log('Done. One step left — add to ~/.zshrc or ~/.bashrc:\n');
