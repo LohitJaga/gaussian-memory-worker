@@ -521,13 +521,17 @@ async function retrieve(
     const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
     // Cluster cohesion only applies if memory has meaningful semantic relevance on its own
     const cohesionBonus = normCosine[i] >= 0.4 ? (clusterCohesionMap.get(row.id) ?? 0) : 0;
-    // σ multiplier: makes belief confidence load-bearing, not cosmetic.
-    // Sharp memory (σ=0.1) → 1.35× score. Fading memory (σ=0.8) → 0.75× score.
-    // Range: [0.75, 1.35]. Reinforced beliefs genuinely outrank fresh noise at equal cosine.
+    // Bhattacharyya distribution overlap: measures how well query and memory uncertainty match.
+    // Uses cosine sim as μ-distance proxy + σ overlap to compute distributional similarity.
+    // Specific query (low querySigma) → only sharp memories score high.
+    // Vague query (high querySigma) → both sharp and fuzzy memories can surface.
+    // This is the core Gaussian claim: retrieval is uncertainty-aware, not just semantic.
     const currentSigma = meanSigma(memSigma);
-    const sigmaMultiplier = 0.75 + 0.6 * Math.max(0, 1 - currentSigma / 0.5);
+    const bhattScore = distributionalScore(normCosine[i], querySigmaVal, currentSigma);
+    // Scale [0,1] Bhattacharyya score to multiplier range [0.70, 1.40]
+    const bhattMultiplier = 0.70 + 0.70 * bhattScore;
     const baseScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus;
-    const primaryScore = baseScore * Math.min(1.35, Math.max(0.75, sigmaMultiplier));
+    const primaryScore = baseScore * Math.min(1.40, Math.max(0.70, bhattMultiplier));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
