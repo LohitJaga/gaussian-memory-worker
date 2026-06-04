@@ -1,0 +1,32 @@
+{
+  // OpenCode hook config for Gaussian Memory
+  // Place at: ~/.config/opencode/command-hooks.jsonc
+  //
+  // Set env vars before starting OpenCode:
+  //   export GAUSSIAN_WORKER_URL="https://your-worker.workers.dev"
+  //   export GAUSSIAN_AUTH_TOKEN="your-token-here"
+
+  "hooks": [
+    {
+      // PostToolUse equivalent — store semantic diffs after each tool call
+      "event": "after",
+      "command": "bash ~/.config/opencode/hooks/gaussian-posttool.sh",
+      "inject": false,
+      "async": true
+    },
+    {
+      // Stop equivalent — extract and store session memories on idle/end
+      "event": "idle",
+      "command": "bash ~/.config/opencode/hooks/gaussian-store.sh",
+      "inject": false,
+      "async": true
+    },
+    {
+      // UserPromptSubmit equivalent — retrieve relevant memories before each prompt
+      "event": "before",
+      "command": "bash ~/.config/opencode/hooks/gaussian-retrieve.sh",
+      "inject": true,
+      "outputLimit": 4000
+    }
+  ]
+}
