@@ -585,7 +585,14 @@ async function retrieve(
     return { ...c, score: activation };
   });
 
-  scored.sort((a, b) => b.score - a.score);
+  // σ tiebreaker: when two memories score within 0.05 of each other,
+  // prefer the sharper one (lower σ = more reinforced, higher confidence).
+  // This makes σ load-bearing without filtering — can't return empty results.
+  scored.sort((a, b) => {
+    const diff = b.score - a.score;
+    if (Math.abs(diff) > 0.05) return diff;
+    return meanSigma(a.sigma) - meanSigma(b.sigma); // lower σ wins ties
+  });
 
   // True spreading activation: second Vectorize pass from top-3 anchors
   // Activated memories SUPPLEMENT direct results — they don't compete within top-K
