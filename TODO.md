@@ -44,15 +44,12 @@
 - [x] GLM guardrails for memory_store_diff — JSON output format (`{"description":"..."}`) + temperature:0 + fallback raw text. Working. Drops from $0.282/M to $0.060/M input on every PostToolUse call (May 29)
 
 ## Quality / Signal
-- [ ] Test retrieval quality after a week of L'Oreal sessions — are relevant memories surfacing?
-- [ ] Track semantic memory % weekly (now ~115/2254, target 10-15%)
-- [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface
-- [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — domain rebuild + better scoring should fix
+- [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface (ongoing)
+- [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — needs domain rebuild
+- [ ] Safety checks for users — D1 backup strategy, graceful degradation if worker unreachable
 - [x] PostToolUse quality gate — deployed May 29: length filter + expanded bash skip + semantic entropy check + junk pruning cron
-- [ ] Safety checks for users — D1 backup strategy, Vectorize consistency checks, graceful degradation if worker is unreachable. No memory loss on deploy or migration.
-- [ ] Auth: API key on worker endpoints — currently unauthenticated, anyone with the URL can read/write/delete all memories. Blocker before sharing publicly.
-- [ ] Indirect prompt injection hardening — stop hook captures arbitrary text; malicious content from visited sites could get stored and injected. Add sanitization pass stripping instruction-like patterns before storage.
-- [ ] Llama classification injection — user text passed directly to Llama for domain classification. "Ignore previous instructions" could manipulate domain assignment. Fix: stricter system prompt rejecting meta-instructions.
+- [x] Auth: mandatory bearer token on all endpoints — deployed June 4 (wrangler secret put AUTH_TOKEN)
+- [x] Prompt injection mitigations — XML delimiters on all 5 LLM call sites (memory_judge, intent extraction, domain classification, diff gate, session extraction). June 4.
 
 ## Ship Goal — July 1 2026
 BYOC model: users deploy to their own Cloudflare account, pay their own $5/month, own their data.
@@ -112,7 +109,7 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [x] Orphan check (done May 29 — `memory_orphan_check` with repair flag)
 - [ ] Cold start onboarding (5-question interview seeds day 1)
 - [x] Receipt logging (done May 29 — `~/.claude/gaussian-receipts.jsonl`)
-- [ ] Auth hardening (confirm bearer token on all endpoints)
+- [x] Auth hardening — mandatory bearer token deployed June 4, security review passed clean
 - [ ] Retrieval quality spot check (3 queries from last week, verify surfacing)
 - [ ] Hook safety + UX (print hook content before install, y/N confirmation)
 
