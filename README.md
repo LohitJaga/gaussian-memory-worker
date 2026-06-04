@@ -49,7 +49,9 @@ Restart Claude Code and it's live.
 
 ## Cloudflare plan
 
-The **free tier works** for most users. Workers AI has a 10,000 neuron/day limit on the free plan which is sufficient for normal daily usage (a few sessions, storing 5–15 memories, retrievals). The paid Workers plan ($5/month) is only needed once your corpus grows beyond ~2,000 memories or you run heavy batch maintenance jobs.
+Workers AI has a 10,000 neuron/day limit on the free plan. For light users (a session or two per day, small corpus) this is sufficient. For active developers, **the paid plan ($5/month) is strongly recommended** — the Stop hook sends up to 30K characters through Llama for session extraction, and the nightly cron runs batch classification and deduplication. Heavy daily use will exhaust the free tier and cause background jobs to silently fail mid-session.
+
+If you want to test the system first, start on the free plan. Switch to paid before using it as your primary daily driver.
 
 ---
 
@@ -111,7 +113,7 @@ Add to `~/.claude/settings.json`:
 Use WSL. Run `npx gaussian-memory init` inside WSL and add the env vars to your WSL shell profile.
 
 ### OpenCode
-Copy the hook config and scripts:
+Copy the hook scripts and config template:
 ```bash
 mkdir -p ~/.config/opencode/hooks
 cp hooks/gaussian-*.sh ~/.config/opencode/hooks/
@@ -120,6 +122,8 @@ cp hooks/opencode-command-hooks.jsonc ~/.config/opencode/command-hooks.jsonc
 ```
 
 Add env vars to your shell profile as above.
+
+> **Note:** The OpenCode hook config in `hooks/opencode-command-hooks.jsonc` is a template based on the opencode-command-hooks plugin format. It has not been independently verified — if you hit issues, check that the event names (`before`, `after`, `idle`) match your OpenCode version and open an issue.
 
 ### PiDev and other MCP-compatible editors
 Add the worker as an MCP server. After running `init`, your worker URL and token are in `~/.gaussian-memory-env`. You can call MCP tools directly (`memory_retrieve`, `memory_store`, etc.) even without hook-based automatic capture.
