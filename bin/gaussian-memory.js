@@ -171,14 +171,52 @@ async function init() {
     });
     console.log('  AUTH_TOKEN set.\n');
 
-    console.log('━'.repeat(60));
-    console.log('Setup complete. Add these to ~/.zshrc or ~/.bashrc:\n');
-    console.log(`  export GAUSSIAN_WORKER_URL="${url}"`);
-    console.log(`  export GAUSSIAN_AUTH_TOKEN="${token}"`);
-    console.log('\nThen copy hooks to Claude Code:');
-    console.log('  cp hooks/gaussian-*.sh ~/.claude/hooks/');
-    console.log('  chmod +x ~/.claude/hooks/gaussian-*.sh');
-    console.log('\nSee hooks/README.md for settings.json config.');
+    // Auto-install Claude Code hooks if ~/.claude exists
+    const claudeDir = path.join(process.env.HOME, '.claude');
+    const hooksDir = path.join(claudeDir, 'hooks');
+    const settingsPath = path.join(claudeDir, 'settings.json');
+    const repoHooks = path.join(__dirname, '..', 'hooks');
+
+    if (fs.existsSync(claudeDir)) {
+      process.stdout.write('  Installing Claude Code hooks... ');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      for (const f of ['gaussian-retrieve.sh', 'gaussian-posttool.sh', 'gaussian-store.sh']) {
+        const src = path.join(repoHooks, f);
+        const dst = path.join(hooksDir, f);
+        if (fs.existsSync(src)) {
+          let content = fs.readFileSync(src, 'utf8');
+          // Replace hardcoded worker URL with env var reference (already uses env var)
+          fs.writeFileSync(dst, content);
+          fs.chmodSync(dst, '755');
+        }
+      }
+
+      // Patch settings.json
+      let settings = {};
+      if (fs.existsSync(settingsPath)) {
+        try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+      }
+      settings.hooks = {
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-retrieve.sh', statusMessage: 'Recalling memories...' }] }],
+        PostToolUse:      [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-posttool.sh', timeout: 15, async: true }] }],
+        Stop:             [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-store.sh', timeout: 30, async: true }] }],
+      };
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+      console.log('done');
+    }
+
+    // Write env vars to a sourceable file
+    const envFile = path.join(process.env.HOME, '.gaussian-memory-env');
+    fs.writeFileSync(envFile, `export GAUSSIAN_WORKER_URL="${url}"\nexport GAUSSIAN_AUTH_TOKEN="${token}"\n`);
+
+    console.log('\n' + '━'.repeat(60));
+    console.log('Done. One step left — add to ~/.zshrc or ~/.bashrc:\n');
+    console.log(`  source ~/.gaussian-memory-env`);
+    console.log('\nThen restart your terminal (or run: source ~/.gaussian-memory-env)');
+    console.log('Hooks are installed and configured automatically.');
+    if (!fs.existsSync(claudeDir)) {
+      console.log('\nFor Claude Code hooks, see hooks/README.md');
+    }
     console.log('━'.repeat(60));
   } catch (e) {
     console.log('deploy failed:', e.message);
