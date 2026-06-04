@@ -521,10 +521,13 @@ async function retrieve(
     const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
     // Cluster cohesion only applies if memory has meaningful semantic relevance on its own
     const cohesionBonus = normCosine[i] >= 0.4 ? (clusterCohesionMap.get(row.id) ?? 0) : 0;
-    // Belief drift bonus: memories actively sharpening (low σ) rank higher than fading ones
+    // σ multiplier: makes belief confidence load-bearing, not cosmetic.
+    // Sharp memory (σ=0.1) → 1.35× score. Fading memory (σ=0.8) → 0.75× score.
+    // Range: [0.75, 1.35]. Reinforced beliefs genuinely outrank fresh noise at equal cosine.
     const currentSigma = meanSigma(memSigma);
-    const driftBonus = Math.max(0, (0.5 - currentSigma) / 0.5) * 0.08; // max +0.08 for σ=0
-    const primaryScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + driftBonus;
+    const sigmaMultiplier = 0.75 + 0.6 * Math.max(0, 1 - currentSigma / 0.5);
+    const baseScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus;
+    const primaryScore = baseScore * Math.min(1.35, Math.max(0.75, sigmaMultiplier));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
@@ -643,11 +646,19 @@ async function retrieve(
     }
   }
 
-  // Direct top-K + up to 2 best activated associations appended
-  const top = scored.slice(0, topK);
+  // Threshold-based retrieval: return ALL above score floor, not a hard topK.
+  // Context window is 200k — injecting 15 relevant memories costs nothing vs 5.
+  // Floor = median of top-topK scores * 0.75, so we always get at least topK
+  // but surface more when the corpus has genuinely relevant content.
+  const topKSlice = scored.slice(0, topK);
+  const floor = topKSlice.length > 0
+    ? topKSlice[Math.floor(topKSlice.length / 2)].score * 0.88
+    : 0;
+  const top = scored.filter(c => c.score >= floor).slice(0, topK * 2); // hard cap at 2× topK
 
-  // Append up to 2 activated associations (one-hop neighbors not in direct results)
-  top.push(...activatedExtras.slice(0, 2));
+  // Append activated associations not already in results
+  const topIdSet = new Set(top.map(c => c.id));
+  top.push(...activatedExtras.filter(a => !topIdSet.has(a.id)).slice(0, 3));
 
   // De-biasing: surface one high-value contradiction that got penalty-suppressed
   const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
