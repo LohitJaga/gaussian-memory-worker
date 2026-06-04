@@ -314,7 +314,7 @@ async function retrieve(
             },
             {
               role: 'user',
-              content: `Recent context: ${context.slice(0, 300)}\nQuery: ${query}\nIntent:`,
+              content: `<context>${context.slice(0, 300)}</context>\n<query>${query}</query>\nIntent:`,
             },
           ],
           max_tokens: 60,
@@ -1182,7 +1182,7 @@ Existing domains (${existing.length}): ${existing.length ? existing.join(', ') :
 
 Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
       },
-      { role: 'user', content: text.slice(0, 300) },
+      { role: 'user', content: `<memory_text>${text.slice(0, 300)}</memory_text>` },
     ],
     max_tokens: 30,
   }) as any;
@@ -1615,7 +1615,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
             role: 'system',
             content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions with rationale (why X was chosen over Y), non-trivial logic changes, bug fixes, architecture choices, meaningful command outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate.',
           },
-          { role: 'user', content: diffContext },
+          { role: 'user', content: `<diff>${diffContext}</diff>` },
         ],
         max_tokens: 1024,
         temperature: 0,
@@ -1636,7 +1636,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
             role: 'system',
             content: 'Summarize this code change or command in ONE factual sentence for a developer memory system. Be specific about what changed and why it matters. Do not start with "I" or "The developer". Under 30 words. Return ONLY the sentence, no JSON, no quotes.',
           },
-          { role: 'user', content: diffContext },
+          { role: 'user', content: `<diff>${diffContext}</diff>` },
         ],
         max_tokens: 60,
       }) as any;
@@ -1998,7 +1998,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
               },
               {
                 role: 'user',
-                content: `Memory A: ${target.text}\nMemory B: ${cand.text}`,
+                content: `<memory_a>${target.text}</memory_a>\n<memory_b>${cand.text}</memory_b>`,
               },
             ],
             max_tokens: 80,
@@ -2184,7 +2184,7 @@ SKIP: vague intent (Wants to/Is considering/Is planning/Is trying), raw chat (ok
 Return ONLY valid JSON array:
 [{"text":"Chose Cloudflare D1 over PlanetScale — zero egress fees, edge-native","type":"episodic"},{"text":"Switched GLM-4.7-flash → Llama-3.1-8b for batch classification because GLM exhausts token budget on reasoning_content before emitting final content, causing timeouts","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
           },
-          { role: 'user', content: filteredLog },
+          { role: 'user', content: `<session_log>${filteredLog}</session_log>` },
         ],
         max_tokens: 800,
         temperature: 0,
@@ -2551,7 +2551,7 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         },
       });
     }
@@ -2560,16 +2560,20 @@ export default {
       return new Response('Gaussian Memory MCP Server', { status: 200 });
     }
 
-    // API key auth — accepts Bearer header OR ?token= query param (for MCP clients that don't support headers)
-    if (env.AUTH_TOKEN) {
-      const authHeader = request.headers.get('Authorization') ?? '';
-      const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-      const urlToken = new URL(request.url).searchParams.get('token') ?? '';
-      if (headerToken !== env.AUTH_TOKEN && urlToken !== env.AUTH_TOKEN) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401, headers: { 'Content-Type': 'application/json' },
-        });
-      }
+    // API key auth — required. Accepts Bearer header OR ?token= query param (for MCP clients that don't support headers).
+    // Deploy must set AUTH_TOKEN secret via: wrangler secret put AUTH_TOKEN
+    if (!env.AUTH_TOKEN) {
+      return new Response(JSON.stringify({ error: 'Server misconfigured: AUTH_TOKEN not set. Run: wrangler secret put AUTH_TOKEN' }), {
+        status: 500, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const authHeader = request.headers.get('Authorization') ?? '';
+    const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
+    const urlToken = new URL(request.url).searchParams.get('token') ?? '';
+    if (headerToken !== env.AUTH_TOKEN && urlToken !== env.AUTH_TOKEN) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+        status: 401, headers: { 'Content-Type': 'application/json' },
+      });
     }
 
     const body = await request.json() as any;
