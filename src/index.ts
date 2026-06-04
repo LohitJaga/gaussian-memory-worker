@@ -2260,7 +2260,10 @@ Return ONLY valid JSON array:
       for (const id of ids) {
         await env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id).run();
       }
-      if (ids.length > 0) await env.VECTORIZE.deleteByIds(ids);
+      // Vectorize hard limit: 100 IDs per deleteByIds call
+      for (let i = 0; i < ids.length; i += 100) {
+        await env.VECTORIZE.deleteByIds(ids.slice(i, i + 100));
+      }
       return `Deleted ${ids.length} memories matching "${args.pattern}".`;
     }
 
