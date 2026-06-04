@@ -3,21 +3,28 @@ main = "src/index.ts"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+# After deploying, set your auth token:
+#   wrangler secret put AUTH_TOKEN
+# Generate one with: openssl rand -hex 32
+
 [ai]
 binding = "AI"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "gaussian-memory"
-database_id = "d052f7b7-a867-4124-be60-f61915f05e75"
+database_id = "YOUR_D1_DATABASE_ID"
+# Create with: wrangler d1 create gaussian-memory
 
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "gaussian-memory-index"
+# Create with: wrangler vectorize create gaussian-memory-index --dimensions=768 --metric=cosine
 
 [[kv_namespaces]]
 binding = "KV"
-id = "cc121b67ca2046b980e6053b9d066a96"
+id = "YOUR_KV_NAMESPACE_ID"
+# Create with: wrangler kv namespace create gaussian-memory-kv
 
 [triggers]
 crons = ["0 6 * * *"]
