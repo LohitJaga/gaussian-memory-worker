@@ -38,3 +38,13 @@ CREATE TABLE IF NOT EXISTS memory_relations (
 
 CREATE INDEX IF NOT EXISTS idx_relations_from ON memory_relations(from_id);
 CREATE INDEX IF NOT EXISTS idx_relations_to ON memory_relations(to_id);
+
+CREATE TABLE IF NOT EXISTS memory_sigma_history (
+  id TEXT PRIMARY KEY,
+  memory_id TEXT NOT NULL,
+  sigma REAL NOT NULL,
+  event_type TEXT NOT NULL DEFAULT 'sharpen',
+  recorded_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sigma_history_memory ON memory_sigma_history(memory_id, recorded_at);
