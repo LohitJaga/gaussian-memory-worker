@@ -484,8 +484,19 @@ async function retrieve(
   const nowSec = Math.floor(Date.now() / 1000);
   const NINETY_DAYS = 90 * 24 * 3600;
 
+  // Quality gate: filter out bare strings, URLs, and sub-30-char fragments before scoring.
+  // These get entity-boosted into top results despite having zero semantic value.
+  const qualityRows = (rows.results ?? []).filter(row => {
+    const t = (row.text ?? '').trim();
+    if (t.length < 30) return false;                        // bare strings, IDs, names
+    if (/^https?:\/\//.test(t)) return false;              // raw URLs
+    if (/^[a-zA-Z0-9_.-]+$/.test(t)) return false;         // single token (file/package name)
+    if ((t.match(/\s/g) ?? []).length < 3) return false;   // fewer than 4 words
+    return true;
+  });
+
   // Pass 1: compute raw scores
-  const rawCandidates = (rows.results ?? []).map(row => {
+  const rawCandidates = qualityRows.map(row => {
     const memSigma = deserializeSigma(row.sigma_diagonal);
     const cosineSim = cosineMap.get(row.id) ?? 0;
     const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
@@ -509,8 +520,8 @@ async function retrieve(
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
     const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
-    // Cluster cohesion: co-retrieved memories sharing entities get a group bonus
-    const cohesionBonus = clusterCohesionMap.get(row.id) ?? 0;
+    // Cluster cohesion only applies if memory has meaningful semantic relevance on its own
+    const cohesionBonus = normCosine[i] >= 0.4 ? (clusterCohesionMap.get(row.id) ?? 0) : 0;
     // Belief drift bonus: memories actively sharpening (low σ) rank higher than fading ones
     const currentSigma = meanSigma(memSigma);
     const driftBonus = Math.max(0, (0.5 - currentSigma) / 0.5) * 0.08; // max +0.08 for σ=0
