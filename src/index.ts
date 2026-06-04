@@ -174,7 +174,6 @@ async function storeMemory(
     values: Array.from(mu),
     metadata: { domain, memory_type: memoryType, project },
   }]);
-  hotTierAdd(id, env); // async, non-blocking
   await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
   // Record initial σ — baseline for belief drift tracking
   env.DB.prepare(
@@ -662,6 +661,7 @@ async function retrieve(
     await env.DB.prepare(
       'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
     ).bind(now, serializeSigma(newSigma), mem.id).run();
+    hotTierAdd(mem.id, env); // hot tier = recently accessed, not recently stored
     // Record sigma history if it moved by more than 0.05 — avoids spammy writes on tiny changes
     const oldMean = meanSigma(mem.sigma);
     const newMean = meanSigma(newSigma);
