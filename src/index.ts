@@ -444,6 +444,42 @@ async function retrieve(
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
+  // Cluster cohesion: batch-fetch entity links for all candidates in one D1 query.
+  // Memories that co-occur in the same retrieval set and share entities form a belief cluster.
+  // Cluster bonus rewards coherent knowledge clusters over isolated matching facts.
+  const clusterCohesionMap = new Map<string, number>(); // memory_id → cohesion bonus
+  if (allIds.length > 0) {
+    const entPlaceholders = allIds.map(() => '?').join(',');
+    const entRows = await env.DB.prepare(
+      `SELECT memory_id, entity_id FROM memory_entities WHERE memory_id IN (${entPlaceholders})`
+    ).bind(...allIds).all<{ memory_id: string; entity_id: string }>().catch(() => ({ results: [] }));
+
+    // Build bidirectional maps: entity→members, memory→entities
+    const entityToMembers = new Map<string, Set<string>>();
+    const memToEntities = new Map<string, Set<string>>();
+    for (const r of entRows.results ?? []) {
+      if (!entityToMembers.has(r.entity_id)) entityToMembers.set(r.entity_id, new Set());
+      entityToMembers.get(r.entity_id)!.add(r.memory_id);
+      if (!memToEntities.has(r.memory_id)) memToEntities.set(r.memory_id, new Set());
+      memToEntities.get(r.memory_id)!.add(r.entity_id);
+    }
+
+    // For each memory: count how many OTHER candidates in this retrieval share its entities
+    for (const id of allIds) {
+      const myEntities = memToEntities.get(id) ?? new Set<string>();
+      let clusterSize = 0;
+      for (const eid of myEntities) {
+        const members = entityToMembers.get(eid) ?? new Set<string>();
+        // Weight rare entities more — common entity (large cluster) = weaker signal
+        const weight = 1 / Math.log2(Math.max(2, members.size));
+        clusterSize += (members.size - 1) * weight;
+      }
+      if (clusterSize > 0) {
+        clusterCohesionMap.set(id, Math.min(0.18, 0.04 * clusterSize));
+      }
+    }
+  }
+
   // Build candidates — compute raw components first, then normalize within batch
   const nowSec = Math.floor(Date.now() / 1000);
   const NINETY_DAYS = 90 * 24 * 3600;
@@ -473,7 +509,12 @@ async function retrieve(
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
     const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
-    const primaryScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost;
+    // Cluster cohesion: co-retrieved memories sharing entities get a group bonus
+    const cohesionBonus = clusterCohesionMap.get(row.id) ?? 0;
+    // Belief drift bonus: memories actively sharpening (low σ) rank higher than fading ones
+    const currentSigma = meanSigma(memSigma);
+    const driftBonus = Math.max(0, (0.5 - currentSigma) / 0.5) * 0.08; // max +0.08 for σ=0
+    const primaryScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + driftBonus;
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
@@ -623,16 +664,24 @@ async function retrieve(
     (relRows.results ?? []).forEach(r => supersededSet.add(r.to_id));
   }
 
-  return top.map(m => ({
-    score: m.score,
-    text: supersededSet.has(m.id)
+  return top.map(m => {
+    const sig = meanSigma(m.sigma);
+    const drift = sig < 0.35 ? '↑' : sig > 0.6 ? '↓' : '→';
+    const cohesion = clusterCohesionMap.get(m.id) ?? 0;
+    const clusterMark = cohesion > 0.08 ? ' ◆' : cohesion > 0.03 ? ' ◇' : '';
+    const baseText = supersededSet.has(m.id)
       ? `[SUPERSEDED] ${m.text}`
-      : m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text,
-    domain: m.domain,
-    type: m.type,
-    activated: (m as any).activated ?? false,
-    sigma: parseFloat(meanSigma(m.sigma).toFixed(3)),
-  }));
+      : m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text;
+    return {
+      score: m.score,
+      text: baseText,
+      domain: m.domain,                              // clean — used for KV summary lookup
+      displayDomain: `${m.domain} ${drift}${clusterMark}`, // markers for display only
+      type: m.type,
+      activated: (m as any).activated ?? false,
+      sigma: parseFloat(sig.toFixed(3)),
+    };
+  });
 }
 
 async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
@@ -1652,7 +1701,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default', args.context as string | undefined);
       if (!results.length) return 'No memories found.';
 
-      // Fetch domain summaries for domains present in results
+      // Fetch domain summaries for domains present in results (uses clean domain, not display)
       const domainsHit = [...new Set(results.map(r => r.domain))];
       const summaries: Record<string, string> = {};
       for (const d of domainsHit) {
@@ -1660,13 +1709,19 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         if (s) summaries[d] = s;
       }
 
+      const fmt = (r: any) => {
+        const dd = (r as any).displayDomain ?? r.domain;
+        const conf = r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : '';
+        return `[${r.score.toFixed(2)}] (${dd}/${r.type})${r.activated ? ' ~' : ''} ${conf} ${r.text}`;
+      };
+
       // If summaries exist: group output by domain with summary header
       if (Object.keys(summaries).length > 0) {
         const sections = domainsHit.map(d => {
           const mems = results.filter(r => r.domain === d);
           const lines: string[] = [`[DOMAIN: ${d}]`];
           if (summaries[d] && mems.length >= 2) lines.push(`Summary: ${summaries[d]}`);
-          lines.push(...mems.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : ''} ${r.text}`));
+          lines.push(...mems.map(fmt));
           return lines.join('\n');
         });
         return sections.join('\n\n');
@@ -1689,7 +1744,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
       }
 
-      return preamble + results.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type})${r.activated ? ' ~' : ''} ${r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : ''} ${r.text}`).join('\n');
+      return preamble + results.map(fmt).join('\n');
     }
 
     case 'memory_list': {
