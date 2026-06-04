@@ -1,22 +1,22 @@
 # Gaussian Memory
 
-Persistent memory for AI coding assistants. Works across sessions, devices, and projects — without any manual setup once installed.
+Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
-Built on Cloudflare Workers. You deploy it to your own account and own your data.
+Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly (~$0/month on the free tier for most users).
 
 ---
 
 ## What it does
 
-Every session, the system automatically captures what you worked on, what decisions you made, and what's still open. Next session it injects the relevant context before you even ask. Ask "where did we leave off?" and it reconstructs the prior session from stored memories.
+Every session, the system automatically captures what you worked on, what decisions you made, and what's still open. Next session it injects the relevant context before you even ask.
 
-The difference from other memory systems: memories have a confidence level (σ) that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't thought about in weeks fade. The retrieval adapts to how specific your question is — precise technical queries only surface memories you've actively reinforced; broad questions allow uncertain memories through.
+The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't thought about in weeks fade out. Retrieval adapts to how specific your question is — a precise technical query only surfaces memories you've actively reinforced; a broad exploratory question surfaces a wider range.
 
 ---
 
 ## Quick start
 
-**Prerequisites:** Node.js 18+, a Cloudflare account (free tier works for most users).
+**Requirements:** Node.js 18+, a Cloudflare account.
 
 ```bash
 git clone https://github.com/LohitJaga/gaussian-memory-worker
@@ -24,52 +24,142 @@ cd gaussian-memory-worker
 npx gaussian-memory init
 ```
 
-That's it. `init` creates all the Cloudflare resources, deploys the worker, generates an auth token, installs Claude Code hooks, and writes your env vars to `~/.gaussian-memory-env`. One step left after it finishes:
+`init` handles everything:
+- Creates D1 database, Vectorize index, and KV namespace in your Cloudflare account
+- Patches `wrangler.toml` with your resource IDs
+- Runs D1 schema migrations
+- Deploys the worker
+- Generates and sets an `AUTH_TOKEN` secret
+- Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600)
+- Auto-installs and configures Claude Code hooks if `~/.claude` exists
+
+One step after it finishes:
 
 ```bash
-echo 'source ~/.gaussian-memory-env' >> ~/.zshrc
-source ~/.gaussian-memory-env
+# macOS / Linux
+echo 'source ~/.gaussian-memory-env' >> ~/.zshrc && source ~/.gaussian-memory-env
+
+# Windows (WSL) — same as above inside your WSL shell
+# Windows (native) — add GAUSSIAN_WORKER_URL and GAUSSIAN_AUTH_TOKEN to System Environment Variables
 ```
 
-Then restart Claude Code and the system is live.
+Restart Claude Code and it's live.
 
 ---
 
-## Seed your memory (optional but recommended)
+## Cloudflare plan
 
-New users can start with context rather than building it from scratch:
+The **free tier works** for most users. Workers AI has a 10,000 neuron/day limit on the free plan which is sufficient for normal daily usage (a few sessions, storing 5–15 memories, retrievals). The paid Workers plan ($5/month) is only needed once your corpus grows beyond ~2,000 memories or you run heavy batch maintenance jobs.
+
+---
+
+## Seed your memory (recommended)
+
+New users can start with context rather than building it from scratch over weeks:
 
 ```bash
 npx gaussian-memory ingest my-context.md
 ```
 
-Write a markdown file with `##` sections and `-` bullet points:
+Create a markdown file with `##` section headers and `-` bullet points:
 
 ```markdown
 ## About me
-- Software engineer, 3 years experience, mostly Python and TypeScript
-- Currently building a side project using Cloudflare Workers
+- Software engineer, 3 years Python and TypeScript
+- Currently building a SaaS app, focusing on the auth layer
 
-## Working preferences  
+## Working preferences
 - Concise responses, no unnecessary explanation
 - Show file:line references when pointing to code
 
 ## Current projects
-- Rewriting the auth layer for my SaaS app
-- Exploring edge deployment for lower latency
+- Rewriting auth middleware — moving from JWT to session tokens
+- Exploring Cloudflare Workers for lower latency
+
+## Key decisions
+- Chose PostgreSQL over MongoDB for relational data model
+- Using Tailwind for styling, no component library
 ```
 
-Each bullet becomes a memory. The system starts knowing who you are instead of learning from scratch.
+Each bullet is stored as a memory. The section header provides context. Run it once and the system starts knowing you.
+
+---
+
+## Hook setup
+
+### Claude Code (macOS / Linux)
+Configured automatically by `npx gaussian-memory init`. Nothing to do.
+
+Manual setup if needed:
+```bash
+cp hooks/gaussian-*.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/gaussian-*.sh
+```
+
+Add to `~/.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-retrieve.sh", "statusMessage": "Recalling memories..." }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-posttool.sh", "timeout": 15, "async": true }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-store.sh", "timeout": 30, "async": true }] }]
+  }
+}
+```
+
+### Claude Code (Windows)
+Use WSL. Run `npx gaussian-memory init` inside WSL and add the env vars to your WSL shell profile.
+
+### OpenCode
+Copy the hook config and scripts:
+```bash
+mkdir -p ~/.config/opencode/hooks
+cp hooks/gaussian-*.sh ~/.config/opencode/hooks/
+chmod +x ~/.config/opencode/hooks/gaussian-*.sh
+cp hooks/opencode-command-hooks.jsonc ~/.config/opencode/command-hooks.jsonc
+```
+
+Add env vars to your shell profile as above.
+
+### PiDev and other MCP-compatible editors
+Add the worker as an MCP server. After running `init`, your worker URL and token are in `~/.gaussian-memory-env`. You can call MCP tools directly (`memory_retrieve`, `memory_store`, etc.) even without hook-based automatic capture.
 
 ---
 
 ## How it works
 
-Memories are stored as vectors with an associated confidence value σ ∈ [0, 1]. At storage time σ = 0.5. Each time a memory is retrieved and confirmed relevant, σ decreases (sharpens). Each night a decay pass increases σ for memories that haven't been accessed (fading). When σ exceeds 2.0, the memory is pruned.
+### The σ model
 
-Retrieval uses Bhattacharyya distance — a distributional similarity measure — to match queries against memories. A specific, precise query (short, technical) has low σ and will only match memories with similarly low σ. A vague question has high σ and can surface less certain memories. This means the system retrieves differently depending on what kind of answer you're looking for.
+Every memory stores a confidence value σ ∈ [0, ∞):
+- **Stored:** σ = 0.5 (uncertain, newly observed)
+- **Retrieved:** σ decreases (sharpens) — you confirmed this was relevant
+- **Ignored:** σ increases nightly via exponential decay
+- **Pruned:** σ > 2.0 — decayed past usefulness
 
-When two memories are semantically similar, they merge via Kalman update rather than duplicating. The merged uncertainty is the optimal combination of both, preserving information from each version.
+### Retrieval
+
+The primary scoring function uses **Bhattacharyya distance** — a measure of distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (short, specific) has low σ and matches memories with similarly low σ. A vague exploratory question has high σ and allows uncertain memories through. The system retrieves differently depending on what kind of answer you're looking for.
+
+After Bhattacharyya scoring:
+- **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
+- **σ hard gate:** memories above the query-adaptive σ ceiling are filtered out
+- **σ tiebreaker:** equal-scoring memories resolve in favor of the sharper one
+- **Threshold retrieval:** all memories above a score floor are returned (not a fixed top-k)
+
+### Merging
+
+When two memories are semantically similar (cosine > 0.82), they merge via **Kalman update** rather than duplicating. The merged uncertainty is the optimal combination of both. This is why the system doesn't accumulate dozens of near-identical facts over time.
+
+### Nightly cron (6am UTC)
+
+1. Prune cold low-quality memories (episodic, < 80 chars, age > 30 days, never accessed)
+2. Decay all σ values (1.5× rate for memories cold > 60 days)
+3. Deduplicate recent memories (cosine > 0.90)
+4. Deduplicate cold memories (cosine > 0.93, oldest-first)
+5. Collapse singleton domains
+6. Refresh stale domain summaries
+7. Process entity extraction queue (50/run)
+8. Synthesize identity profile from semantic memories → push to KV
 
 ---
 
@@ -77,67 +167,63 @@ When two memories are semantically similar, they merge via Kalman update rather 
 
 | Component | Role |
 |---|---|
-| Cloudflare Workers | MCP server (HTTP/JSON-RPC 2.0) |
-| D1 (SQLite) | Memory store with σ values, access metadata, and σ history |
-| Vectorize | Dense vector search (768D BGE embeddings) |
-| FTS5 | Keyword search, fused with vector results via RRF |
-| Workers AI | Embeddings, LLM-based fact extraction, domain classification |
-| KV | Identity profile cache, hot tier (recently accessed IDs) |
-| Cron (6am UTC) | Nightly decay, dedup, domain cleanup, entity processing |
-
----
-
-## Cloudflare plan
-
-The free tier works for normal daily use. The paid plan ($5/month) removes Workers AI rate limits and is recommended once your memory corpus exceeds ~2,000 entries or you want reliable nightly maintenance jobs.
-
----
-
-## Hook setup (other editors)
-
-**Claude Code** is configured automatically by `npx gaussian-memory init`.
-
-**OpenCode:** copy the config from `hooks/opencode-command-hooks.jsonc` to `~/.config/opencode/command-hooks.jsonc` and copy the hook scripts to `~/.config/opencode/hooks/`. See `hooks/README.md` for details.
-
-**PiDev and others:** add the worker as an MCP server. The worker URL and auth token are in `~/.gaussian-memory-env` after running init. You can use the MCP tools directly (`memory_retrieve`, `memory_store`) even without automatic hook capture.
+| Cloudflare Workers | MCP server (HTTP/JSON-RPC 2.0), all logic runs at edge |
+| D1 (SQLite) | Memory store: text, σ diagonal, domain, type, access metadata, σ history |
+| Vectorize | Dense vector search (768D BGE-base-en-v1.5) |
+| FTS5 virtual table | Full-text keyword search, fused with Vectorize via RRF (k=60) |
+| Workers AI | BGE embeddings, Llama 3.1 8B for extraction/synthesis, GLM-4.7-flash for quality gating |
+| KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
+| Cron | Nightly maintenance — decay, dedup, entity processing, identity synthesis |
 
 ---
 
 ## MCP tools
 
-The system exposes an MCP server. Key tools:
-
-| Tool | What it does |
+| Tool | Description |
 |---|---|
-| `memory_retrieve` | Retrieve relevant memories for a query |
-| `memory_store` | Store a memory explicitly |
+| `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
 | `memory_auto_store` | Store with automatic domain and type inference |
-| `memory_extract_and_store` | Extract facts from a session log |
-| `memory_capture_passive` | Parse structured notes (Key Learnings / Decisions sections) |
-| `memory_belief_drift` | Show how confidence in a belief has changed over time |
-| `memory_stats` | Counts, σ distribution, domain breakdown |
-| `memory_bulk_delete` | Delete memories by text pattern |
-| `memory_judge` | Compare two memories: supersedes / conflicts / extends |
-| `identity_profile_get/set` | Cross-device identity profile via KV |
-
-Full tool list in `src/index.ts`.
+| `memory_retrieve` | Bhattacharyya-weighted retrieval. `synthesize=true` blends equidistant memories |
+| `memory_extract_and_store` | LLM-based fact extraction from a raw session log |
+| `memory_capture_passive` | Parse structured notes with Key Learnings / Decisions / Problems Solved headers |
+| `memory_store_diff` | Store semantic meaning of a code diff or command output |
+| `memory_update` | Re-embed and update an existing memory |
+| `memory_delete` | Delete by ID |
+| `memory_bulk_delete` | Delete all memories matching a text pattern |
+| `memory_list` | List all memories, optionally filtered by domain |
+| `memory_decay` | Manual decay pass |
+| `memory_stats` | Total count, σ distribution, domain breakdown, access heat |
+| `memory_orphan_check` | Detect D1 memories missing Vectorize vectors. `repair=true` re-embeds. |
+| `memory_rebuild_domains` | Re-classify all memory domains (batched, resumable, 2000/run) |
+| `memory_cleanup_singletons` | Merge domains with fewer than N memories into nearest anchor |
+| `memory_retag_projects` | LLM-based project re-tagging for the default memory pool |
+| `memory_build_entities` | Retroactive entity extraction for entity graph traversal |
+| `memory_judge` | LLM verdict on two memories: supersedes / conflicts_with / extends / compatible |
+| `memory_timeline` | Chronological σ trajectory per domain |
+| `memory_belief_drift` | Show how confidence in a memory has changed over time |
+| `memory_belief_drift_backfill` | Reconstruct σ history for existing memories from access metadata |
+| `identity_profile_get` | Fetch synthesized identity profile from KV |
+| `identity_profile_set` | Push identity profile to KV for cross-device sync |
 
 ---
 
 ## Belief drift
 
-Every memory has a σ history. You can see how your confidence in a belief changed over time:
+Every memory logs σ snapshots over time. You can query how your confidence in a belief evolved:
 
 ```
-memory_belief_drift(query="deploy architecture decision")
+memory_belief_drift(query="architecture decision")
 ```
 
 ```
-● Chose Cloudflare Workers — zero maintenance, edge-native
-σ: 0.500 → 0.190 (Δ+0.310) — strongly reinforced
-2026-05-20  σ=0.500  [stored]
-2026-05-28  σ=0.350  [reinforced]
-2026-06-04  σ=0.190  [reinforced]
+● Chose edge deployment — zero maintenance, lower latency
+Domain: file-management · Age: 45d · Accessed: 12x
+σ: 0.500 → 0.190 (Δ+0.310) — strongly reinforced — confident belief
+Trajectory (5 snapshots):
+  2026-05-01  σ=0.500  [store]
+  2026-05-10  σ=0.390  [synthetic]
+  2026-05-20  σ=0.280  [sharpen]
+  2026-06-04  σ=0.190  [sharpen]
 ```
 
 ---
@@ -145,12 +231,17 @@ memory_belief_drift(query="deploy architecture decision")
 ## File structure
 
 ```
-src/index.ts            MCP server and retrieval pipeline
-src/gaussian.ts         Bhattacharyya, Kalman merge, σ math
-bin/gaussian-memory.js  CLI (init + ingest)
-hooks/                  Hook scripts for Claude Code and OpenCode
-schema.sql              D1 schema
-wrangler.example.toml   Template for manual setup
+src/index.ts              MCP server, tool handlers, retrieval pipeline
+src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
+bin/gaussian-memory.js    CLI — init and ingest commands
+hooks/
+  gaussian-retrieve.sh    UserPromptSubmit hook — retrieves context before each prompt
+  gaussian-posttool.sh    PostToolUse hook — stores semantic meaning of code changes
+  gaussian-store.sh       Stop hook — extracts facts from session, syncs CLAUDE.md
+  opencode-command-hooks.jsonc  OpenCode configuration template
+  README.md               Hook setup instructions
+schema.sql                D1 schema
+wrangler.example.toml     Template for manual resource setup
 ```
 
 ---
@@ -158,3 +249,5 @@ wrangler.example.toml   Template for manual setup
 ## Status
 
 Single-user BYOC, working end-to-end. Ship target: July 1 2026.
+
+Multi-user (Durable Objects per-user isolation) is post-ship.
