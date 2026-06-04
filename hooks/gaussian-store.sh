@@ -50,6 +50,14 @@ PYEOF
 
 [ -z "$FULL_LOG" ] && exit 0
 
+# Only extract if log has grown by 2000+ chars since last run — prevents re-extracting
+# the same content on every message in a long session
+LOG_HASH_FILE="/tmp/gaussian_last_log_${SESSION_ID}"
+LOG_LEN=${#FULL_LOG}
+LAST_LEN=$(cat "$LOG_HASH_FILE" 2>/dev/null || echo "0")
+if [ "$LOG_LEN" -le $(( LAST_LEN + 2000 )) ]; then exit 0; fi
+echo "$LOG_LEN" > "$LOG_HASH_FILE"
+
 # GLM-4.7-flash has 131K context — pass full log up to 30K chars (covers even long sessions)
 LOG=$(echo "$FULL_LOG" | cut -c1-30000)
 
