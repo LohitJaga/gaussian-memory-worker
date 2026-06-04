@@ -1,12 +1,15 @@
 {
-  "name": "gaussian-memory-worker",
+  "name": "gaussian-memory",
   "version": "1.0.0",
-  "description": "",
+  "description": "Probabilistic AI memory system — Cloudflare Workers + D1 + Vectorize",
   "main": "index.js",
+  "bin": {
+    "gaussian-memory": "./bin/gaussian-memory.js"
+  },
   "scripts": {
     "test": "vitest run"
   },
-  "keywords": [],
+  "keywords": ["mcp", "memory", "cloudflare", "ai"],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
