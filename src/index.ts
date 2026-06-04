@@ -2252,9 +2252,15 @@ Return ONLY valid JSON array:
     }
 
     case 'memory_bulk_delete': {
+      // LIKE has a complexity limit on long patterns — use INSTR instead.
+      // Split pattern on % to get literal parts; require all parts present (case-insensitive).
+      const rawPattern = args.pattern as string;
+      const parts = rawPattern.split('%').filter((p: string) => p.length > 0);
+      if (parts.length === 0) return 'Invalid pattern.';
+      const conditions = parts.map(() => 'INSTR(LOWER(text), LOWER(?)) > 0').join(' AND ');
       const rows = await env.DB.prepare(
-        'SELECT id FROM memories WHERE text LIKE ?'
-      ).bind(args.pattern as string).all<{ id: string }>();
+        `SELECT id FROM memories WHERE ${conditions}`
+      ).bind(...parts).all<{ id: string }>();
       const ids = (rows.results ?? []).map(r => r.id);
       if (!ids.length) return 'No memories matched pattern.';
       for (const id of ids) {
