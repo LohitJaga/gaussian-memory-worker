@@ -23,18 +23,9 @@ store_diff() {
 case "$TOOL_NAME" in
 
   Edit)
-    FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // ""')
-    OLD=$(echo "$INPUT" | jq -r '.tool_input.old_string // ""' | head -6 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-200)
-    NEW=$(echo "$INPUT" | jq -r '.tool_input.new_string // ""' | head -6 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-200)
-    [ -z "$FILE_PATH" ] && [ -z "$NEW" ] && exit 0
-    [ ${#NEW} -lt 30 ] && exit 0
-    PAYLOAD=$(jq -n \
-      --arg fp "$FILE_PATH" \
-      --arg old "$OLD" \
-      --arg new "$NEW" \
-      --arg p "$PROJECT" \
-      '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"memory_store_diff","arguments":{"file_path":$fp,"old_string":$old,"new_string":$new,"project":$p}}}')
-    store_diff "$PAYLOAD"
+    # Edit decisions captured more accurately by Stop hook session extraction.
+    # Skipping here avoids double-storing low-quality diff fragments.
+    exit 0
     ;;
 
   Write)

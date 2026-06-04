@@ -1613,7 +1613,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
         messages: [
           {
             role: 'system',
-            content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions with rationale (why X was chosen over Y), non-trivial logic changes, bug fixes, architecture choices, meaningful command outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate.',
+            content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions with rationale (why X was chosen over Y), non-trivial logic changes, bug fixes, architecture choices, meaningful command outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate. If a senior engineer could reconstruct this change just by reading the file, answer NO.',
           },
           { role: 'user', content: `<diff>${diffContext}</diff>` },
         ],
@@ -2179,7 +2179,7 @@ RULES:
 - Third-person factual sentence only
 - 15–80 words per fact
 
-SKIP: vague intent (Wants to/Is considering/Is planning/Is trying), raw chat (ok/yea/lol/ig/tbh/idk), generic status (done/updated/it works), questions, pasted content, anything under 15 words
+SKIP: vague intent (Wants to/Is considering/Is planning/Is trying/Is working on/Is looking at/Is thinking about/Is learning/Is exploring), raw chat (ok/yea/lol/ig/tbh/idk), generic status (done/updated/it works/improved the system/made changes), questions, pasted content, anything under 15 words, anything with no specific technology/number/decision named
 
 Return ONLY valid JSON array:
 [{"text":"Chose Cloudflare D1 over PlanetScale — zero egress fees, edge-native","type":"episodic"},{"text":"Switched GLM-4.7-flash → Llama-3.1-8b for batch classification because GLM exhausts token budget on reasoning_content before emitting final content, causing timeouts","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
