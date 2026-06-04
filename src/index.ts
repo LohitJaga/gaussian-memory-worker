@@ -668,9 +668,16 @@ async function retrieve(
   const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
   if (suppressed) top.push(suppressed);
 
+  // σ hard gate: specific queries only surface memories whose confidence meets the
+  // query's specificity requirement. sigmaCeiling scales with querySigmaVal so vague
+  // queries stay permissive. Always keep at least 2 results to prevent empty injection.
+  const sigmaCeiling = Math.max(0.65, querySigmaVal * 1.8);
+  const gated = top.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
+  const finalTop = gated.length >= 2 ? gated : top.slice(0, Math.max(2, Math.ceil(top.length / 2)));
+
   // Sharpen accessed memories + record history if σ changed meaningfully
   const now = Math.floor(Date.now() / 1000);
-  for (const mem of top) {
+  for (const mem of finalTop) {
     const domSize = domainSizeMap.get(mem.domain) ?? 10;
     const newSigma = sharpenSigma(mem.sigma, 0.85, 0.15, mem.contradiction, domSize);
     await env.DB.prepare(
@@ -697,7 +704,7 @@ async function retrieve(
     (relRows.results ?? []).forEach(r => supersededSet.add(r.to_id));
   }
 
-  return top.map(m => {
+  return finalTop.map(m => {
     const sig = meanSigma(m.sigma);
     const drift = sig < 0.35 ? '↑' : sig > 0.6 ? '↓' : '→';
     const cohesion = clusterCohesionMap.get(m.id) ?? 0;
