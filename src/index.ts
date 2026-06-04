@@ -1496,6 +1496,11 @@ const TOOLS = [
     },
   },
   {
+    name: 'memory_belief_drift_backfill',
+    description: 'Backfill sigma_history for all memories that have no history entry. Reconstructs trajectory from access metadata. Processes 300/call — run repeatedly until complete.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'memory_delete',
     description: 'Delete a memory by ID. Use memory_list to find IDs.',
     inputSchema: {
@@ -2044,6 +2049,62 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       }
 
       return lines.join('\n').trimEnd();
+    }
+
+    case 'memory_belief_drift_backfill': {
+      // Backfill sigma_history for memories that have no 'store' entry.
+      // Reconstructs plausible trajectory from access metadata.
+      // Run repeatedly — processes 300/call.
+      const bfBatch = await env.DB.prepare(`
+        SELECT m.id, m.sigma_diagonal, m.timestamp, m.last_accessed, m.access_count
+        FROM memories m
+        WHERE NOT EXISTS (
+          SELECT 1 FROM memory_sigma_history h WHERE h.memory_id = m.id AND h.event_type = 'store'
+        )
+        LIMIT 300
+      `).all<{ id: string; sigma_diagonal: string; timestamp: number; last_accessed: number; access_count: number }>();
+
+      const bfRows = bfBatch.results ?? [];
+      if (!bfRows.length) return 'Backfill complete — all memories have sigma history.';
+
+      const inserts: D1PreparedStatement[] = [];
+      for (const row of bfRows) {
+        const currentSigma = meanSigma(deserializeSigma(row.sigma_diagonal));
+        const t0 = row.timestamp ?? 0;
+        const t1 = row.last_accessed ?? t0;
+        const accesses = Math.min(row.access_count ?? 0, 8);
+
+        inserts.push(env.DB.prepare(
+          'INSERT OR IGNORE INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?,?,?,?,?)'
+        ).bind(crypto.randomUUID(), row.id, 0.5, 'store', t0));
+
+        if (accesses >= 2 && t1 > t0) {
+          for (let i = 1; i < accesses; i++) {
+            const t = Math.floor(t0 + (t1 - t0) * (i / accesses));
+            const sigma = parseFloat((0.5 - (0.5 - currentSigma) * (i / accesses)).toFixed(4));
+            inserts.push(env.DB.prepare(
+              'INSERT OR IGNORE INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?,?,?,?,?)'
+            ).bind(crypto.randomUUID(), row.id, sigma, 'synthetic', t));
+          }
+        }
+
+        if (currentSigma !== 0.5) {
+          inserts.push(env.DB.prepare(
+            'INSERT OR IGNORE INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?,?,?,?,?)'
+          ).bind(crypto.randomUUID(), row.id, currentSigma, 'sharpen', t1));
+        }
+      }
+
+      for (let i = 0; i < inserts.length; i += 100) {
+        await env.DB.batch(inserts.slice(i, i + 100));
+      }
+
+      const remaining = await env.DB.prepare(`
+        SELECT COUNT(*) as n FROM memories m
+        WHERE NOT EXISTS (SELECT 1 FROM memory_sigma_history h WHERE h.memory_id = m.id AND h.event_type = 'store')
+      `).first<{ n: number }>();
+
+      return `Backfilled ${bfRows.length} memories. ${remaining?.n ?? '?'} remaining — call again to continue.`;
     }
 
     case 'memory_process_entity_queue': {
