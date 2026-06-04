@@ -176,6 +176,10 @@ async function storeMemory(
   }]);
   hotTierAdd(id, env); // async, non-blocking
   await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
+  // Record initial σ — baseline for belief drift tracking
+  env.DB.prepare(
+    'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(crypto.randomUUID(), id, meanSigma(sigma), 'store', now).run().catch(() => {});
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
   const nearMissIds = results.matches
@@ -591,7 +595,7 @@ async function retrieve(
   const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
   if (suppressed) top.push(suppressed);
 
-  // Sharpen accessed memories
+  // Sharpen accessed memories + record history if σ changed meaningfully
   const now = Math.floor(Date.now() / 1000);
   for (const mem of top) {
     const domSize = domainSizeMap.get(mem.domain) ?? 10;
@@ -599,6 +603,14 @@ async function retrieve(
     await env.DB.prepare(
       'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
     ).bind(now, serializeSigma(newSigma), mem.id).run();
+    // Record sigma history if it moved by more than 0.05 — avoids spammy writes on tiny changes
+    const oldMean = meanSigma(mem.sigma);
+    const newMean = meanSigma(newSigma);
+    if (Math.abs(newMean - oldMean) >= 0.05) {
+      env.DB.prepare(
+        'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
+      ).bind(crypto.randomUUID(), mem.id, newMean, 'sharpen', now).run().catch(() => {});
+    }
   }
 
   // Check memory_relations: mark superseded memories so caller knows they've been replaced
@@ -1470,6 +1482,18 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'memory_belief_drift',
+    description: 'Show how confidence in a memory has changed over time — sigma trajectory from initial store to now. Pass memory_id for a specific memory, or query to find matching memories.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        memory_id: { type: 'string' },
+        query: { type: 'string' },
+        top_k: { type: 'number', default: 5 },
+      },
+    },
+  },
+  {
     name: 'identity_profile_get',
     description: 'Retrieve the stored CLAUDE.md identity profile from KV. Returns empty string if not set.',
     inputSchema: { type: 'object', properties: {} },
@@ -1873,6 +1897,64 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
           const day = new Date((m.timestamp ?? 0) * 1000).toISOString().slice(0, 10);
           const accessed = m.access_count > 0 ? ` · ${m.access_count}x` : '';
           lines.push(`  ${day} ${conf} σ=${sigma.toFixed(2)}${accessed}  ${marker}${m.text}`);
+        }
+        lines.push('');
+      }
+
+      return lines.join('\n').trimEnd();
+    }
+
+    case 'memory_belief_drift': {
+      // Resolve which memory IDs to inspect
+      let targetIds: string[] = [];
+      if (args.memory_id) {
+        targetIds = [args.memory_id as string];
+      } else if (args.query) {
+        const qvec = await embed(args.query as string, env);
+        const hits = await env.VECTORIZE.query(Array.from(qvec), { topK: args.top_k ?? 5, returnValues: false, returnMetadata: 'none' });
+        targetIds = (hits.matches ?? []).map(m => m.id);
+      }
+      if (!targetIds.length) return 'No memories found.';
+
+      const placeholders = targetIds.map(() => '?').join(',');
+      const mems = await env.DB.prepare(
+        `SELECT id, text, sigma_diagonal, access_count, timestamp, domain FROM memories WHERE id IN (${placeholders})`
+      ).bind(...targetIds).all<{ id: string; text: string; sigma_diagonal: string; access_count: number; timestamp: number; domain: string }>();
+
+      const lines: string[] = ['## Belief Drift Report\n'];
+
+      for (const m of mems.results ?? []) {
+        const currentSigma = meanSigma(deserializeSigma(m.sigma_diagonal));
+        const agedays = Math.floor((Date.now() / 1000 - (m.timestamp ?? 0)) / 86400);
+
+        // Pull sigma history for this memory
+        const hist = await env.DB.prepare(
+          'SELECT sigma, event_type, recorded_at FROM memory_sigma_history WHERE memory_id = ? ORDER BY recorded_at ASC'
+        ).bind(m.id).all<{ sigma: number; event_type: string; recorded_at: number }>();
+        const histRows = hist.results ?? [];
+
+        const initialSigma = histRows.length > 0 ? histRows[0].sigma : 0.5;
+        const drift = initialSigma - currentSigma; // positive = sharpened, negative = faded
+
+        // Verdict
+        let verdict: string;
+        if (drift > 0.3) verdict = `strongly reinforced — confident belief`;
+        else if (drift > 0.15) verdict = `sharpening — belief gaining confidence`;
+        else if (drift > 0.05) verdict = `slightly reinforced`;
+        else if (drift < -0.1) verdict = `fading — belief losing confidence`;
+        else verdict = `stable — unchanged since storage`;
+
+        const conf = currentSigma < 0.3 ? '●' : currentSigma < 0.5 ? '◑' : '○';
+        lines.push(`**${conf} ${m.text.slice(0, 120)}**`);
+        lines.push(`Domain: ${m.domain} · Age: ${agedays}d · Accessed: ${m.access_count}x`);
+        lines.push(`σ: ${initialSigma.toFixed(3)} → ${currentSigma.toFixed(3)} (Δ${drift >= 0 ? '+' : ''}${drift.toFixed(3)}) — ${verdict}`);
+
+        if (histRows.length > 1) {
+          lines.push(`Trajectory (${histRows.length} snapshots):`);
+          for (const h of histRows) {
+            const d = new Date(h.recorded_at * 1000).toISOString().slice(0, 10);
+            lines.push(`  ${d}  σ=${h.sigma.toFixed(3)}  [${h.event_type}]`);
+          }
         }
         lines.push('');
       }
