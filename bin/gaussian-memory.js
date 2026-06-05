@@ -195,21 +195,35 @@ async function init() {
         }
       }
 
-      // Patch settings.json
+      // Patch settings.json — merge into existing hooks rather than replacing
       let settings = {};
       if (fs.existsSync(settingsPath)) {
         try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
       }
-      settings.hooks = {
+      if (!settings.hooks) settings.hooks = {};
+      const gaussianHooks = {
         UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-retrieve.sh', statusMessage: 'Recalling memories...' }] }],
         PostToolUse:      [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-posttool.sh', timeout: 15, async: true }] }],
         Stop:             [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-store.sh', timeout: 30, async: true }] }],
       };
+      for (const [event, val] of Object.entries(gaussianHooks)) {
+        const existing = settings.hooks[event];
+        if (!existing) {
+          settings.hooks[event] = val;
+        } else if (!JSON.stringify(existing).includes('gaussian')) {
+          settings.hooks[event] = [...existing, ...val];
+        }
+      }
       fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
       console.log('done');
     }
 
     // Write env vars to a sourceable file
+    if (!url) {
+      console.error('\nWarning: could not detect worker URL from deploy output.');
+      console.error('Check `npx wrangler deploy` output and set GAUSSIAN_WORKER_URL manually in ~/.gaussian-memory-env');
+      return;
+    }
     const envFile = path.join(process.env.HOME, '.gaussian-memory-env');
     fs.writeFileSync(envFile, `export GAUSSIAN_WORKER_URL="${url}"\nexport GAUSSIAN_AUTH_TOKEN="${token}"\n`, { mode: 0o600 });
     fs.chmodSync(envFile, 0o600); // restrict to owner only — file contains auth token

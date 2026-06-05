@@ -1101,8 +1101,8 @@ Return ONLY valid JSON array:
         if (action === 'spawned') {
           await updateDomainCentroid(domain, mu, env).catch(() => {});
           storedMus.push(mu);
+          stored++;
         }
-        stored++;
       }
 
       // Session summary — compose from extracted facts, no extra LLM call.

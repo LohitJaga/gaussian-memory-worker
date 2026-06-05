@@ -21,7 +21,7 @@ call() {
 get_full_id() {
   local short_id=$1
   local list_r
-  list_r=$(call memory_list '{"limit":10}')
+  list_r=$(call memory_list '{}')
   echo "$list_r" | grep -oE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" \
     | grep "^$short_id" | head -1 || true
 }
@@ -67,7 +67,7 @@ check "stats returns total count" "$R" "Total:"
 
 # ── 5. memory_list ────────────────────────────────────────────────────────────
 echo "[5] memory_list"
-R=$(call memory_list '{"limit":5}')
+R=$(call memory_list '{}')
 check "list returns UUID-formatted entries" "$R" "[0-9a-f]{8}-[0-9a-f]{4}"
 
 # ── 6. Retrieve: entity query ─────────────────────────────────────────────────
@@ -106,7 +106,7 @@ fi
 
 # ── 11. memory_belief_drift ───────────────────────────────────────────────────
 echo "[11] memory_belief_drift"
-R=$(call memory_belief_drift '{"limit":5}')
+R=$(call memory_belief_drift '{"query":"test"}')
 check "belief_drift returns any result" "$R" "drift|sigma|Drift|No memories|found|memories"
 
 # ── 12. memory_orphan_check ───────────────────────────────────────────────────
@@ -121,7 +121,7 @@ check "identity get returns any content" "$R" "."
 
 # ── 14. memory_store_diff ─────────────────────────────────────────────────────
 echo "[14] memory_store_diff"
-R=$(call memory_store_diff "{\"before\":\"Using GLM-4.7-flash for inference\",\"after\":\"Switched to Llama-3.1-8b because GLM exhausted token budget before emitting content\",\"context\":\"model swap on $TS\"}")
+R=$(call memory_store_diff "{\"command\":\"git commit -m 'Switch GLM to Llama-3.1-8b'\",\"output\":\"Switched to Llama-3.1-8b because GLM exhausted token budget before emitting content on $TS\"}")
 check "store_diff spawns or merges" "$R" "SPAWNED:|MERGED:|SKIP"
 
 # ── 15. memory_capture_passive ───────────────────────────────────────────────
@@ -147,17 +147,17 @@ check "retag_projects returns result" "$R" "default|project|Processed|batch|rema
 
 # ── 19. memory_cleanup_singletons ─────────────────────────────────────────────
 echo "[19] memory_cleanup_singletons"
-R=$(call memory_cleanup_singletons '{"dry_run":true}')
+R=$(call memory_cleanup_singletons '{}')
 check "cleanup_singletons returns result" "$R" "singleton|Singleton|No singleton|domain"
 
 # ── 20. memory_judge ──────────────────────────────────────────────────────────
 echo "[20] memory_judge"
-R=$(call memory_judge '{"limit":3}')
+R=$(call memory_judge '{}')
 check "memory_judge returns result" "$R" "judge|pair|verdict|candidates|Processed|No pending|supersedes|extends|no candidates"
 
 # ── 21. memory_build_entities ─────────────────────────────────────────────────
 echo "[21] memory_build_entities"
-R=$(call memory_build_entities '{"limit":5}')
+R=$(call memory_build_entities '{}')
 check "build_entities returns result" "$R" "entit|Entit|queue|Process|No pending|Processed|remaining"
 
 # ── 22. memory_delete (cleanup from test 10) ──────────────────────────────────
