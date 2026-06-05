@@ -10,7 +10,7 @@ export async function retrieve(
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
 
   // Session-aware intent extraction — rewrites vague queries using session context.
-  // Gap 3 fix: falls back to project name when no context is passed (MCP direct calls, Vichu).
+  // Gap 3 fix: falls back to project name when no context is passed (MCP direct calls).
   // Gap 2 fix: rewritten query has concrete nouns → better embedding match for multi-concept memories.
   let searchQuery = query;
   const intentContext = context || (project !== 'default' ? `project: ${project.replace(/-/g, ' ')}` : null);
@@ -468,7 +468,7 @@ export async function retrieve(
     const relRows = await env.DB.prepare(
       `SELECT to_id FROM memory_relations WHERE relation_type = 'supersedes' AND to_id IN (${topIds.map(() => '?').join(',')})`
     ).bind(...topIds).all<{ to_id: string }>();
-    (relRows.results ?? []).forEach(r => supersededSet.add(r.to_id));
+    for (const r of relRows.results ?? []) supersededSet.add(r.to_id);
   }
 
   return finalTop.map(m => {

@@ -1,11 +1,6 @@
 import type { Env } from './types';
 import { embed, dotProduct } from './embed';
 
-interface DomainAnchor {
-  name: string;
-  embedding: number[];
-}
-
 const ANCHOR_STOP = new Set([
   // articles / conjunctions / prepositions
   'the','and','for','with','from','that','this','have','been','were','they','will',

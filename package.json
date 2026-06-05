@@ -7,13 +7,21 @@
     "gaussian-memory": "./bin/gaussian-memory.js"
   },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "biome check src/",
+    "typecheck": "tsc --noEmit"
   },
-  "keywords": ["mcp", "memory", "cloudflare", "ai"],
+  "keywords": [
+    "mcp",
+    "memory",
+    "cloudflare",
+    "ai"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
     "@cloudflare/workers-types": "^4.20260414.1",
     "typescript": "^6.0.2",
     "vitest": "^4.1.7"
