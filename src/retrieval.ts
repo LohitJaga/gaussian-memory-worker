@@ -9,10 +9,12 @@ export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default', context?: string
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
 
-  // Session-aware intent extraction — only for short/vague queries where raw embedding is poor
-  // Llama rewrites to a concrete standalone search intent. 1.5s timeout, fallback to raw query.
+  // Session-aware intent extraction — rewrites vague queries using session context.
+  // Gap 3 fix: falls back to project name when no context is passed (MCP direct calls, Vichu).
+  // Gap 2 fix: rewritten query has concrete nouns → better embedding match for multi-concept memories.
   let searchQuery = query;
-  if (context && query.length < 60) {
+  const intentContext = context || (project !== 'default' ? `project: ${project.replace(/-/g, ' ')}` : null);
+  if (intentContext && query.length < 80) {
     try {
       const intentResult = await Promise.race([
         env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
@@ -23,7 +25,7 @@ export async function retrieve(
             },
             {
               role: 'user',
-              content: `<context>${context.slice(0, 300)}</context>\n<query>${query}</query>\nIntent:`,
+              content: `<context>${intentContext.slice(0, 300)}</context>\n<query>${query}</query>\nIntent:`,
             },
           ],
           max_tokens: 60,
@@ -37,16 +39,29 @@ export async function retrieve(
 
   const qvec = await embed(searchQuery, env);
 
-  // Entity extraction — Mem0-style: pull capitalized tokens + known patterns as entity candidates
-  // These become extra Vectorize queries; matching memories get a score boost
+  // Gap 1 fix: extract entities from BOTH original query and rewritten intent.
+  // Original handles explicit caps ("Gaussian Memory"); rewritten handles inferred ones.
+  const capPattern = /\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g;
   const entityTokens = [
-    ...new Set(
-      query.match(/\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g) ?? []
-    )
-  ].slice(0, 3); // cap at 3 entities to limit extra queries
+    ...new Set([
+      ...(query.match(capPattern) ?? []),
+      ...(searchQuery !== query ? (searchQuery.match(capPattern) ?? []) : []),
+    ])
+  ].slice(0, 3);
 
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
   const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
+
+  // Gap 4: temporal cue parsing — "yesterday", "this week" etc. → timestamp window boost at score time.
+  const temporalDaysMap: Record<string, number> = {
+    'today': 0, 'this session': 0, 'just now': 0,
+    'yesterday': 1,
+    'this week': 5, 'last week': 12,
+    'this month': 25, 'last month': 55,
+    'recently': 2,
+  };
+  const temporalCueMatch = query.match(/\b(today|this session|just now|yesterday|this week|last week|this month|last month|recently)\b/i);
+  const temporalWindowDays = temporalCueMatch ? (temporalDaysMap[temporalCueMatch[1].toLowerCase()] ?? -1) : -1;
 
   // Domain routing removed — Vectorize queries globally.
   // FTS5+RRF+entity graph handles relevance without domain pre-filtering.
@@ -54,7 +69,8 @@ export async function retrieve(
   const domainSizeMap = new Map<string, number>();
 
   // Vector search + FTS5 keyword search in parallel (hybrid retrieval, global scope)
-  const queryOpts: any = { topK: topK * 4, returnValues: true, returnMetadata: 'indexed' };
+  // Vectorize cap: returnValues=true hard-limits topK to 50. FTS5 handles overflow.
+  const queryOpts: any = { topK: Math.min(topK * 4, 50), returnValues: true, returnMetadata: 'indexed' };
 
   // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
   const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
@@ -87,6 +103,35 @@ export async function retrieve(
   // Inject RRF-only IDs (from FTS5) that weren't in vector results
   const vecIds = new Set((vecFinal.matches ?? []).map(m => m.id));
   const ftsOnlyIds = mergedIds.filter(id => !vecIds.has(id));
+
+  // Gap 4: temporal query — fetch memories by timestamp range directly from D1.
+  // Cosine search misses temporal matches entirely if the text doesn't embed close.
+  // E.g. "yesterday" should surface session summaries even without semantic overlap.
+  const nowSecEarly = Math.floor(Date.now() / 1000);
+  let temporalOnlyIds: string[] = [];   // IDs not in vector/FTS pool — need to be force-added
+  let allTemporalIds = new Set<string>(); // ALL IDs in the window — for guarantee logic
+  if (temporalWindowDays >= 0) {
+    const windowStart = nowSecEarly - (temporalWindowDays + 2) * 86400;
+    const windowEnd = nowSecEarly - Math.max(0, temporalWindowDays - 1) * 86400;
+    const tProjectClause = project === 'default' ? '' : `AND (project = ? OR project = 'default')`;
+    const tBinds: any[] = [windowStart, windowEnd, ...(project === 'default' ? [] : [project])];
+    // Two passes: general candidates (LIMIT 20) + session-only (no LIMIT) for guarantee
+    const [tRows, tSessionRows] = await Promise.all([
+      env.DB.prepare(
+        `SELECT id FROM memories WHERE timestamp BETWEEN ? AND ? ${tProjectClause} ORDER BY timestamp DESC LIMIT 20`
+      ).bind(...tBinds).all<{ id: string }>().catch(() => ({ results: [] })),
+      env.DB.prepare(
+        `SELECT id FROM memories WHERE timestamp BETWEEN ? AND ? AND memory_type = 'session' ${tProjectClause} ORDER BY timestamp DESC LIMIT 10`
+      ).bind(...tBinds).all<{ id: string }>().catch(() => ({ results: [] })),
+    ]);
+    const allTempIds = [...new Set([
+      ...(tRows.results ?? []).map(r => r.id),
+      ...(tSessionRows.results ?? []).map(r => r.id),
+    ])];
+    allTemporalIds = new Set(allTempIds);
+    const mergedSet = new Set(mergedIds);
+    temporalOnlyIds = allTempIds.filter(id => !mergedSet.has(id));
+  }
 
   // Hot tier — inject recently stored/accessed memory IDs into candidate pool
   const hotIds = await hotTierGet(env);
@@ -130,8 +175,8 @@ export async function retrieve(
     }
   }
 
-  // Merge IDs for D1 fetch — hot tier first so it gets guaranteed slots (D1 bind limit ~100)
-  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 90);
+  // Merge IDs for D1 fetch — hot tier first, then temporal candidates (gap 4), then vector/fts
+  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 90);
   const placeholders = allIds.map(() => '?').join(',');
   // project='default' = no project context (direct MCP call) → search all projects
   const projectClause = project === 'default'
@@ -147,6 +192,9 @@ export async function retrieve(
   }>();
 
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
+  // Temporal hits have no cosine (not from Vectorize) — synthetic 0.5 baseline so bhattMultiplier
+  // doesn't zero them out. They win/lose on temporalBoost + access + recency.
+  for (const id of temporalOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.5); }
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
   // Cluster cohesion: batch-fetch entity links for all candidates in one D1 query.
@@ -225,18 +273,21 @@ export async function retrieve(
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
     const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
-    // Cluster cohesion only applies if memory has meaningful semantic relevance on its own
     const cohesionBonus = normCosine[i] >= 0.4 ? (clusterCohesionMap.get(row.id) ?? 0) : 0;
+    // Gap 4: temporal boost — memories whose timestamp falls within the cue window score higher.
+    // "yesterday" → peak at 24h ago, falls off over a 2-day window (max +0.35).
+    let temporalBoost = 0;
+    if (temporalWindowDays >= 0) {
+      const targetSec = nowSec - temporalWindowDays * 86400;
+      const windowSec = 2 * 86400;
+      const dist = Math.abs((row.timestamp ?? 0) - targetSec);
+      if (dist <= windowSec) temporalBoost = 0.35 * (1 - dist / windowSec);
+    }
     // Bhattacharyya distribution overlap: measures how well query and memory uncertainty match.
-    // Uses cosine sim as μ-distance proxy + σ overlap to compute distributional similarity.
-    // Specific query (low querySigma) → only sharp memories score high.
-    // Vague query (high querySigma) → both sharp and fuzzy memories can surface.
-    // This is the core Gaussian claim: retrieval is uncertainty-aware, not just semantic.
     const currentSigma = meanSigma(memSigma);
     const bhattScore = distributionalScore(normCosine[i], querySigmaVal, currentSigma);
-    // Scale [0,1] Bhattacharyya score to multiplier range [0.70, 1.40]
     const bhattMultiplier = 0.70 + 0.70 * bhattScore;
-    const baseScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus;
+    const baseScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
     const primaryScore = baseScore * Math.min(1.40, Math.max(0.70, bhattMultiplier));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
@@ -373,6 +424,16 @@ export async function retrieve(
   // De-biasing: surface one high-value contradiction that got penalty-suppressed
   const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
   if (suppressed) top.push(suppressed);
+
+  // Temporal de-biasing: activation clusters can drown temporal hits even with a score boost.
+  // Guarantee up to 2 session summaries from the temporal window make it into results.
+  if (temporalWindowDays >= 0 && allTemporalIds.size > 0) {
+    const topIdSetTemp = new Set(top.map(c => c.id));
+    const missedTemporalSessions = scored
+      .filter(c => allTemporalIds.has(c.id) && c.type === 'session' && !topIdSetTemp.has(c.id))
+      .slice(0, 2);
+    top.push(...missedTemporalSessions);
+  }
 
   // σ hard gate: specific queries only surface memories whose confidence meets the
   // query's specificity requirement. sigmaCeiling scales with querySigmaVal so vague

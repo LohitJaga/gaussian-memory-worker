@@ -4,7 +4,8 @@
 PROMPT=$(jq -r '.prompt // empty' 2>/dev/null)
 [ -z "$PROMPT" ] && exit 0
 
-WORKER='https://gaussian-memory.lohit-cloudflare-pm-assesment.workers.dev'
+WORKER="${GAUSSIAN_WORKER_URL}"
+[ -z "$WORKER" ] && exit 0
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 
 # Detect project from git root basename, normalized to lowercase-hyphenated

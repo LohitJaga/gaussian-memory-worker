@@ -1,0 +1,11 @@
+{
+  "mcp": {
+    "gaussian-memory": {
+      "type": "remote",
+      "url": "${GAUSSIAN_WORKER_URL}",
+      "headers": {
+        "Authorization": "Bearer ${GAUSSIAN_AUTH_TOKEN}"
+      }
+    }
+  }
+}
