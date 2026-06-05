@@ -63,10 +63,13 @@ export async function retrieve(
   const temporalCueMatch = query.match(/\b(today|this session|just now|yesterday|this week|last week|this month|last month|recently)\b/i);
   const temporalWindowDays = temporalCueMatch ? (temporalDaysMap[temporalCueMatch[1].toLowerCase()] ?? -1) : -1;
 
-  // Domain routing removed — Vectorize queries globally.
-  // FTS5+RRF+entity graph handles relevance without domain pre-filtering.
-  // Domain labels kept for display and scoring only (small boost if domain matches).
+  // Domain sizes — used to set adaptive sigma floor in sharpenSigma.
+  // Large domains (>=15) use floor=0.15; small (<5) use floor=0.35 to prevent premature certainty.
   const domainSizeMap = new Map<string, number>();
+  const domainSizeRows = await env.DB.prepare(
+    'SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain'
+  ).all<{ domain: string; cnt: number }>().catch(() => ({ results: [] as { domain: string; cnt: number }[] }));
+  for (const r of domainSizeRows.results) domainSizeMap.set(r.domain, r.cnt);
 
   // Vector search + FTS5 keyword search in parallel (hybrid retrieval, global scope)
   // Vectorize cap: returnValues=true hard-limits topK to 50. FTS5 handles overflow.

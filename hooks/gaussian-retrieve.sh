@@ -15,6 +15,7 @@ PROJECT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null | xargs basename 2
 # Bootstrap CLAUDE.md from KV if missing on this device (runs once per new device)
 if [ ! -s "$CLAUDE_MD" ]; then
   PROFILE=$(curl -sf -X POST "$WORKER" \
+    -H "Authorization: Bearer $GAUSSIAN_AUTH_TOKEN" \
     -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identity_profile_get","arguments":{}}}' \
     2>/dev/null | jq -r '.result.content[0].text // ""' 2>/dev/null)
