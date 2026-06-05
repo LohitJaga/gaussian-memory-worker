@@ -4,15 +4,11 @@ Persistent memory for AI coding assistants. Works across sessions, devices, and 
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly (~$0/month on the free tier for most users).
 
----
-
 ## What it does
 
-Every session, the system automatically captures what you worked on, what decisions you made, and what's still open. Next session it injects the relevant context before you even ask.
+The system automatically captures what you worked on, what decisions you made, and what's still open — then injects the relevant context at the start of each session before you ask.
 
-The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't thought about in weeks fade out. Retrieval adapts to how specific your question is — a precise technical query only surfaces memories you've actively reinforced; a broad exploratory question surfaces a wider range.
-
----
+The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't touched in weeks fade out. A precise technical query only matches memories you've actively reinforced; a vague exploratory question casts wider.
 
 ## Quick start
 
@@ -43,15 +39,11 @@ Then reload your shell (`source ~/.zshrc` or open a new terminal). On Windows wi
 
 Restart Claude Code and it's live.
 
----
-
 ## Cloudflare plan
 
 Workers AI has a 10,000 neuron/day limit on the free plan. For light users (a session or two per day, small corpus) this is sufficient. For active developers, **the paid plan ($5/month) is strongly recommended** — the Stop hook sends up to 30K characters through Llama for session extraction, and the nightly cron runs batch classification and deduplication. Heavy daily use will exhaust the free tier and cause background jobs to silently fail mid-session.
 
-If you want to test the system first, start on the free plan. Switch to paid before using it as your primary daily driver.
-
----
+Start on the free plan to test. Switch to paid before using it as your primary daily driver.
 
 ## Seed your memory (recommended)
 
@@ -81,9 +73,7 @@ Create a markdown file with `##` section headers and `-` bullet points:
 - Using Tailwind for styling, no component library
 ```
 
-Each bullet is stored as a memory. The section header provides context. Run it once and the system starts knowing you.
-
----
+Each bullet is stored as a memory. The section header provides context.
 
 ## Hook setup
 
@@ -131,15 +121,11 @@ OpenCode uses `{env:VAR}` syntax — both vars must be in your shell environment
 ### Other MCP-compatible editors
 Any editor that supports remote MCP servers works with Gaussian Memory — Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
 
----
-
 ## Known gaps
 
 **OpenCode — auto-capture not implemented.** The MCP config above gives tool access but no automatic memory capture. OpenCode hooks are TypeScript plugins (not shell commands), so wiring up the retrieve/store/posttool lifecycle requires writing a small JS plugin. Contributions welcome.
 
 **pi.dev — not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
-
----
 
 ## How it works
 
@@ -153,7 +139,7 @@ Every memory stores a confidence value σ ∈ [0, ∞):
 
 ### Retrieval
 
-The primary scoring function uses **Bhattacharyya distance** — a measure of distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (short, specific) has low σ and matches memories with similarly low σ. A vague exploratory question has high σ and allows uncertain memories through. The system retrieves differently depending on what kind of answer you're looking for.
+The primary scoring function uses **Bhattacharyya distance** — a measure of distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (short, specific) has low σ and matches memories with similarly low σ. A vague exploratory question has high σ and allows uncertain memories through.
 
 After Bhattacharyya scoring:
 - **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
@@ -176,8 +162,6 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 7. Process entity extraction queue (50/run)
 8. Synthesize identity profile from semantic memories → push to KV
 
----
-
 ## Architecture
 
 | Component | Role |
@@ -189,8 +173,6 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 | Workers AI | BGE embeddings, Llama 3.1 8B for extraction/synthesis, GLM-4.7-flash for quality gating |
 | KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
 | Cron | Nightly maintenance — decay, dedup, entity processing, identity synthesis |
-
----
 
 ## MCP tools
 
@@ -220,8 +202,6 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 | `identity_profile_get` | Fetch synthesized identity profile from KV |
 | `identity_profile_set` | Push identity profile to KV for cross-device sync |
 
----
-
 ## Belief drift
 
 Every memory logs σ snapshots over time. You can query how your confidence in a belief evolved:
@@ -240,8 +220,6 @@ Trajectory (5 snapshots):
   2026-05-20  σ=0.280  [sharpen]
   2026-06-04  σ=0.190  [sharpen]
 ```
-
----
 
 ## File structure
 
@@ -264,8 +242,6 @@ scripts/
 schema.sql                D1 schema
 wrangler.example.toml     Template for manual resource setup
 ```
-
----
 
 ## Status
 
