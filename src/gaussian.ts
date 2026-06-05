@@ -94,3 +94,13 @@ export function deserializeSigma(b64: string): Float32Array {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return new Float32Array(bytes.buffer);
 }
+
+// Bhattacharyya-based retrieval score in [0,1]. High when query and memory are
+// distributionally similar (low cosine distance + matched uncertainty levels).
+export function distributionalScore(cosineSim: number, querySigma: number, memorySigma: number): number {
+  const muDistSq = 2 * (1 - Math.max(0, cosineSim));
+  const sigmaAvg = (querySigma + memorySigma) / 2;
+  const term1 = 0.125 * muDistSq / sigmaAvg;
+  const term2 = 0.5 * Math.log(sigmaAvg / Math.sqrt(querySigma * memorySigma));
+  return Math.exp(-(term1 + term2));
+}

@@ -10,6 +10,7 @@ import {
   meanSigma,
   serializeSigma,
   deserializeSigma,
+  distributionalScore,
 } from './gaussian';
 
 // ── bhattacharyyaDistance ──────────────────────────────────────────────────
@@ -320,6 +321,52 @@ describe('cosine', () => {
     // [1,1,1] · [1,1,1] = 3 — broken single-element loop returns 1
     const a = new Float32Array([1, 1, 1]);
     expect(cosine(a, new Float32Array(a))).toBeCloseTo(3, 5);
+  });
+});
+
+// ── distributionalScore ────────────────────────────────────────────────────
+
+describe('distributionalScore', () => {
+  it('returns 1.0 for perfect cosine match with equal sigma', () => {
+    // cosineSim=1 → muDistSq=0, equal sigmas → term2=0 → exp(0)=1
+    expect(distributionalScore(1.0, 0.4, 0.4)).toBeCloseTo(1.0, 5);
+  });
+
+  it('returns < 1 when cosine is less than perfect', () => {
+    expect(distributionalScore(0.8, 0.4, 0.4)).toBeLessThan(1.0);
+    expect(distributionalScore(0.8, 0.4, 0.4)).toBeGreaterThan(0);
+  });
+
+  it('penalizes sigma mismatch — high-sigma memory scores lower than matched', () => {
+    const matched = distributionalScore(0.9, 0.3, 0.3);
+    const mismatched = distributionalScore(0.9, 0.3, 0.9); // vague memory, specific query
+    expect(mismatched).toBeLessThan(matched);
+  });
+
+  it('vague query + vague memory scores higher than sharp query + sharp memory at same cosine', () => {
+    const vagueBoth = distributionalScore(0.85, 0.8, 0.8);
+    const sharpBoth = distributionalScore(0.85, 0.3, 0.3);
+    // large sigmaAvg attenuates term1 (cosine distance penalty), so vague pairs score higher
+    // at the same cosine similarity — vague queries correctly surface uncertain memories
+    expect(vagueBoth).toBeGreaterThan(sharpBoth);
+  });
+
+  it('output is always in (0, 1] range', () => {
+    const cases = [
+      [1.0, 0.5, 0.5], [0.5, 0.3, 0.8], [0.0, 0.4, 0.4], [0.99, 0.2, 0.6],
+    ];
+    for (const [c, qs, ms] of cases) {
+      const s = distributionalScore(c, qs, ms);
+      expect(s).toBeGreaterThan(0);
+      expect(s).toBeLessThanOrEqual(1.0);
+    }
+  });
+
+  it('clips negative cosine to 0 (no negative muDistSq)', () => {
+    const neg = distributionalScore(-0.5, 0.4, 0.4);
+    const zero = distributionalScore(0.0, 0.4, 0.4);
+    // both produce muDistSq=2 since Math.max(0, cosineSim) clamps both to 0
+    expect(neg).toBeCloseTo(zero, 5);
   });
 });
 
