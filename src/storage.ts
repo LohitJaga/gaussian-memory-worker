@@ -5,8 +5,6 @@ import {
   kalmanMerge, shouldMerge, meanSigma,
 } from './gaussian';
 
-// ── Recency hot tier ─────────────────────────────────────────────────────────
-
 const HOT_KEY = 'hot:recent_ids';
 const HOT_TTL = 86400; // 24h
 const HOT_MAX = 100;
@@ -26,8 +24,6 @@ export async function hotTierGet(env: Env): Promise<string[]> {
     return raw ? JSON.parse(raw) : [];
   } catch { return []; }
 }
-
-// ── Entity extraction ─────────────────────────────────────────────────────────
 
 export async function extractAndLinkEntities(memoryId: string, text: string, env: Env): Promise<void> {
   // Queue for cron processing — Llama calls too slow for fire-and-forget in Workers context
@@ -76,8 +72,6 @@ export async function processPendingEntityQueue(env: Env): Promise<void> {
     }
   } catch {}
 }
-
-// ── Core memory ops ───────────────────────────────────────────────────────────
 
 const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;
 
