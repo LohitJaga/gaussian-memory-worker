@@ -10,8 +10,8 @@ export async function retrieve(
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
 
   // Session-aware intent extraction — rewrites vague queries using session context.
-  // Gap 3 fix: falls back to project name when no context is passed (MCP direct calls).
-  // Gap 2 fix: rewritten query has concrete nouns → better embedding match for multi-concept memories.
+  // Falls back to project name when no context is passed (MCP direct calls).
+  // Rewritten query has concrete nouns → better embedding match for multi-concept memories.
   let searchQuery = query;
   const intentContext = context || (project !== 'default' ? `project: ${project.replace(/-/g, ' ')}` : null);
   if (intentContext && query.length < 80) {
@@ -39,7 +39,7 @@ export async function retrieve(
 
   const qvec = await embed(searchQuery, env);
 
-  // Gap 1 fix: extract entities from BOTH original query and rewritten intent.
+  // Extract entities from BOTH original query and rewritten intent.
   // Original handles explicit caps ("Gaussian Memory"); rewritten handles inferred ones.
   const capPattern = /\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g;
   const entityTokens = [
@@ -52,7 +52,7 @@ export async function retrieve(
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
   const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
 
-  // Gap 4: temporal cue parsing — "yesterday", "this week" etc. → timestamp window boost at score time.
+  // Temporal cue parsing — "yesterday", "this week" etc. → timestamp window boost at score time.
   const temporalDaysMap: Record<string, number> = {
     'today': 0, 'this session': 0, 'just now': 0,
     'yesterday': 1,
@@ -104,9 +104,9 @@ export async function retrieve(
   const vecIds = new Set((vecFinal.matches ?? []).map(m => m.id));
   const ftsOnlyIds = mergedIds.filter(id => !vecIds.has(id));
 
-  // Gap 4: temporal query — fetch memories by timestamp range directly from D1.
-  // Cosine search misses temporal matches entirely if the text doesn't embed close.
-  // E.g. "yesterday" should surface session summaries even without semantic overlap.
+  // Temporal query — fetch memories by timestamp range directly from D1.
+  // Cosine search misses temporal matches if the text doesn't embed close to the query.
+  // "yesterday" should surface session summaries even without semantic overlap.
   const nowSecEarly = Math.floor(Date.now() / 1000);
   let temporalOnlyIds: string[] = [];   // IDs not in vector/FTS pool — need to be force-added
   let allTemporalIds = new Set<string>(); // ALL IDs in the window — for guarantee logic
@@ -175,7 +175,7 @@ export async function retrieve(
     }
   }
 
-  // Merge IDs for D1 fetch — hot tier first, then temporal candidates (gap 4), then vector/fts
+  // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts
   const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 90);
   const placeholders = allIds.map(() => '?').join(',');
   // project='default' = no project context (direct MCP call) → search all projects
@@ -274,7 +274,7 @@ export async function retrieve(
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
     const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
     const cohesionBonus = normCosine[i] >= 0.4 ? (clusterCohesionMap.get(row.id) ?? 0) : 0;
-    // Gap 4: temporal boost — memories whose timestamp falls within the cue window score higher.
+    // Temporal boost — memories whose timestamp falls within the cue window score higher.
     // "yesterday" → peak at 24h ago, falls off over a 2-day window (max +0.35).
     let temporalBoost = 0;
     if (temporalWindowDays >= 0) {

@@ -9,8 +9,6 @@ import { processPendingEntityQueue } from './storage';
 
 export type { Env };
 
-// ── HTTP Handler ─────────────────────────────────────────────────────────────
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === 'OPTIONS') {
