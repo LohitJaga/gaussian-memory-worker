@@ -41,7 +41,7 @@ Restart Claude Code and it's live.
 
 ## Cloudflare plan
 
-Workers AI has a 10,000 neuron/day limit on the free plan. Normal use — two sessions, ~20 prompts each, plus the nightly cron — runs around 2,000–2,500 neurons/day. The free tier is fine for most users.
+Workers AI has a 10,000 neuron/day limit on the free plan. Two sessions/day with the nightly cron runs around 2,000–2,500 neurons. The 10,000/day free limit is not a concern for normal use.
 
 The one exception is `memory_rebuild_domains`, which re-classifies every memory in your corpus via Llama 3.3 70B. At ~15 neurons per memory, a 500-memory corpus costs ~7,500 neurons in a single run. Run it off-peak or upgrade to paid ($5/month) before triggering it on a large corpus.
 
