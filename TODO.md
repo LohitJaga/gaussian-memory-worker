@@ -1,14 +1,22 @@
 # Gaussian Memory — TODO
 
-## June 5 Sprint — pre-send to Vichu
-- [ ] Split src/index.ts into modules: retrieval.ts, storage.ts, cron.ts, tools/
-- [ ] Code cleanup pass
-- [ ] OpenCode hook support — read source, verify event names + config format, test
-- [ ] PiDev hook support — check if hooks exist, document or mark unsupported
-- [ ] Retrieval gap 1: entity graph in retrieval — extract entities from query, graph walk, boost linked memories
-- [ ] Retrieval gap 2: diffuse embeddings — multi-concept memories have averaged μ, misses single-concept queries
-- [ ] Retrieval gap 3: 3-query routing too coarse — expand or rewrite queries against known entities
-- [ ] Retrieval gap 4: no temporal weighting — recent memories should score higher than old at same σ
+## ✅ June 5 Sprint — pre-send to Vichu (DONE)
+- [x] Code cleanup: removed Gap N labels from retrieval.ts, section dividers from storage.ts + index.ts
+- [x] Biome linter added — 0 errors, 3 intentional noNonNullAssertion warnings. Scripts: lint, typecheck in package.json
+- [x] Integration test (scripts/integration-test.sh) — 22/22 tools passing against live worker
+- [x] README overhaul — em dashes removed, cross-platform language, Known Gaps section (OpenCode/pi.dev/CLI tools), accurate neuron usage numbers (~2K/day normal use), wrangler login + npm install added to Quick Start
+- [x] CI workflow fixed — replaced broken auto-deploy with typecheck/lint/test. skipLibCheck added for tinybench noise
+- [x] wrangler.toml gitignored — personal D1/KV IDs removed. init now copies from wrangler.example.toml on fresh clone
+- [x] init crash fix — fs.readFileSync crash when wrangler.toml missing on fresh clone
+- [x] init hooks merge fix — was wiping existing Claude Code hooks on re-run, now merges
+- [x] init URL guard — env file no longer written with GAUSSIAN_WORKER_URL="undefined" on deploy regex miss
+- [x] domainSizeMap fix — was always empty (defaulting to 10), now populated from D1 aggregate query. Large domains now get correct adaptive sigma floor (0.15 not 0.25)
+- [x] stored++ fix in memory_extract_and_store — was counting merges as stored, now only counts spawned
+- [x] retrieve.sh auth header fix — CLAUDE.md bootstrap curl was missing Authorization header, always silently failing
+- [x] Integration test bad params fixed — memory_list/belief_drift/cleanup_singletons/judge/build_entities all had nonexistent params. memory_store_diff had completely wrong schema (before/after/context → command/output)
+- [x] OpenCode: documented as MCP-only, correct {env:VAR} syntax, deleted fake command-hooks.jsonc
+- [x] pi.dev: documented as unsupported, needs custom TS extension
+- [x] Sent to Vichu (selvarajuv on GitHub)
 
 ## Next Session (May 27+)
 - [x] Finish domain rebuild — complete: 2455 memories, 75 domains (May 26)
