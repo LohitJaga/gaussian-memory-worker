@@ -97,6 +97,20 @@ export async function storeMemory(
   const sigma = initialSigma(domain, emotionalIntensity, dim);
   const now = Math.floor(Date.now() / 1000);
 
+  // D1 exact-text check before Vectorize — Vectorize has 2-5 min propagation lag so
+  // a second ingest of the same text would spawn a duplicate before Vectorize indexes it.
+  const exactRow = await env.DB.prepare(
+    `SELECT id, sigma_diagonal FROM memories WHERE text = ? LIMIT 1`
+  ).bind(text).first<{ id: string; sigma_diagonal: string }>().catch(() => null);
+  if (exactRow) {
+    const existingSigma = deserializeSigma(exactRow.sigma_diagonal);
+    const [, newSigma] = kalmanMerge(mu, existingSigma, mu, existingSigma);
+    await env.DB.prepare(
+      `UPDATE memories SET sigma_diagonal = ?, last_accessed = ?, access_count = access_count + 1 WHERE id = ?`
+    ).bind(serializeSigma(newSigma), now, exactRow.id).run();
+    return { action: 'merged', id: exactRow.id };
+  }
+
   // Coarse search via Vectorize — no domain filter so same-text re-ingests always merge
   // regardless of domain reclassification. Bhattacharyya distance handles isolation.
   const results = await env.VECTORIZE.query(Array.from(mu), {
