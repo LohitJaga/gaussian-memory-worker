@@ -424,8 +424,8 @@ async function retrieve(
     }
   }
 
-  // Merge vector + FTS5-only + hot tier IDs for D1 fetch
-  const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds, ...hotOnlyIds])];
+  // Merge vector + FTS5-only + hot tier IDs for D1 fetch — cap at 90 (D1 bind limit ~100, -1 for project param)
+  const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds, ...hotOnlyIds])].slice(0, 90);
   const placeholders = allIds.map(() => '?').join(',');
   // project='default' = no project context (direct MCP call) → search all projects
   const projectClause = project === 'default'
