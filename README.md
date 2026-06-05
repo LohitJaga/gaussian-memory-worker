@@ -6,7 +6,7 @@ Built on Cloudflare Workers. You deploy it to your own account, own your data, a
 
 ## What it does
 
-The system automatically captures what you worked on, what decisions you made, and what's still open — then injects the relevant context at the start of each session before you ask.
+The system automatically captures what you worked on, what decisions you made, and what's still open, then injects the relevant context at the start of each session before you ask.
 
 The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't touched in weeks fade out. A precise technical query only matches memories you've actively reinforced; a vague exploratory question casts wider.
 
@@ -29,7 +29,7 @@ npx gaussian-memory init
 - Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600)
 - Auto-installs and configures Claude Code hooks if `~/.claude` exists
 
-One step after it finishes — add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
+One step after it finishes: add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
 ```bash
 source ~/.gaussian-memory-env
@@ -65,7 +65,7 @@ Create a markdown file with `##` section headers and `-` bullet points:
 - Show file:line references when pointing to code
 
 ## Current projects
-- Rewriting auth middleware — moving from JWT to session tokens
+- Rewriting auth middleware, moving from JWT to session tokens
 - Exploring Cloudflare Workers for lower latency
 
 ## Key decisions
@@ -80,7 +80,7 @@ Each bullet is stored as a memory. The section header provides context.
 ### Claude Code
 Configured automatically by `npx gaussian-memory init`. Nothing to do.
 
-Manual setup if needed — copy the hook scripts and add them to `~/.claude/settings.json`:
+Manual setup if needed: copy the hook scripts and add them to `~/.claude/settings.json`:
 ```bash
 cp hooks/gaussian-*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/gaussian-*.sh
@@ -99,7 +99,7 @@ chmod +x ~/.claude/hooks/gaussian-*.sh
 > **Windows:** Use WSL. Run `npx gaussian-memory init` inside the WSL shell and add env vars to your WSL shell profile.
 
 ### OpenCode
-OpenCode has no shell hook system — it integrates via MCP. Add to `~/.config/opencode/opencode.json` (create it if it doesn't exist):
+OpenCode has no shell hook system; it integrates via MCP. Add to `~/.config/opencode/opencode.json` (create it if it doesn't exist):
 
 ```json
 {
@@ -116,18 +116,18 @@ OpenCode has no shell hook system — it integrates via MCP. Add to `~/.config/o
 }
 ```
 
-OpenCode uses `{env:VAR}` syntax — both vars must be in your shell environment before starting OpenCode. A copy of this config is at `hooks/opencode-mcp-config.json`.
+OpenCode uses `{env:VAR}` syntax; both vars must be in your shell environment before starting OpenCode. A copy of this config is at `hooks/opencode-mcp-config.json`.
 
 ### Other MCP-compatible editors
-Any editor that supports remote MCP servers works with Gaussian Memory — Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
+Any editor that supports remote MCP servers works with Gaussian Memory: Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
 
 ## Known gaps
 
-**OpenCode — auto-capture not implemented.** The MCP config above gives tool access but no automatic memory capture. OpenCode hooks are TypeScript plugins (not shell commands), so wiring up the retrieve/store/posttool lifecycle requires writing a small JS plugin. Contributions welcome.
+**OpenCode: auto-capture not implemented.** The MCP config above gives tool access but no automatic memory capture. OpenCode hooks are TypeScript plugins (not shell commands), so wiring up the retrieve/store/posttool lifecycle requires writing a small JS plugin. Contributions welcome.
 
-**pi.dev — not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
+**pi.dev: not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
 
-**Personal CLI tools — not applicable.** Gaussian Memory is designed for AI agent workflows. Automatic capture only fires when an MCP-connected agent (Claude Code, etc.) is running your session. Work done directly in the terminal without an agent — shell scripts, CLI tools, manual commands — won't be captured unless you call the MCP tools explicitly.
+**Personal CLI tools: not applicable.** Gaussian Memory is designed for AI agent workflows. Automatic capture only fires when an MCP-connected agent (Claude Code, etc.) is running your session. Work done directly in the terminal without an agent (shell scripts, CLI tools, manual commands) won't be captured unless you call the MCP tools explicitly.
 
 ## How it works
 
@@ -135,13 +135,13 @@ Any editor that supports remote MCP servers works with Gaussian Memory — Curso
 
 Every memory stores a confidence value σ ∈ [0, ∞):
 - **Stored:** σ = 0.5 (uncertain, newly observed)
-- **Retrieved:** σ decreases (sharpens) — you confirmed this was relevant
+- **Retrieved:** σ decreases (sharpens): you confirmed this was relevant
 - **Ignored:** σ increases nightly via exponential decay
-- **Pruned:** σ > 2.0 — decayed past usefulness
+- **Pruned:** σ > 2.0, decayed past usefulness
 
 ### Retrieval
 
-The primary scoring function uses **Bhattacharyya distance** — a measure of distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (short, specific) has low σ and matches memories with similarly low σ. A vague exploratory question has high σ and allows uncertain memories through.
+The primary scoring function uses **Bhattacharyya distance**, a measure of distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (short, specific) has low σ and matches memories with similarly low σ. A vague exploratory question has high σ and allows uncertain memories through.
 
 After Bhattacharyya scoring:
 - **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
@@ -174,11 +174,11 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 | FTS5 virtual table | Full-text keyword search, fused with Vectorize via RRF (k=60) |
 | Workers AI | BGE embeddings, Llama 3.1 8B for extraction/synthesis, GLM-4.7-flash for quality gating |
 | KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
-| Cron | Nightly maintenance — decay, dedup, entity processing, identity synthesis |
+| Cron | Nightly maintenance: decay, dedup, entity processing, identity synthesis |
 
 ## MCP tools
 
-These tools are called by the AI agent, not by you directly. In Claude Code (or any MCP-connected agent), you ask the agent to store or retrieve something and it calls the tool on your behalf. You can also trigger them explicitly — "retrieve memories about X" or "store that I decided Y" — and the agent will call the appropriate tool. For scripted or headless use, the worker is a plain JSON-RPC 2.0 HTTP endpoint you can hit with curl.
+These tools are called by the AI agent, not by you directly. In Claude Code (or any MCP-connected agent), you ask the agent to store or retrieve something and it calls the tool on your behalf. You can also trigger them explicitly: "retrieve memories about X" or "store that I decided Y", and the agent will call the appropriate tool. For scripted or headless use, the worker is a plain JSON-RPC 2.0 HTTP endpoint you can hit with curl.
 
 | Tool | Description |
 |---|---|
@@ -234,15 +234,15 @@ src/retrieval.ts          Bhattacharyya retrieval, entity graph, temporal pipeli
 src/storage.ts            Store, merge, dedup, entity extraction queue
 src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
 src/cron.ts               Nightly maintenance jobs
-bin/gaussian-memory.js    CLI — init and ingest commands
+bin/gaussian-memory.js    CLI: init and ingest commands
 hooks/
-  gaussian-retrieve.sh         UserPromptSubmit hook — retrieves context before each prompt
-  gaussian-posttool.sh         PostToolUse hook — stores semantic meaning of code changes
-  gaussian-store.sh            Stop hook — extracts facts from session, syncs CLAUDE.md
+  gaussian-retrieve.sh         UserPromptSubmit hook: retrieves context before each prompt
+  gaussian-posttool.sh         PostToolUse hook: stores semantic meaning of code changes
+  gaussian-store.sh            Stop hook: extracts facts from session, syncs CLAUDE.md
   opencode-mcp-config.json     OpenCode MCP config template (~/.config/opencode/opencode.json)
   README.md                    Hook setup instructions
 scripts/
-  integration-test.sh          Live smoke test — 22 tool calls against deployed worker
+  integration-test.sh          Live smoke test: 22 tool calls against deployed worker
 schema.sql                D1 schema
 wrangler.example.toml     Template for manual resource setup
 ```
