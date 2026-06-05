@@ -127,6 +127,8 @@ Any editor that supports remote MCP servers works with Gaussian Memory — Curso
 
 **pi.dev — not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
 
+**Personal CLI tools — not applicable.** Gaussian Memory is designed for AI agent workflows. Automatic capture only fires when an MCP-connected agent (Claude Code, etc.) is running your session. Work done directly in the terminal without an agent — shell scripts, CLI tools, manual commands — won't be captured unless you call the MCP tools explicitly.
+
 ## How it works
 
 ### The σ model
