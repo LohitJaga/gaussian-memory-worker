@@ -123,7 +123,7 @@ Any editor that supports remote MCP servers works with Gaussian Memory: Cursor, 
 
 ## Known gaps
 
-**OpenCode: auto-capture not implemented.** The MCP config above gives tool access but no automatic memory capture. OpenCode hooks are TypeScript plugins (not shell commands), so wiring up the retrieve/store/posttool lifecycle requires writing a small JS plugin. Contributions welcome.
+**OpenCode: auto-capture not implemented.** The MCP config above gives tool access but two things are still missing: (1) a TypeScript plugin to replicate the retrieve/store/posttool hook lifecycle, and (2) a system instruction telling the agent to use the memory tools proactively. Without both, the tools are available but the agent won't use them automatically. If you're working on an OpenCode plugin and want to contribute, open a PR.
 
 **pi.dev: not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
 
