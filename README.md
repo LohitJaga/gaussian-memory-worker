@@ -33,15 +33,13 @@ npx gaussian-memory init
 - Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600)
 - Auto-installs and configures Claude Code hooks if `~/.claude` exists
 
-One step after it finishes:
+One step after it finishes — add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
 ```bash
-# macOS / Linux
-echo 'source ~/.gaussian-memory-env' >> ~/.zshrc && source ~/.gaussian-memory-env
-
-# Windows (WSL) — same as above inside your WSL shell
-# Windows (native) — add GAUSSIAN_WORKER_URL and GAUSSIAN_AUTH_TOKEN to System Environment Variables
+source ~/.gaussian-memory-env
 ```
+
+Then reload your shell (`source ~/.zshrc` or open a new terminal). On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as System Environment Variables instead.
 
 Restart Claude Code and it's live.
 
@@ -89,16 +87,15 @@ Each bullet is stored as a memory. The section header provides context. Run it o
 
 ## Hook setup
 
-### Claude Code (macOS / Linux)
+### Claude Code
 Configured automatically by `npx gaussian-memory init`. Nothing to do.
 
-Manual setup if needed:
+Manual setup if needed — copy the hook scripts and add them to `~/.claude/settings.json`:
 ```bash
 cp hooks/gaussian-*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/gaussian-*.sh
 ```
 
-Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
@@ -109,24 +106,30 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### Claude Code (Windows)
-Use WSL. Run `npx gaussian-memory init` inside WSL and add the env vars to your WSL shell profile.
+> **Windows:** Use WSL. Run `npx gaussian-memory init` inside the WSL shell and add env vars to your WSL shell profile.
 
 ### OpenCode
-Copy the hook scripts and config template:
-```bash
-mkdir -p ~/.config/opencode/hooks
-cp hooks/gaussian-*.sh ~/.config/opencode/hooks/
-chmod +x ~/.config/opencode/hooks/gaussian-*.sh
-cp hooks/opencode-command-hooks.jsonc ~/.config/opencode/command-hooks.jsonc
+OpenCode has no shell hook system — it integrates via MCP. Add to `~/.config/opencode/opencode.json` (create it if it doesn't exist):
+
+```json
+{
+  "mcp": {
+    "gaussian-memory": {
+      "type": "remote",
+      "url": "{env:GAUSSIAN_WORKER_URL}",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {env:GAUSSIAN_AUTH_TOKEN}"
+      }
+    }
+  }
+}
 ```
 
-Add env vars to your shell profile as above.
+OpenCode uses `{env:VAR}` syntax — both vars must be in your shell environment before starting OpenCode. A copy of this config is at `hooks/opencode-mcp-config.json`.
 
-> **Note:** The OpenCode hook config in `hooks/opencode-command-hooks.jsonc` is a template based on the opencode-command-hooks plugin format. It has not been independently verified — if you hit issues, check that the event names (`before`, `after`, `idle`) match your OpenCode version and open an issue.
-
-### PiDev and other MCP-compatible editors
-Add the worker as an MCP server. After running `init`, your worker URL and token are in `~/.gaussian-memory-env`. You can call MCP tools directly (`memory_retrieve`, `memory_store`, etc.) even without hook-based automatic capture.
+### Other MCP-compatible editors
+Any editor that supports remote MCP servers works with Gaussian Memory — Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
 
 ---
 
@@ -235,15 +238,21 @@ Trajectory (5 snapshots):
 ## File structure
 
 ```
-src/index.ts              MCP server, tool handlers, retrieval pipeline
+src/index.ts              MCP server, routing, cron handler
+src/tools.ts              All 22 tool handlers
+src/retrieval.ts          Bhattacharyya retrieval, entity graph, temporal pipeline
+src/storage.ts            Store, merge, dedup, entity extraction queue
 src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
+src/cron.ts               Nightly maintenance jobs
 bin/gaussian-memory.js    CLI — init and ingest commands
 hooks/
-  gaussian-retrieve.sh    UserPromptSubmit hook — retrieves context before each prompt
-  gaussian-posttool.sh    PostToolUse hook — stores semantic meaning of code changes
-  gaussian-store.sh       Stop hook — extracts facts from session, syncs CLAUDE.md
-  opencode-command-hooks.jsonc  OpenCode configuration template
-  README.md               Hook setup instructions
+  gaussian-retrieve.sh         UserPromptSubmit hook — retrieves context before each prompt
+  gaussian-posttool.sh         PostToolUse hook — stores semantic meaning of code changes
+  gaussian-store.sh            Stop hook — extracts facts from session, syncs CLAUDE.md
+  opencode-mcp-config.json     OpenCode MCP config template (~/.config/opencode/opencode.json)
+  README.md                    Hook setup instructions
+scripts/
+  integration-test.sh          Live smoke test — 22 tool calls against deployed worker
 schema.sql                D1 schema
 wrangler.example.toml     Template for manual resource setup
 ```
