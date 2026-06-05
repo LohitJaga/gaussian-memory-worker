@@ -1,7 +1,7 @@
 import {
   bhattacharyyaDistance, kalmanMerge, shouldMerge,
   sharpenSigma, decaySigma, initialSigma, cosine,
-  meanSigma, serializeSigma, deserializeSigma
+  meanSigma, serializeSigma, deserializeSigma, distributionalScore
 } from './gaussian';
 
 export interface Env {
@@ -291,13 +291,6 @@ function dotProduct(a: number[], b: number[]): number {
 // Scalar Bhattacharyya using cosine sim as mu-distance proxy.
 // querySigma derived from query length; memorySigma from stored sigma_diagonal.
 // Sharp memories (low σ) activated selectively; fuzzy ones activate broadly.
-function distributionalScore(cosineSim: number, querySigma: number, memorySigma: number): number {
-  const muDistSq = 2 * (1 - Math.max(0, cosineSim));
-  const sigmaAvg = (querySigma + memorySigma) / 2;
-  const term1 = 0.125 * muDistSq / sigmaAvg;
-  const term2 = 0.5 * Math.log(sigmaAvg / Math.sqrt(querySigma * memorySigma));
-  return Math.exp(-(term1 + term2));
-}
 
 async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default', context?: string
