@@ -1,5 +1,15 @@
 # Gaussian Memory — TODO
 
+## June 5 Sprint — pre-send to Vichu
+- [ ] Split src/index.ts into modules: retrieval.ts, storage.ts, cron.ts, tools/
+- [ ] Code cleanup pass
+- [ ] OpenCode hook support — read source, verify event names + config format, test
+- [ ] PiDev hook support — check if hooks exist, document or mark unsupported
+- [ ] Retrieval gap 1: entity graph in retrieval — extract entities from query, graph walk, boost linked memories
+- [ ] Retrieval gap 2: diffuse embeddings — multi-concept memories have averaged μ, misses single-concept queries
+- [ ] Retrieval gap 3: 3-query routing too coarse — expand or rewrite queries against known entities
+- [ ] Retrieval gap 4: no temporal weighting — recent memories should score higher than old at same σ
+
 ## Next Session (May 27+)
 - [x] Finish domain rebuild — complete: 2455 memories, 75 domains (May 26)
 - [x] Fix retrieval scoring — cosine+recency+access_freq deployed (May 26)
