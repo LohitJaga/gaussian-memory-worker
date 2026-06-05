@@ -12,11 +12,12 @@ The difference from other memory systems is that memories have a **confidence le
 
 ## Quick start
 
-**Requirements:** Node.js 18+, a Cloudflare account.
+**Requirements:** Node.js 18+, a Cloudflare account, [wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/) logged in (`wrangler login`).
 
 ```bash
 git clone https://github.com/LohitJaga/gaussian-memory-worker
 cd gaussian-memory-worker
+npm install
 npx gaussian-memory init
 ```
 

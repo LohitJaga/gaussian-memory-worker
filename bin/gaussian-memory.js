@@ -139,8 +139,12 @@ async function init() {
     console.log(kvId ? `exists (${kvId})` : 'failed — check wrangler auth');
   }
 
-  // Patch wrangler.toml
+  // Patch wrangler.toml (create from example if not present — wrangler.toml is gitignored)
   const tomlPath = path.join(__dirname, '..', 'wrangler.toml');
+  const examplePath = path.join(__dirname, '..', 'wrangler.example.toml');
+  if (!fs.existsSync(tomlPath) && fs.existsSync(examplePath)) {
+    fs.copyFileSync(examplePath, tomlPath);
+  }
   if (d1Id || kvId) {
     let toml = fs.readFileSync(tomlPath, 'utf8');
     if (d1Id) toml = toml.replace('YOUR_D1_DATABASE_ID', d1Id);
