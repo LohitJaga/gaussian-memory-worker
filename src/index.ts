@@ -1595,6 +1595,7 @@ const TOOLS = [
 async function handleToolCall(name: string, args: any, env: Env): Promise<string> {
   switch (name) {
     case 'memory_store': {
+      if (!args.text || (args.text as string).trim().length < 10) return 'SKIP: text too short (min 10 chars)';
       const topicKey = args.topic_key as string | undefined;
       const project = (args.project as string) ?? 'default';
       const now = Math.floor(Date.now() / 1000);
@@ -1791,7 +1792,7 @@ async function handleToolCall(name: string, args: any, env: Env): Promise<string
       if (!rows.results?.length) return 'No memories stored.';
       return rows.results.map((r: any) => {
         const sigma = deserializeSigma(r.sigma_diagonal);
-        return `[${r.id.slice(0, 8)}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 60)}`;
+        return `[${r.id}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 60)}`;
       }).join('\n');
     }
 
