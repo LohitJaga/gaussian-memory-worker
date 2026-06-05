@@ -178,6 +178,8 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 
 ## MCP tools
 
+These tools are called by the AI agent, not by you directly. In Claude Code (or any MCP-connected agent), you ask the agent to store or retrieve something and it calls the tool on your behalf. You can also trigger them explicitly — "retrieve memories about X" or "store that I decided Y" — and the agent will call the appropriate tool. For scripted or headless use, the worker is a plain JSON-RPC 2.0 HTTP endpoint you can hit with curl.
+
 | Tool | Description |
 |---|---|
 | `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
