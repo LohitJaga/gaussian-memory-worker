@@ -7,7 +7,7 @@ export GAUSSIAN_WORKER_URL="https://your-worker.workers.dev"
 export GAUSSIAN_AUTH_TOKEN="your-token-here"
 ```
 
-Add these to `~/.zshrc` or `~/.bashrc` so they persist.
+The `npx gaussian-memory init` command writes these to `~/.gaussian-memory-env` (chmod 600) and sources it from your shell rc file automatically.
 
 ---
 
@@ -36,14 +36,23 @@ Add to `~/.claude/settings.json`:
 
 ## OpenCode
 
-Copy scripts to `~/.config/opencode/hooks/` and the config to `~/.config/opencode/`:
+OpenCode integrates via MCP (it has no shell hook system). Merge the contents of `opencode-mcp-config.json` into your global OpenCode config at `~/.config/opencode/opencode.json`:
 
 ```bash
-mkdir -p ~/.config/opencode/hooks
-cp gaussian-retrieve.sh gaussian-posttool.sh gaussian-store.sh ~/.config/opencode/hooks/
-chmod +x ~/.config/opencode/hooks/*.sh
-cp opencode-command-hooks.jsonc ~/.config/opencode/command-hooks.jsonc
+# If opencode.json doesn't exist yet:
+mkdir -p ~/.config/opencode
+cp opencode-mcp-config.json ~/.config/opencode/opencode.json
+
+# If you already have opencode.json, add the "mcp" block from opencode-mcp-config.json into it.
 ```
+
+OpenCode reads `{env:VAR}` syntax for environment variables, so `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` must be set in your shell environment before starting OpenCode.
+
+---
+
+## Other MCP-compatible editors (Cursor, Zed, Continue.dev, etc.)
+
+Any editor that supports remote MCP servers can use Gaussian Memory. The worker is a plain JSON-RPC 2.0 HTTP endpoint — no SSE, no OAuth flow required. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`.
 
 ---
 

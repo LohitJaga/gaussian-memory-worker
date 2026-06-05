@@ -158,8 +158,6 @@ export async function deduplicateRecentMemories(env: Env, windowSec = 86400, thr
   const mus = await batchEmbed(rows.map(r => r.text), env);
   const toDelete: string[] = [];
   const deleted = new Set<string>();
-  const projectMap = new Map(rows.map(r => [r.id, r.project]));
-
   for (let i = 0; i < rows.length; i++) {
     if (deleted.has(rows[i].id)) continue;
     const results = await env.VECTORIZE.query(mus[i], { topK: 2, returnMetadata: 'indexed' });
