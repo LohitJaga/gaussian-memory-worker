@@ -288,10 +288,6 @@ function dotProduct(a: number[], b: number[]): number {
   return sum;
 }
 
-// Scalar Bhattacharyya using cosine sim as mu-distance proxy.
-// querySigma derived from query length; memorySigma from stored sigma_diagonal.
-// Sharp memories (low σ) activated selectively; fuzzy ones activate broadly.
-
 async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default', context?: string
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
@@ -377,8 +373,8 @@ async function retrieve(
 
   // Hot tier — inject recently stored/accessed memory IDs into candidate pool
   const hotIds = await hotTierGet(env);
-  const allCandidateIds = new Set([...mergedIds, ...hotIds]);
-  const hotOnlyIds = hotIds.filter(id => !allCandidateIds.has(id) || !vecIds.has(id));
+  const mergedSet = new Set(mergedIds);
+  const hotOnlyIds = hotIds.filter(id => !mergedSet.has(id));
 
   if (!results.matches.length && !ftsOnlyIds.length && !hotOnlyIds.length) return [];
 
@@ -417,8 +413,8 @@ async function retrieve(
     }
   }
 
-  // Merge vector + FTS5-only + hot tier IDs for D1 fetch — cap at 90 (D1 bind limit ~100, -1 for project param)
-  const allIds = [...new Set([...results.matches.map(m => m.id), ...ftsOnlyIds, ...hotOnlyIds])].slice(0, 90);
+  // Merge IDs for D1 fetch — hot tier first so it gets guaranteed slots (D1 bind limit ~100)
+  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 90);
   const placeholders = allIds.map(() => '?').join(',');
   // project='default' = no project context (direct MCP call) → search all projects
   const projectClause = project === 'default'
@@ -676,12 +672,12 @@ async function retrieve(
     await env.DB.prepare(
       'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
     ).bind(now, serializeSigma(newSigma), mem.id).run();
-    hotTierAdd(mem.id, env); // hot tier = recently accessed, not recently stored
+    await hotTierAdd(mem.id, env); // hot tier = recently accessed, not recently stored
     // Record sigma history if it moved by more than 0.05 — avoids spammy writes on tiny changes
     const oldMean = meanSigma(mem.sigma);
     const newMean = meanSigma(newSigma);
     if (Math.abs(newMean - oldMean) >= 0.05) {
-      env.DB.prepare(
+      await env.DB.prepare(
         'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
       ).bind(crypto.randomUUID(), mem.id, newMean, 'sharpen', now).run().catch(() => {});
     }
