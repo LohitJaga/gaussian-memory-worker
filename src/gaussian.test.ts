@@ -362,6 +362,14 @@ describe('distributionalScore', () => {
     }
   });
 
+  it('returns 0.5 neutral score when memorySigma is 0 (corrupted DB row guard)', () => {
+    expect(distributionalScore(0.9, 0.4, 0)).toBe(0.5);
+  });
+
+  it('returns 0.5 neutral score when memorySigma is NaN (empty sigma_diagonal guard)', () => {
+    expect(distributionalScore(0.9, 0.4, NaN)).toBe(0.5);
+  });
+
   it('clips negative cosine to 0 (no negative muDistSq)', () => {
     const neg = distributionalScore(-0.5, 0.4, 0.4);
     const zero = distributionalScore(0.0, 0.4, 0.4);
