@@ -68,10 +68,15 @@ export const TOOLS = [
   },
   {
     name: 'memory_list',
-    description: 'List all stored memories with uncertainty level.',
+    description: 'List stored memories. Filter by domain, sort by created_at/access_count/sigma, limit results, or pass since (ISO timestamp) to see only recent memories.',
     inputSchema: {
       type: 'object',
-      properties: { domain: { type: 'string' } },
+      properties: {
+        domain: { type: 'string' },
+        limit: { type: 'number', default: 50 },
+        sort: { type: 'string', enum: ['timestamp', 'access_count', 'sigma'], default: 'timestamp' },
+        since: { type: 'string', description: 'ISO 8601 timestamp — return only memories stored after this time' },
+      },
     },
   },
   {
@@ -431,16 +436,24 @@ export async function handleToolCall(name: string, args: any, env: Env): Promise
     }
 
     case 'memory_list': {
-      const filter = args.domain ? 'WHERE domain = ?' : '';
-      const params = args.domain ? [args.domain] : [];
+      const conditions: string[] = [];
+      const params: any[] = [];
+      if (args.domain) { conditions.push('domain = ?'); params.push(args.domain); }
+      if (args.since) { conditions.push('timestamp >= ?'); params.push(Math.floor(new Date(args.since).getTime() / 1000)); }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const sortCol = args.sort === 'access_count' ? 'access_count DESC'
+                    : args.sort === 'sigma' ? 'sigma_diagonal ASC'
+                    : 'timestamp DESC';
+      const limit = Math.min(Number(args.limit) || 50, 500);
       const rows = await env.DB.prepare(
-        `SELECT id, text, sigma_diagonal, domain, memory_type, access_count FROM memories ${filter}`
-      ).bind(...params).all<any>();
+        `SELECT id, text, sigma_diagonal, domain, memory_type, access_count, timestamp FROM memories ${where} ORDER BY ${sortCol} LIMIT ?`
+      ).bind(...params, limit).all<any>();
 
       if (!rows.results?.length) return 'No memories stored.';
       return rows.results.map((r: any) => {
         const sigma = deserializeSigma(r.sigma_diagonal);
-        return `[${r.id}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 60)}`;
+        const ts = r.timestamp ? new Date(r.timestamp * 1000).toISOString().slice(0, 16) : '';
+        return `[${r.id}] [${ts}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 80)}`;
       }).join('\n');
     }
 
