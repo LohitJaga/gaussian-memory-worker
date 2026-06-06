@@ -71,6 +71,17 @@ export const server = async () => {
       autoStore(text, `opencode user session ${sessionID}`);
     },
 
+    // PostToolUse equivalent — store semantic diffs from edits and bash
+    'tool.execute.after': async (input, output) => {
+      const tool = input?.tool ?? '';
+      const skip = ['read', 'glob', 'grep', 'list', 'search', 'ls', 'cat', 'find'];
+      if (skip.some(s => tool.toLowerCase().includes(s))) return;
+      const text = output?.output ?? '';
+      if (!text || text.length < 30) return;
+      const context = `opencode tool.${tool} ${input?.args?.file_path ?? input?.args?.command ?? ''}`.trim().slice(0, 120);
+      callWorker('memory_store_diff', { command: `${tool}: ${JSON.stringify(input?.args ?? {}).slice(0, 100)}`, output: text.slice(0, 800) });
+    },
+
     'session.compacted': async (input) => {
       debugWrite(`compacted keys=${Object.keys(input ?? {}).join(',')}`);
       extractAndStore(input);
