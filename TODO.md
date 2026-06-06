@@ -10,12 +10,10 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Weekly spot check: query 3 things worked on last week, verify relevant memories surface
 - [ ] Fix: homework/Bayer memories still surfacing in unrelated queries — needs domain rebuild
 - [ ] Safety checks for users — D1 backup strategy, graceful degradation if worker unreachable
-- [ ] Decay too weak — zero-access memories never get pruned (0 prunable after decay run). Add 3× sigma multiplier for access_count==0 memories so cold pile clears in weeks not months
 
 ### Week 3 Remaining
 - [ ] Multi-hop BFS spreading activation (configurable depth)
 - [ ] `valid_from`/`valid_to` on memories + schema migration
-- [ ] Generalize BYOC worker — no hardcoded personal info, gaussian.config.json for user identity
 - [ ] Nightly consolidation — compress cold σ>1.5 via Llama → R2, drop from D1/Vectorize, lazy fallback
 - [ ] Compaction-triggered extraction — hook into Claude Code compaction event when exposed
 

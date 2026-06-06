@@ -25,7 +25,7 @@ export default {
       return new Response('Gaussian Memory MCP Server', { status: 200 });
     }
 
-    // API key auth — required. Accepts Bearer header OR ?token= query param (for MCP clients that don't support headers).
+    // API key auth — required. Bearer header only; query param auth removed (logs in server access logs).
     // Deploy must set AUTH_TOKEN secret via: wrangler secret put AUTH_TOKEN
     if (!env.AUTH_TOKEN) {
       return new Response(JSON.stringify({ error: 'Server misconfigured: AUTH_TOKEN not set. Run: wrangler secret put AUTH_TOKEN' }), {
@@ -34,14 +34,25 @@ export default {
     }
     const authHeader = request.headers.get('Authorization') ?? '';
     const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-    const urlToken = new URL(request.url).searchParams.get('token') ?? '';
-    if (headerToken !== env.AUTH_TOKEN && urlToken !== env.AUTH_TOKEN) {
+    if (headerToken !== env.AUTH_TOKEN) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401, headers: { 'Content-Type': 'application/json' },
       });
     }
 
-    const body = await request.json() as any;
+    const contentType = request.headers.get('Content-Type') ?? '';
+    if (!contentType.includes('application/json')) {
+      return new Response(JSON.stringify({ error: 'Content-Type must be application/json' }), {
+        status: 415, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const rawBody = await request.text();
+    if (rawBody.length > 1_048_576) { // 1MB max
+      return new Response(JSON.stringify({ error: 'Request body too large (max 1MB)' }), {
+        status: 413, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    const body = JSON.parse(rawBody) as any;
     const { method, params, id } = body;
 
     // MCP notifications have no id — must return 202 with no body

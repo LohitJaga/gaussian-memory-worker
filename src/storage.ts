@@ -70,7 +70,9 @@ export async function processPendingEntityQueue(env: Env): Promise<void> {
       }
       if (ops.length > 0) await env.DB.batch(ops);
     }
-  } catch {}
+  } catch (e) {
+    console.error('[entity-queue]', e);
+  }
 }
 
 const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;
@@ -180,6 +182,8 @@ export async function storeMemory(
          access_count, memory_type, domain, emotional_intensity, contradiction_flag, project)
       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
     `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project).run();
+    await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
+      .bind(id, text, project).run().catch(() => {});
     await env.VECTORIZE.upsert([{ id, values: Array.from(mu), metadata: { domain, memory_type: memoryType, project } }]);
     return { action: 'contradiction', id };
   }
@@ -200,6 +204,8 @@ export async function storeMemory(
         access_count = access_count + 1, text = ?${typeUpdate}
       WHERE id = ?
     `).bind(...typeParams).run();
+    await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
+      .bind(bestId, text, project).run().catch(() => {});
 
     await env.VECTORIZE.upsert([{
       id: bestId,
@@ -219,6 +225,8 @@ export async function storeMemory(
        access_count, memory_type, domain, emotional_intensity, project)
     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
   `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project).run();
+  await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
+    .bind(id, text, project).run().catch(() => {});
 
   await env.VECTORIZE.upsert([{
     id,

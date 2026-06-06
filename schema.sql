@@ -48,3 +48,29 @@ CREATE TABLE IF NOT EXISTS memory_sigma_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sigma_history_memory ON memory_sigma_history(memory_id, recorded_at);
+
+-- FTS5 keyword search (hybrid retrieval: RRF fusion with Vectorize)
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+  id UNINDEXED,
+  text,
+  project UNINDEXED
+);
+
+-- Entity graph for 1-hop traversal at retrieve time
+CREATE TABLE IF NOT EXISTS entity_nodes (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  canonical_name TEXT NOT NULL,
+  last_seen INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_nodes_name ON entity_nodes(canonical_name);
+
+CREATE TABLE IF NOT EXISTS memory_entities (
+  memory_id TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  entity_span TEXT,
+  PRIMARY KEY (memory_id, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);

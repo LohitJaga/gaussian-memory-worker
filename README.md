@@ -135,7 +135,7 @@ Any editor that supports remote MCP servers works with Gaussian Memory: Cursor, 
 
 ## Known gaps
 
-**OpenCode: PostToolUse equivalent not implemented.** Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff. OpenCode has no equivalent hook, so code changes made in OpenCode aren't auto-captured. Conversation content is captured via `chat.input`/`chat.message` plugin hooks.
+**OpenCode: tool output capture not working.** The plugin implements `tool.execute.after` but it's never triggered in OpenCode v1.16.2 (issue [#25918](https://github.com/anomalyco/opencode/issues/25918) — declared but not wired up in the runtime). Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff; OpenCode can't do this yet. Conversation content is still captured via `chat.input`/`chat.message` hooks.
 
 **pi.dev: not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
 
