@@ -7,7 +7,7 @@ import { decaySigma, deserializeSigma, serializeSigma, meanSigma } from './gauss
 
 export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
   const nowSec = Math.floor(Date.now() / 1000);
-  const SIXTY_DAYS = 60 * 86400;
+  const SEVEN_DAYS = 7 * 86400;
 
   const rows = await env.DB.prepare(
     'SELECT id, sigma_diagonal, access_count, timestamp FROM memories'
@@ -19,11 +19,12 @@ export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: 
 
   for (const row of rows.results ?? []) {
     let sigma = decaySigma(deserializeSigma(row.sigma_diagonal));
-    // Accelerated decay: cold memories older than 60 days decay 1.5× faster —
-    // gets dead weight to pruning threshold without touching accessed memories
-    const isOld = (nowSec - (row.timestamp ?? 0)) > SIXTY_DAYS;
-    if ((row.access_count ?? 0) === 0 && isOld) {
-      sigma = decaySigma(sigma); // apply decay twice = 1.5× effective rate
+    // 3× decay for zero-access memories older than 7 days — clears cold pile
+    // in weeks instead of months without affecting anything that's been retrieved
+    const isColdStale = (row.access_count ?? 0) === 0 && (nowSec - (row.timestamp ?? 0)) > SEVEN_DAYS;
+    if (isColdStale) {
+      sigma = decaySigma(sigma);
+      sigma = decaySigma(sigma); // 3 total applications = ~3× effective rate
     }
     if (meanSigma(sigma) > 2.0) {
       pruneIds.push(row.id);
