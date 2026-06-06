@@ -1,6 +1,6 @@
 name = "gaussian-memory"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+compatibility_date = "2025-06-06"
 compatibility_flags = ["nodejs_compat"]
 
 # After deploying, set your auth token:

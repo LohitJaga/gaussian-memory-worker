@@ -201,6 +201,11 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'memory_process_entity_queue',
+    description: 'Process the pending entity extraction queue — runs the batch that was deferred at store time. Shows queue depth before/after and total entity links. Call after a heavy store session to flush the queue.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'memory_belief_drift',
     description: 'Show how confidence in a memory has changed over time — sigma trajectory from initial store to now. Pass memory_id for a specific memory, or query to find matching memories.',
     inputSchema: {
@@ -880,7 +885,9 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
                 reason = (parsed.reason ?? '').slice(0, 200);
               }
             }
-          } catch {}
+          } catch (e) {
+            console.error('[memory_judge] JSON parse failed, defaulting to compatible:', e);
+          }
 
           await env.DB.prepare(
             'INSERT INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
