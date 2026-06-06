@@ -15,8 +15,11 @@ loadEnv();
 const WORKER = process.env.GAUSSIAN_WORKER_URL;
 const TOKEN = process.env.GAUSSIAN_AUTH_TOKEN;
 
+const SKIP_PATTERN = /^(call |run |check |show |list |get |what |how |why |do |can |is |ok|yea|nah|hm|sure|nice|done|yes|no|lol|wait|so |and |but )/i;
+
 async function autoStore(text, context) {
-  if (!WORKER || !TOKEN || !text || text.length < 40) return;
+  if (!WORKER || !TOKEN || !text || text.length < 80) return;
+  if (SKIP_PATTERN.test(text.trim())) return;
   try {
     await fetch(WORKER, {
       method: 'POST',
@@ -53,6 +56,7 @@ export const server = async () => {
 
     // Session-end extraction — fires when session goes idle
     'session.idle': async (input) => {
+      try { writeFileSync(`${homedir()}/.opencode/session-idle-fired.txt`, `fired at ${new Date().toISOString()}\nkeys: ${Object.keys(input ?? {}).join(', ')}\n`); } catch {}
       if (!WORKER || !TOKEN) return;
       // Build transcript from messages if available
       const messages = input?.messages ?? input?.session?.messages ?? [];
