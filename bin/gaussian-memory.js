@@ -240,7 +240,36 @@ async function init() {
     }
     const envFile = path.join(process.env.HOME, '.gaussian-memory-env');
     fs.writeFileSync(envFile, `export GAUSSIAN_WORKER_URL="${url}"\nexport GAUSSIAN_AUTH_TOKEN="${token}"\n`, { mode: 0o600 });
-    fs.chmodSync(envFile, 0o600); // restrict to owner only — file contains auth token
+    fs.chmodSync(envFile, 0o600);
+
+    // Auto-install OpenCode plugin + MCP server if ~/opencode.json exists
+    const opencodeJson = path.join(process.env.HOME, 'opencode.json');
+    const pluginPkg = path.join(__dirname, '..', 'hooks', 'opencode-gaussian-memory.mjs');
+    const pluginDst = path.join(process.env.HOME, '.opencode', 'gaussian-memory.mjs');
+    if (fs.existsSync(opencodeJson) || fs.existsSync(path.join(process.env.HOME, '.config', 'opencode'))) {
+      process.stdout.write('  Installing OpenCode plugin + MCP server... ');
+      try {
+        // Copy plugin file
+        if (fs.existsSync(pluginPkg)) {
+          fs.mkdirSync(path.dirname(pluginDst), { recursive: true });
+          fs.copyFileSync(pluginPkg, pluginDst);
+        }
+        // Patch opencode.json
+        let oconfig = {};
+        if (fs.existsSync(opencodeJson)) {
+          try { oconfig = JSON.parse(fs.readFileSync(opencodeJson, 'utf8')); } catch {}
+        }
+        if (!oconfig.$schema) oconfig.$schema = 'https://opencode.ai/config.json';
+        if (!oconfig.plugin) oconfig.plugin = [];
+        if (!oconfig.plugin.includes(pluginDst)) oconfig.plugin.push(pluginDst);
+        if (!oconfig.mcp) oconfig.mcp = {};
+        oconfig.mcp['gaussian-memory'] = { type: 'remote', url, headers: { Authorization: `Bearer ${token}` } };
+        fs.writeFileSync(opencodeJson, JSON.stringify(oconfig, null, 2));
+        console.log('done');
+      } catch (e) {
+        console.log('failed:', e.message);
+      }
+    }
 
     console.log('\n' + '━'.repeat(60));
     console.log('Done. One step left — add to ~/.zshrc or ~/.bashrc:\n');
