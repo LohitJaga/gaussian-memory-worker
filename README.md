@@ -100,31 +100,42 @@ chmod +x ~/.claude/hooks/gaussian-*.sh
 > **Windows:** Use WSL. Run `npx gaussian-memory init` inside the WSL shell and add env vars to your WSL shell profile.
 
 ### OpenCode
-OpenCode has no shell hook system; it integrates via MCP. Add to `~/.config/opencode/opencode.json` (create it if it doesn't exist):
+Configured automatically by `npx gaussian-memory init` if `~/opencode.json` is detected. Nothing to do.
+
+Manual setup: add to `~/opencode.json`:
 
 ```json
 {
+  "plugin": ["~/.opencode/gaussian-memory.mjs"],
   "mcp": {
     "gaussian-memory": {
       "type": "remote",
-      "url": "{env:GAUSSIAN_WORKER_URL}",
-      "enabled": true,
+      "url": "https://your-worker.workers.dev",
       "headers": {
-        "Authorization": "Bearer {env:GAUSSIAN_AUTH_TOKEN}"
+        "Authorization": "Bearer your-token"
       }
     }
   }
 }
 ```
 
-OpenCode uses `{env:VAR}` syntax; both vars must be in your shell environment before starting OpenCode. A copy of this config is at `hooks/opencode-mcp-config.json`.
+Then copy the plugin file:
+```bash
+cp hooks/opencode-gaussian-memory.mjs ~/.opencode/gaussian-memory.mjs
+```
+
+**What you get:**
+- **MCP tools** — all 23 memory tools available natively in the model's tool list. The model calls `memory_retrieve`, `memory_store`, etc. without any prompting.
+- **Auto-store** — every user and assistant message >80 chars is stored automatically via plugin hooks (`chat.input`, `chat.message`).
+- **Session-end extraction** — `session.idle` and `session.compacted` hooks trigger `memory_extract_and_store` on the full session transcript.
+- **Cross-editor memory** — Claude Code and OpenCode share the same D1/Vectorize backend. Context stored in one editor surfaces in the other.
 
 ### Other MCP-compatible editors
 Any editor that supports remote MCP servers works with Gaussian Memory: Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
 
 ## Known gaps
 
-**OpenCode: auto-capture not implemented.** The MCP config above gives tool access but two things are still missing: (1) a TypeScript plugin to replicate the retrieve/store/posttool hook lifecycle, and (2) a system instruction telling the agent to use the memory tools proactively. Without both, the tools are available but the agent won't use them automatically. If you're working on an OpenCode plugin and want to contribute, open a PR.
+**OpenCode: PostToolUse equivalent not implemented.** Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff. OpenCode has no equivalent hook, so code changes made in OpenCode aren't auto-captured. Conversation content is captured via `chat.input`/`chat.message` plugin hooks.
 
 **pi.dev: not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
 
@@ -157,7 +168,7 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 ### Nightly cron (6am UTC)
 
 1. Prune cold low-quality memories (episodic, < 80 chars, age > 30 days, never accessed)
-2. Decay all σ values (1.5× rate for memories cold > 60 days)
+2. Decay all σ values (3× rate for zero-access memories older than 7 days)
 3. Deduplicate recent memories (cosine > 0.90)
 4. Deduplicate cold memories (cosine > 0.93, oldest-first)
 5. Collapse singleton domains
