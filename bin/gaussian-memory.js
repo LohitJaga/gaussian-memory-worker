@@ -116,6 +116,13 @@ async function init() {
   } catch (e) {
     const m = e.stdout?.match(/database_id\s*=\s*"([^"]+)"/) || e.message?.match(/database_id\s*=\s*"([^"]+)"/);
     d1Id = m?.[1];
+    if (!d1Id) {
+      try {
+        const list = execSync('npx wrangler d1 list 2>&1', { encoding: 'utf8' });
+        d1Id = list.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[^|]*│[^|]*gaussian-memory/)?.[1]
+            || list.match(/gaussian-memory[^|]*│[^|]*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
+      } catch {}
+    }
     console.log(d1Id ? `exists (${d1Id})` : 'failed — check wrangler auth');
   }
 
@@ -136,6 +143,13 @@ async function init() {
   } catch (e) {
     const m = e.stdout?.match(/id\s*=\s*"([^"]+)"/) || e.message?.match(/id\s*=\s*"([^"]+)"/);
     kvId = m?.[1];
+    if (!kvId) {
+      try {
+        const list = execSync('npx wrangler kv namespace list 2>&1', { encoding: 'utf8' });
+        const parsed = JSON.parse(list.match(/\[.*\]/s)?.[0] ?? '[]');
+        kvId = parsed.find(ns => ns.title?.includes('gaussian-memory-kv'))?.id;
+      } catch {}
+    }
     console.log(kvId ? `exists (${kvId})` : 'failed — check wrangler auth');
   }
 
