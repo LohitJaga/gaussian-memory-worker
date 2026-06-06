@@ -50,5 +50,32 @@ export const server = async () => {
       const text = typeof content === 'string' ? content : content?.find?.(p => p.type === 'text')?.text;
       autoStore(text, `opencode user session ${sessionID}`);
     },
+
+    // Session-end extraction — fires when session goes idle
+    'session.idle': async (input) => {
+      if (!WORKER || !TOKEN) return;
+      // Build transcript from messages if available
+      const messages = input?.messages ?? input?.session?.messages ?? [];
+      const transcript = messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => {
+          const text = typeof m.content === 'string' ? m.content
+            : m.content?.filter(p => p.type === 'text')?.map(p => p.text)?.join(' ') ?? '';
+          return `${m.role}: ${text.slice(0, 500)}`;
+        })
+        .join('\n');
+      if (!transcript || transcript.length < 100) return;
+      try {
+        await fetch(WORKER, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${TOKEN}` },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1, method: 'tools/call',
+            params: { name: 'memory_extract_and_store', arguments: { text: transcript } }
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+      } catch {}
+    },
   };
 };
