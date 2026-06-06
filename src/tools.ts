@@ -1241,7 +1241,12 @@ Example: [["tool:GLM-4.7-flash","concept:spreading activation"],["project:Gaussi
 
     case 'memory_retag_projects': {
       const BATCH = 30;
-      const PROJECTS = ['gaussian-memory-worker','bayer-traitprediction','loreal-internship','leetcode-practice','personal','default'];
+      // Discover projects from DB rather than hardcoding personal project names
+      const projectRows = await env.DB.prepare(
+        `SELECT DISTINCT project FROM memories WHERE project != 'default' ORDER BY project`
+      ).all<{ project: string }>();
+      const PROJECTS = [...(projectRows.results ?? []).map(r => r.project), 'default'];
+
       const offsetRaw = await env.KV.get('RETAG_OFFSET');
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
 
@@ -1257,6 +1262,7 @@ Example: [["tool:GLM-4.7-flash","concept:spreading activation"],["project:Gaussi
         return `Done. ${summary}`;
       }
 
+      const projectList = PROJECTS.map(p => `- ${p}`).join('\n');
       const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 120)}`).join('\n');
       const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
         messages: [
@@ -1264,13 +1270,8 @@ Example: [["tool:GLM-4.7-flash","concept:spreading activation"],["project:Gaussi
             role: 'system',
             content: `Classify each memory by project. Return ONLY a JSON array of exactly ${batch.length} project name strings.
 
-Projects:
-- gaussian-memory-worker: Cloudflare Workers, D1, Vectorize, MCP server, memory_retrieve, spreading activation, sigma, domain classification, wrangler
-- bayer-traitprediction: UAV imagery, maize, G2F, phenotypic data, CyVerse, shapefiles, field trials, Purdue Data Mine, crop science
-- loreal-internship: Color Wow, SKU anomaly, BigQuery, Gemini, sales digest, GChat, Federici Brands, Sephora, Ulta, Amazon US
-- leetcode-practice: LeetCode, statistics, probability, binomial, z-score, regression, homework, exam, cheat sheet
-- personal: career goals, dating, relationships, health, apartment, fitness, social life, job search, recruiting
-- default: genuinely unclear or cross-project
+Known projects (pick the closest match, or use "default" if unclear):
+${projectList}
 
 Return: ["project-name", "project-name", ...]`,
           },
