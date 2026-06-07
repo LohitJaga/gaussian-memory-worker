@@ -292,26 +292,60 @@ async function init() {
 
     // Cold start onboarding survey
     console.log('\n' + '━'.repeat(60));
-    console.log('Quick setup — 5 questions to seed your memory (Enter to skip any):\n');
-    const questions = [
-      { q: '1. What are you currently building or working on?',          domain: 'project-context',  key: 'current-project' },
-      { q: '2. What is your main programming language and tech stack?',  domain: 'technical-identity', key: 'tech-stack' },
-      { q: '3. What are your current goals? (job search, shipping, learning, etc.)', domain: 'career-goals', key: 'goals' },
-      { q: '4. How do you prefer AI responses? (concise/detailed, with/without explanations)', domain: 'working-style', key: 'response-pref' },
-      { q: '5. Anything else I should always remember about you or how you work?', domain: 'working-style', key: 'misc-pref' },
-    ];
-    let seeded = 0;
-    for (const { q, domain, key } of questions) {
-      const answer = await ask(`  ${q}\n  > `);
-      if (!answer || answer.length < 10) continue;
+    console.log('Quick setup — a few questions to seed your memory (Enter to skip any):\n');
+
+    async function askFree(prompt, domain, key) {
+      const answer = await ask(`  ${prompt}\n  > `);
+      if (!answer || answer.length < 10) return false;
       try {
         await post(url, token, {
           jsonrpc: '2.0', id: 1, method: 'tools/call',
           params: { name: 'memory_store', arguments: { text: answer, domain, memory_type: 'semantic', topic_key: key } }
         });
-        seeded++;
-      } catch {}
+        return true;
+      } catch { return false; }
     }
+
+    async function askChoice(prompt, choices, domain, key) {
+      console.log(`  ${prompt}`);
+      choices.forEach((c, i) => console.log(`    ${String.fromCharCode(97 + i)}) ${c.label}`));
+      const raw = await ask('  > ');
+      const idx = raw.trim().toLowerCase().charCodeAt(0) - 97;
+      if (idx < 0 || idx >= choices.length) return false;
+      const text = choices[idx].memory;
+      try {
+        await post(url, token, {
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'memory_store', arguments: { text, domain, memory_type: 'procedural', topic_key: key } }
+        });
+        return true;
+      } catch { return false; }
+    }
+
+    let seeded = 0;
+    if (await askFree('What are you currently building or working on?', 'project-context', 'current-project')) seeded++;
+    if (await askFree('Main programming language and tech stack?', 'technical-identity', 'tech-stack')) seeded++;
+    if (await askFree('Current goals? (e.g. ship MVP, job search, learning)', 'career-goals', 'goals')) seeded++;
+
+    if (await askChoice('When you hit ambiguity mid-task:', [
+      { label: 'Guess and go — I\'ll correct you if wrong', memory: 'When hitting ambiguity mid-task: prefer to guess and proceed, user will correct if wrong. Do not stop to ask clarifying questions.' },
+      { label: 'Stop and ask — I\'d rather wait than redo work',  memory: 'When hitting ambiguity mid-task: stop and ask before proceeding. User prefers waiting over redoing work.' },
+    ], 'working-style', 'ambiguity-pref')) seeded++;
+
+    if (await askChoice('What annoys you most in AI responses?', [
+      { label: 'Over-explains things I already know',     memory: 'User frustration trigger: AI over-explaining things they already know. Keep explanations minimal, assume competence.' },
+      { label: 'Too confident — doesn\'t flag uncertainty', memory: 'User frustration trigger: AI being overconfident. Always flag uncertainty and tradeoffs explicitly.' },
+      { label: 'Asks too many clarifying questions',      memory: 'User frustration trigger: too many clarifying questions. Bias toward action over asking.' },
+      { label: 'Ignores context I already gave',          memory: 'User frustration trigger: AI ignoring previously given context. Always reference and respect prior context.' },
+    ], 'working-style', 'frustration-trigger')) seeded++;
+
+    if (await askChoice('Response style preference:', [
+      { label: 'Concise — just the answer, no explanation', memory: 'Response style: concise. Give the answer directly, skip explanations and reasoning unless asked.' },
+      { label: 'Detailed — show reasoning and tradeoffs',   memory: 'Response style: detailed. Show reasoning, tradeoffs, and explain the why behind decisions.' },
+    ], 'working-style', 'response-style')) seeded++;
+
+    if (await askFree('Anything else to always remember? (optional)', 'working-style', 'misc-pref')) seeded++;
+
     if (seeded > 0) console.log(`\n  ${seeded} seed memories stored.`);
 
     console.log('\n' + '━'.repeat(60));
