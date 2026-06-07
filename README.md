@@ -61,7 +61,9 @@ New users can start with context rather than building it from scratch over weeks
 npx gaussian-memory ingest my-context.md
 ```
 
-Create a markdown file with `##` section headers and `-` bullet points:
+Point it at any markdown file — your existing CLAUDE.md, README, notes, or a purpose-built context file. The parser handles real-world formatting: YAML frontmatter, nested bullets, ordered lists, checkboxes, code blocks (skipped), and plain paragraphs under headers.
+
+Example format (but most markdown works):
 
 ```markdown
 ## About me
@@ -81,7 +83,7 @@ Create a markdown file with `##` section headers and `-` bullet points:
 - Using Tailwind for styling, no component library
 ```
 
-Each bullet is stored as a memory. The section header provides context.
+Each bullet or paragraph is stored as a memory. The section header is prepended as context.
 
 ## Hook setup
 
