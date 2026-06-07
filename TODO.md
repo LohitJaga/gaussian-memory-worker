@@ -26,9 +26,14 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Decision trails memory type — {decision, context, alternatives, outcome}
 - [ ] Platform import (`npx gaussian-memory import --from mem0`)
 
-### June 7 (Tomorrow)
-- [x] Cold start onboarding survey — 5-question CLI interview, stores answers as seed memories on first `npx gaussian-memory init`
-- [x] Stress test `npx gaussian-memory ingest` on messy real-world markdown (nested headers, code blocks, mixed formats)
+### June 7 — Done
+- [x] Cold start onboarding survey — mixed free-text + multiple choice, stores procedural memories with topic_key upsert
+- [x] Ingest parser hardened — YAML frontmatter, code blocks, nested bullets, ordered lists, checkboxes, tables
+- [x] FTS5 hybrid retrieval live — memories_fts table + RRF fusion with Vectorize (was silently vector-only)
+- [x] Schema DDL complete — entity_nodes, memory_entities, memories_fts all added to schema.sql
+- [x] Auth hardened — removed ?token= URL param, added Content-Type check + 1MB body limit
+- [x] Embed retry — 2x backoff on Workers AI failures
+- [x] memory_process_entity_queue registered in TOOLS array
 
 ### June 28–July 1 — Test + Security Window
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
@@ -39,7 +44,7 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### From Mem0
 - [ ] Over-fetch + rerank — fetch `topK * 4` candidates, rerank with BM25 + entity scores before returning top-k
-- [ ] BM25 hybrid — keyword search catches exact SKU names, function names that cosine misses
+- [x] BM25 hybrid — FTS5 keyword search live, RRF fusion with Vectorize (reranking with entity scores still open)
 - [ ] Context at storage not retrieval — use last 10 messages during extraction, pure semantic at retrieval
 
 ### From Zep
