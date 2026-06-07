@@ -12,8 +12,15 @@ The difference from other memory systems is that memories have a **confidence le
 
 ## Quick start
 
-**Requirements:** Node.js 18+, a Cloudflare account, [wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/) logged in (`wrangler login`).
+**Requirements:** Node.js 18+, a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works).
 
+**Step 0 — authenticate with Cloudflare (one time):**
+```bash
+npm install -g wrangler
+wrangler login
+```
+
+**Step 1 — deploy:**
 ```bash
 git clone https://github.com/LohitJaga/gaussian-memory-worker
 cd gaussian-memory-worker
