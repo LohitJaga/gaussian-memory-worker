@@ -26,9 +26,12 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Decision trails memory type — {decision, context, alternatives, outcome}
 - [ ] Platform import (`npx gaussian-memory import --from mem0`)
 
+### June 7 (Tomorrow)
+- [x] Cold start onboarding survey — 5-question CLI interview, stores answers as seed memories on first `npx gaussian-memory init`
+- [x] Stress test `npx gaussian-memory ingest` on messy real-world markdown (nested headers, code blocks, mixed formats)
+
 ### June 28–July 1 — Test + Security Window
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
-- [ ] Cold start onboarding (5-question interview seeds day 1)
 - [ ] Retrieval quality spot check (3 queries from last week, verify surfacing)
 - [ ] Hook safety + UX (print hook content before install, y/N confirmation)
 
