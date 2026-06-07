@@ -47,22 +47,41 @@ async function ingest(file) {
     process.exit(1);
   }
 
-  const text = fs.readFileSync(file, 'utf8');
+  const raw = fs.readFileSync(file, 'utf8');
+
+  // Strip YAML frontmatter
+  const text = raw.replace(/^---[\s\S]*?---\n?/, '');
   const lines = text.split('\n');
 
-  // Parse: extract header + all bullets into (sectionHeader, bulletText) pairs
+  // Parse: extract header + content into atomic memory strings
   const memories = [];
   let currentHeader = '';
+  let inCodeBlock = false;
+
   for (const line of lines) {
-    if (/^#{1,3}\s/.test(line)) {
+    // Track fenced code blocks — skip contents entirely
+    if (/^```/.test(line)) { inCodeBlock = !inCodeBlock; continue; }
+    if (inCodeBlock) continue;
+
+    // Skip tables and horizontal rules
+    if (/^\|/.test(line) || /^[-*_]{3,}$/.test(line.trim())) continue;
+
+    if (/^#{1,4}\s/.test(line)) {
       currentHeader = line.replace(/^#+\s*/, '').trim();
-    } else if (/^[-*]\s+/.test(line)) {
-      const bullet = line.replace(/^[-*]\s+/, '').trim();
-      if (bullet.length >= 20) {
-        memories.push(`${currentHeader}: ${bullet}`);
-      }
+    } else if (/^[-*]\s+\[[ x]\]\s+/i.test(line)) {
+      // Checkbox list item — strip checkbox marker
+      const bullet = line.replace(/^[-*]\s+\[[ x]\]\s+/i, '').trim();
+      if (bullet.length >= 20) memories.push(currentHeader ? `${currentHeader}: ${bullet}` : bullet);
+    } else if (/^[-*]\s+/.test(line) || /^\s{2,}[-*]\s+/.test(line)) {
+      // Bullet (top-level or nested)
+      const bullet = line.replace(/^\s*[-*]\s+/, '').trim();
+      if (bullet.length >= 20) memories.push(currentHeader ? `${currentHeader}: ${bullet}` : bullet);
+    } else if (/^\d+\.\s+/.test(line)) {
+      // Ordered list
+      const bullet = line.replace(/^\d+\.\s+/, '').trim();
+      if (bullet.length >= 20) memories.push(currentHeader ? `${currentHeader}: ${bullet}` : bullet);
     } else if (line.trim().length > 40 && currentHeader && !/^#/.test(line)) {
-      // Plain paragraph line under a header — store as-is
+      // Plain paragraph line under a header
       memories.push(line.trim());
     }
   }
@@ -270,6 +289,30 @@ async function init() {
         console.log('failed:', e.message);
       }
     }
+
+    // Cold start onboarding survey
+    console.log('\n' + '━'.repeat(60));
+    console.log('Quick setup — 5 questions to seed your memory (Enter to skip any):\n');
+    const questions = [
+      { q: '1. What are you currently building or working on?',          domain: 'project-context',  key: 'current-project' },
+      { q: '2. What is your main programming language and tech stack?',  domain: 'technical-identity', key: 'tech-stack' },
+      { q: '3. What are your current goals? (job search, shipping, learning, etc.)', domain: 'career-goals', key: 'goals' },
+      { q: '4. How do you prefer AI responses? (concise/detailed, with/without explanations)', domain: 'working-style', key: 'response-pref' },
+      { q: '5. Anything else I should always remember about you or how you work?', domain: 'working-style', key: 'misc-pref' },
+    ];
+    let seeded = 0;
+    for (const { q, domain, key } of questions) {
+      const answer = await ask(`  ${q}\n  > `);
+      if (!answer || answer.length < 10) continue;
+      try {
+        await post(url, token, {
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'memory_store', arguments: { text: answer, domain, memory_type: 'semantic', topic_key: key } }
+        });
+        seeded++;
+      } catch {}
+    }
+    if (seeded > 0) console.log(`\n  ${seeded} seed memories stored.`);
 
     console.log('\n' + '━'.repeat(60));
     console.log('Done. One step left — add to ~/.zshrc or ~/.bashrc:\n');
