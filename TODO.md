@@ -18,13 +18,8 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
-- [ ] Hook safety UX — print hook content before install, y/N confirmation
-- [ ] D1 backup strategy + graceful degradation if worker unreachable
-- [ ] Retrieval quality spot check (3 queries from last week, verify surfacing)
-- [ ] Init: auto-write `source ~/.gaussian-memory-env` to shell profile (detect zsh/bash, append line, confirm to user) AND write `Authorization` bearer token into `~/.claude/mcp.json` — both were missing, token was never in MCP config so tool calls were silently Unauthorized (hooks worked via zshrc independently)
 
 ### Polish + Docs
-- [ ] index.ts modularization (typed interfaces, split modules)
 - [ ] README (neuroscience angle, competitor table, tagline)
 - [ ] Blog post (outline at Downloads/blog_post_outline.md)
 - [ ] Decision trails memory type — {decision, context, alternatives, outcome}
@@ -32,6 +27,7 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### Demo
 - [ ] D3 `/viz` endpoint — domain graph + activation overlay, ship as standalone HTML for Twitter demo
+- [ ] `npx gaussian-memory show [N]` — pretty-print last N retrievals from ~/.claude/gaussian-receipts.jsonl
 
 ## Post-ship (July+)
 - [ ] DO hosted version (per-user isolation, free beta → $1-2/month)
