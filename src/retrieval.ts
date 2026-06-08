@@ -179,7 +179,7 @@ export async function retrieve(
   }
 
   // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts
-  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 90);
+  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 120);
   const placeholders = allIds.map(() => '?').join(',');
   // project='default' = no project context (direct MCP call) → search all projects
   const projectClause = project === 'default'
@@ -368,7 +368,7 @@ export async function retrieve(
 
   if (activationAnchors.length > 0) {
     const neighborQueries = activationAnchors.map(anchor =>
-      env.VECTORIZE.query(anchor.vector, { topK: 2, returnValues: false, returnMetadata: 'indexed' })
+      env.VECTORIZE.query(anchor.vector, { topK: 3, returnValues: false, returnMetadata: 'indexed' })
     );
     const neighborResults = await Promise.all(neighborQueries);
 
@@ -418,11 +418,11 @@ export async function retrieve(
   const floor = topKSlice.length > 0
     ? topKSlice[Math.floor(topKSlice.length / 2)].score * 0.88
     : 0;
-  const top = scored.filter(c => c.score >= floor).slice(0, topK * 2); // hard cap at 2× topK
+  const top = scored.filter(c => c.score >= floor).slice(0, topK * 3); // hard cap at 3× topK
 
   // Append activated associations not already in results
   const topIdSet = new Set(top.map(c => c.id));
-  top.push(...activatedExtras.filter(a => !topIdSet.has(a.id)).slice(0, 3));
+  top.push(...activatedExtras.filter(a => !topIdSet.has(a.id)).slice(0, 5));
 
   // De-biasing: surface one high-value contradiction that got penalty-suppressed
   const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
