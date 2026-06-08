@@ -60,7 +60,7 @@ export const TOOLS = [
       properties: {
         query: { type: 'string' },
         domain: { type: 'string' },
-        top_k: { type: 'number', default: 5 },
+        top_k: { type: 'number', default: 8 },
         synthesize: { type: 'boolean', default: false },
       },
       required: ['query'],
