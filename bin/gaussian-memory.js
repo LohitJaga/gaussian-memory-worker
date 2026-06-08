@@ -212,42 +212,65 @@ async function init() {
     const claudeDir = path.join(process.env.HOME, '.claude');
     const hooksDir = path.join(claudeDir, 'hooks');
     const settingsPath = path.join(claudeDir, 'settings.json');
+    const mcpJsonPath = path.join(claudeDir, 'mcp.json');
     const repoHooks = path.join(__dirname, '..', 'hooks');
 
     if (fs.existsSync(claudeDir)) {
-      process.stdout.write('  Installing Claude Code hooks... ');
-      fs.mkdirSync(hooksDir, { recursive: true });
-      for (const f of ['gaussian-retrieve.sh', 'gaussian-posttool.sh', 'gaussian-store.sh']) {
-        const src = path.join(repoHooks, f);
-        const dst = path.join(hooksDir, f);
-        if (fs.existsSync(src)) {
-          let content = fs.readFileSync(src, 'utf8');
-          // Replace hardcoded worker URL with env var reference (already uses env var)
-          fs.writeFileSync(dst, content);
-          fs.chmodSync(dst, '755');
+      // Hook safety UX — show what will be installed, ask for confirmation
+      console.log('\n  Claude Code hooks to install:');
+      console.log('    UserPromptSubmit → gaussian-retrieve.sh  (inject memories before each prompt)');
+      console.log('    PostToolUse      → gaussian-posttool.sh  (capture tool observations, async)');
+      console.log('    Stop             → gaussian-store.sh     (store session memories on exit)');
+      console.log('\n  These hooks write to ~/.claude/settings.json and run on every Claude Code session.');
+      const confirmHooks = await ask('\n  Install hooks? [Y/n] ');
+      if (confirmHooks.toLowerCase() === 'n') {
+        console.log('  Skipping hooks. Install manually — see hooks/README.md');
+      } else {
+        process.stdout.write('  Installing Claude Code hooks... ');
+        fs.mkdirSync(hooksDir, { recursive: true });
+        for (const f of ['gaussian-retrieve.sh', 'gaussian-posttool.sh', 'gaussian-store.sh']) {
+          const src = path.join(repoHooks, f);
+          const dst = path.join(hooksDir, f);
+          if (fs.existsSync(src)) {
+            fs.writeFileSync(dst, fs.readFileSync(src, 'utf8'));
+            fs.chmodSync(dst, '755');
+          }
         }
+
+        // Patch settings.json — merge into existing hooks rather than replacing
+        let settings = {};
+        if (fs.existsSync(settingsPath)) {
+          try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+        }
+        if (!settings.hooks) settings.hooks = {};
+        const gaussianHooks = {
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-retrieve.sh', statusMessage: 'Recalling memories...' }] }],
+          PostToolUse:      [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-posttool.sh', timeout: 15, async: true }] }],
+          Stop:             [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-store.sh', timeout: 30, async: true }] }],
+        };
+        for (const [event, val] of Object.entries(gaussianHooks)) {
+          const existing = settings.hooks[event];
+          if (!existing) {
+            settings.hooks[event] = val;
+          } else if (!JSON.stringify(existing).includes('gaussian')) {
+            settings.hooks[event] = [...existing, ...val];
+          }
+        }
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+        console.log('done');
       }
 
-      // Patch settings.json — merge into existing hooks rather than replacing
-      let settings = {};
-      if (fs.existsSync(settingsPath)) {
-        try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
-      }
-      if (!settings.hooks) settings.hooks = {};
-      const gaussianHooks = {
-        UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-retrieve.sh', statusMessage: 'Recalling memories...' }] }],
-        PostToolUse:      [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-posttool.sh', timeout: 15, async: true }] }],
-        Stop:             [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-store.sh', timeout: 30, async: true }] }],
+      // Write MCP config to ~/.claude/mcp.json with Bearer token
+      process.stdout.write('  Writing ~/.claude/mcp.json with Bearer auth... ');
+      let mcpConfig = {};
+      try { mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf8')); } catch {}
+      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+      mcpConfig.mcpServers['gaussian-memory'] = {
+        type: 'http',
+        url,
+        headers: { Authorization: `Bearer ${token}` },
       };
-      for (const [event, val] of Object.entries(gaussianHooks)) {
-        const existing = settings.hooks[event];
-        if (!existing) {
-          settings.hooks[event] = val;
-        } else if (!JSON.stringify(existing).includes('gaussian')) {
-          settings.hooks[event] = [...existing, ...val];
-        }
-      }
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+      fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2));
       console.log('done');
     }
 
@@ -348,11 +371,23 @@ async function init() {
 
     if (seeded > 0) console.log(`\n  ${seeded} seed memories stored.`);
 
+    // Auto-append source line to shell profile
+    const shellProfile = process.env.SHELL?.includes('zsh')
+      ? path.join(process.env.HOME, '.zshrc')
+      : path.join(process.env.HOME, '.bashrc');
+    let profileContent = '';
+    try { profileContent = fs.readFileSync(shellProfile, 'utf8'); } catch {}
+    if (!profileContent.includes('gaussian-memory-env')) {
+      fs.appendFileSync(shellProfile, `\n# Gaussian Memory\nsource ~/.gaussian-memory-env\n`);
+      console.log(`\n  Auto-added source line to ${path.basename(shellProfile)}.`);
+    } else {
+      console.log(`\n  Shell profile already sources gaussian-memory-env — skipping.`);
+    }
+
     console.log('\n' + '━'.repeat(60));
-    console.log('Done. One step left — add to ~/.zshrc or ~/.bashrc:\n');
+    console.log('Setup complete.\n');
+    console.log('Run this to activate in your current shell:');
     console.log(`  source ~/.gaussian-memory-env`);
-    console.log('\nThen restart your terminal (or run: source ~/.gaussian-memory-env)');
-    console.log('Hooks are installed and configured automatically.');
     if (!fs.existsSync(claudeDir)) {
       console.log('\nFor Claude Code hooks, see hooks/README.md');
     }
@@ -362,14 +397,35 @@ async function init() {
   }
 }
 
+// ── backup ────────────────────────────────────────────────────────────────────
+
+async function backup() {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const outFile = path.resolve(process.cwd(), `gaussian-backup-${ts}.sql`);
+  process.stdout.write(`Exporting D1 database to ${path.basename(outFile)}... `);
+  const result = spawnSync('npx', ['wrangler', 'd1', 'export', 'gaussian-memory', '--remote', '--output', outFile], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) {
+    console.error('failed:', result.stderr || result.stdout || 'unknown error');
+    console.error('Make sure wrangler is authenticated: npx wrangler login');
+    process.exit(1);
+  }
+  console.log('done');
+  console.log(`\nBackup saved: ${outFile}`);
+  console.log(`Restore with: npx wrangler d1 execute gaussian-memory --remote --file <backup.sql>`);
+}
+
 // ── dispatch ──────────────────────────────────────────────────────────────────
 
 switch (cmd) {
   case 'ingest': ingest(args[0]); break;
   case 'init':   init(); break;
+  case 'backup': backup(); break;
   default:
     console.log('Usage:');
     console.log('  npx gaussian-memory init              — deploy worker + configure resources');
     console.log('  npx gaussian-memory ingest <file.md>  — seed memories from markdown file');
+    console.log('  npx gaussian-memory backup            — export D1 database to SQL file');
     process.exit(0);
 }
