@@ -342,55 +342,78 @@ export async function retrieve(
     return meanSigma(a.sigma) - meanSigma(b.sigma); // lower σ wins ties
   });
 
-  // True spreading activation: second Vectorize pass from top-3 anchors
-  // Activated memories SUPPLEMENT direct results — they don't compete within top-K
+  // Multi-hop BFS spreading activation (depth=2).
+  // Hop 1: neighbours of top-3 direct hits. Hop 2: neighbours of hop-1 results.
+  // returnValues: true so each hop's vectors feed the next frontier.
+  // Score decays 0.6× per hop; 0.65 cosine threshold filters weak links.
+  const BFS_DEPTH = 2;
   const seenIds = new Set(candidates.map(c => c.id));
-  const activationAnchors = scored.slice(0, 3).filter(c => c.vector.length > 0);
   const activatedExtras: typeof scored = [];
+  let frontier = scored.slice(0, 3)
+    .filter(c => c.vector.length > 0)
+    .map(c => ({ id: c.id, vector: c.vector }));
 
-  if (activationAnchors.length > 0) {
-    const neighborQueries = activationAnchors.map(anchor =>
-      env.VECTORIZE.query(anchor.vector, { topK: 3, returnValues: false, returnMetadata: 'indexed' })
+  for (let hop = 0; hop < BFS_DEPTH && frontier.length > 0; hop++) {
+    const decay = Math.pow(0.6, hop + 1);
+    // Only request vectors when there's a next hop to feed; final hop vectors are unused.
+    const needValues = hop < BFS_DEPTH - 1;
+    const neighborQueries = frontier.map(node =>
+      env.VECTORIZE.query(node.vector, { topK: 3, returnValues: needValues, returnMetadata: 'indexed' })
     );
     const neighborResults = await Promise.all(neighborQueries);
 
-    const newMatches: { id: string; score: number }[] = [];
+    const newMatches = new Map<string, { score: number; values: number[] }>();
     for (const result of neighborResults) {
       for (const m of result.matches ?? []) {
-        // Lower threshold (0.65) captures weak associations per Collins & Loftus; 0.6 decay = empirical priming slope
+        // Don't add to seenIds here — process all frontier results first so the
+        // best score across all frontier nodes wins, not whichever fires first.
         if (!seenIds.has(m.id) && (m.score ?? 0) >= 0.65) {
-          newMatches.push({ id: m.id, score: (m.score ?? 0) * 0.6 });
-          seenIds.add(m.id);
+          const activatedScore = (m.score ?? 0) * decay;
+          if (!newMatches.has(m.id) || newMatches.get(m.id)!.score < activatedScore) {
+            newMatches.set(m.id, { score: activatedScore, values: (m.values as number[]) ?? [] });
+          }
         }
       }
     }
+    // Seal all matched IDs after processing the full hop so cross-frontier best-score wins.
+    for (const id of newMatches.keys()) seenIds.add(id);
 
-    if (newMatches.length > 0) {
-      const newIds = newMatches.map(m => m.id);
-      const newRows = await env.DB.prepare(
-        `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-         FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) AND (project = ? OR project = 'default')`
-      ).bind(...newIds, project).all<{
-        id: string; text: string; domain: string; memory_type: string;
-        sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
-      }>();
+    if (newMatches.size === 0) break;
 
-      const newScoreMap = new Map(newMatches.map(m => [m.id, m.score]));
-      for (const row of newRows.results ?? []) {
-        const memSigma = deserializeSigma(row.sigma_diagonal);
-        const anchorSim = newScoreMap.get(row.id) ?? 0;
-        const isFileEdit = /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text);
-        if (isFileEdit) continue;
-        activatedExtras.push({
-          id: row.id, text: row.text, domain: row.domain, type: row.memory_type,
-          sigma: memSigma, primaryScore: anchorSim, score: anchorSim,
-          vector: [], contradiction: row.contradiction_flag === 1,
-          fresh: false, isFileEdit: false, activated: true,
-        } as any);
+    const newIds = [...newMatches.keys()];
+    // Mirror the main fetch's project scoping: project='default' searches all projects.
+    const bfsProjectClause = project === 'default' ? '' : `AND (project = ? OR project = 'default')`;
+    const bfsBinds = project === 'default' ? newIds : [...newIds, project];
+    const newRows = await env.DB.prepare(
+      `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
+       FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) ${bfsProjectClause}`
+    ).bind(...bfsBinds).all<{
+      id: string; text: string; domain: string; memory_type: string;
+      sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
+    }>();
+
+    frontier = [];
+    for (const row of newRows.results ?? []) {
+      const isFileEdit = /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text);
+      if (isFileEdit) continue;
+      // Apply the same quality gate as the primary candidate path so BFS can't
+      // re-surface items that were already rejected by quality filtering.
+      const t = (row.text ?? '').trim();
+      if (t.length < 30 || /^https?:\/\//.test(t) || /^[a-zA-Z0-9_.-]+$/.test(t) || (t.match(/\s/g) ?? []).length < 3) continue;
+      const memSigma = deserializeSigma(row.sigma_diagonal);
+      const match = newMatches.get(row.id)!;
+      activatedExtras.push({
+        id: row.id, text: row.text, domain: row.domain, type: row.memory_type,
+        sigma: memSigma, primaryScore: match.score, score: match.score,
+        vector: [], contradiction: row.contradiction_flag === 1,
+        fresh: false, isFileEdit: false, activated: true,
+      } as any);
+      if (match.values.length > 0) {
+        frontier.push({ id: row.id, vector: match.values });
       }
-      activatedExtras.sort((a, b) => b.score - a.score);
     }
   }
+  activatedExtras.sort((a, b) => b.score - a.score);
 
   // Threshold-based retrieval: return ALL above score floor, not a hard topK.
   // Context window is 200k — injecting 15 relevant memories costs nothing vs 5.
