@@ -9,8 +9,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 ## Priority 1 — Do before July 1
 
 ### Core / Retrieval (do first)
-- [x] Over-fetch + rerank — BM25 as first-class signal (0.15 weight), normBm25 zero-signal fix, dead entity branch cleaned
-- [x] Context at storage not retrieval — memory_auto_store accepts context param, enriches via Llama at storage time; retrieval is pure semantic
 - [ ] Fix: homework/Bayer memories surfacing in unrelated queries — targeted domain rebuild
 - [ ] Multi-hop BFS spreading activation (configurable depth)
 
