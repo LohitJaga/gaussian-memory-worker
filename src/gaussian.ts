@@ -8,11 +8,12 @@ export function bhattacharyyaDistance(
   let term1 = 0;
   let term2 = 0;
 
+  const EPS = 1e-7;
   for (let i = 0; i < dim; i++) {
-    const sigmaAvg = (sigmaA[i] + sigmaB[i]) / 2;
+    const sigmaAvg = (sigmaA[i] + sigmaB[i]) / 2 + EPS;
     const diff = muA[i] - muB[i];
     term1 += (diff * diff) / sigmaAvg;
-    term2 += Math.log(sigmaAvg / Math.sqrt(sigmaA[i] * sigmaB[i]));
+    term2 += Math.log(sigmaAvg / (Math.sqrt(sigmaA[i] * sigmaB[i]) + EPS));
   }
 
   return 0.125 * term1 + 0.5 * term2;

@@ -133,7 +133,7 @@ Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
   return classifyDomain(mu, text, env);
 }
 
-export async function updateDomainCentroid(domainName: string, mu: Float32Array, env: Env): Promise<void> {
+export async function updateDomainCentroid(domainName: string, mu: Float32Array, env: Env, ctx?: ExecutionContext): Promise<void> {
   await ensureDomainColumns(env);
   const existing = await env.DB.prepare(
     'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
@@ -177,7 +177,11 @@ export async function updateDomainCentroid(domainName: string, mu: Float32Array,
   ).bind(domainName).first<{ last_summarized_count: number }>())?.last_summarized_count ?? 0;
 
   if (newCount >= 5 && (lastSummarized === 0 || newCount >= Math.ceil(lastSummarized * 1.25))) {
-    refreshDomainSummary(domainName, newCount, env).catch(() => {});
+    if (ctx) {
+      ctx.waitUntil(refreshDomainSummary(domainName, newCount, env));
+    } else {
+      refreshDomainSummary(domainName, newCount, env).catch(() => {});
+    }
   }
 }
 
