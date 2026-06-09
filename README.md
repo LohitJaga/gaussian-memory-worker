@@ -37,15 +37,21 @@ npx gaussian-memory init
 - Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600)
 - Auto-installs and configures Claude Code hooks if `~/.claude` exists
 
-One step after it finishes: add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
+That's it. `init` auto-appends `source ~/.gaussian-memory-env` to your `~/.zshrc` or `~/.bashrc`, writes the auth token to `~/.claude/mcp.json`, and prompts before installing hook scripts.
+
+Reload your shell (`source ~/.zshrc` or open a new terminal), then restart Claude Code and it's live.
+
+On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as System Environment Variables instead.
+
+## Backup
+
+Export your D1 memory store to a local SQL file at any time:
 
 ```bash
-source ~/.gaussian-memory-env
+npx gaussian-memory backup
 ```
 
-Then reload your shell (`source ~/.zshrc` or open a new terminal). On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as System Environment Variables instead.
-
-Restart Claude Code and it's live.
+Writes a timestamped `.sql` file in the current directory. Run before migrations or destructive cron operations.
 
 ## Cloudflare plan
 
@@ -162,13 +168,15 @@ Every memory stores a confidence value σ ∈ [0, ∞):
 
 ### Retrieval
 
-The primary scoring function uses **Bhattacharyya distance**, a measure of distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (short, specific) has low σ and matches memories with similarly low σ. A vague exploratory question has high σ and allows uncertain memories through.
+Base score is a weighted combination of **cosine similarity** (0.6), **recency** (0.25), and **access frequency** (0.15). This is then modulated by a **Bhattacharyya multiplier** — the key differentiator.
 
-After Bhattacharyya scoring:
+Bhattacharyya distance measures distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (low σ) amplifies memories with similarly low σ — sharp, well-reinforced facts. A vague exploratory query (high σ) allows uncertain memories through. This is what makes retrieval context-sensitive rather than purely semantic.
+
+After scoring:
+- **Spreading activation:** top-3 hits become anchors; neighboring memories in the entity graph score a secondary boost
 - **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
-- **σ hard gate:** memories above the query-adaptive σ ceiling are filtered out
-- **σ tiebreaker:** equal-scoring memories resolve in favor of the sharper one
-- **Threshold retrieval:** all memories above a score floor are returned (not a fixed top-k)
+- **σ tiebreaker:** equal-scoring memories resolve in favor of the sharper one (lower σ = more reinforced)
+- **Threshold retrieval:** all memories above a score floor are returned, not a fixed top-k
 
 ### Merging
 
