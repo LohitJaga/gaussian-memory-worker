@@ -18,6 +18,14 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
+- [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
+
+### Client Compatibility
+- [ ] Verify + document: Cursor MCP support (likely works, needs confirmation)
+- [ ] Verify + document: Zed MCP support
+- [ ] Verify + document: OpenAI Codex / CLI MCP support
+- [ ] Verify + document: Windsurf, Continue.dev, other Claude Code alternatives
+- [ ] Add "Supported Clients" table to README once confirmed
 
 ### README + Blog (after features are stable)
 - [ ] README: Bhattacharyya differentiator, neuroscience angle, architecture diagram, competitor table
