@@ -300,9 +300,9 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     case 'memory_auto_store': {
       // Context enrichment: if caller passes conversation context, use Llama to rewrite
       // the fact as a specific self-contained sentence before embedding.
-      // Runs at storage time (async hook) not retrieval time — zero latency cost for the user.
+      // Runs in the PostToolUse hook — up to 1500ms added per call when context is provided.
       let storedText = args.text as string;
-      if (args.context && (args.text as string).length < 120) {
+      if (args.context) {
         try {
           const enrichResult = await Promise.race([
             env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
@@ -313,13 +313,13 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
                 },
                 {
                   role: 'user',
-                  content: `<context>${(args.context as string).slice(0, 800)}</context>\n<fact>${args.text}</fact>\nRewritten:`,
+                  content: `<context>${(args.context as string).slice(0, 800)}</context>\n<fact>${storedText}</fact>\nRewritten:`,
                 },
               ],
               max_tokens: 120,
               temperature: 0,
             }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
           ]) as any;
           const enriched = (enrichResult?.response ?? enrichResult?.choices?.[0]?.message?.content ?? '').trim();
           if (enriched && enriched.length > 20 && enriched.length < 300) storedText = enriched;
