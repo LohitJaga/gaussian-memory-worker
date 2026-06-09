@@ -8,13 +8,8 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ## Priority 1 — Do before July 1
 
-### Core / Retrieval (do first)
-- [ ] Fix: homework/Bayer memories surfacing in unrelated queries — targeted domain rebuild
-- [ ] Multi-hop BFS spreading activation (configurable depth)
-
-### Schema / Storage
-- [ ] `valid_from`/`valid_to` on memories + schema migration
-- [ ] Nightly consolidation — compress cold σ>1.5 via Llama → R2, drop from D1/Vectorize, lazy fallback
+### Core / Retrieval
+- [x] Multi-hop BFS spreading activation ✓
 
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
