@@ -239,7 +239,7 @@ export async function classifyBatchDomains(
         },
         { role: 'user', content: numbered },
       ],
-      max_tokens: 256,
+      max_tokens: 512,
     }) as any;
 
     const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
