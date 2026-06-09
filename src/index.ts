@@ -10,7 +10,7 @@ import { processPendingEntityQueue } from './storage';
 export type { Env };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
@@ -76,7 +76,7 @@ export default {
     } else if (method === 'tools/call') {
       let content: string;
       try {
-        content = await handleToolCall(params.name, params.arguments ?? {}, env);
+        content = await handleToolCall(params.name, params.arguments ?? {}, env, ctx);
       } catch (e: any) {
         content = `ERROR: ${e?.message ?? String(e)}\nStack: ${e?.stack ?? 'none'}`;
       }

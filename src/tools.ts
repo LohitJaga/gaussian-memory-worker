@@ -251,7 +251,7 @@ function inferTypeAndIntensity(text: string): { memory_type: string; emotional_i
   return { memory_type, emotional_intensity };
 }
 
-export async function handleToolCall(name: string, args: any, env: Env): Promise<string> {
+export async function handleToolCall(name: string, args: any, env: Env, ctx?: ExecutionContext): Promise<string> {
   switch (name) {
     case 'memory_store': {
       if (!args.text || (args.text as string).trim().length < 10) return 'SKIP: text too short (min 10 chars)';
@@ -305,7 +305,7 @@ export async function handleToolCall(name: string, args: any, env: Env): Promise
         args.text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default'
       );
       if (action === 'spawned') {
-        await updateDomainCentroid(domain, mu, env).catch(() => {});
+        await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
       }
       let out = `${action.toUpperCase()}: '${args.text.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
       if (conflict_candidates?.length) {
@@ -386,7 +386,7 @@ export async function handleToolCall(name: string, args: any, env: Env): Promise
       const mu = await embed(description, env);
       const domain = await classifyDomainWithLlama(description, env, mu);
       const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu, args.project ?? 'default');
-      if (action === 'spawned') await updateDomainCentroid(domain, mu, env).catch(() => {});
+      if (action === 'spawned') await updateDomainCentroid(domain, mu, env, ctx);
       return `${action.toUpperCase()}: '${description.slice(0, 60)}' -> (${domain}/episodic, id=${id.slice(0, 8)})`;
     }
 
@@ -574,7 +574,7 @@ export async function handleToolCall(name: string, args: any, env: Env): Promise
         const memType = item.type !== 'episodic' ? item.type : inferred;
         const { action } = await storeMemory(item.text, memType, domain, emotional_intensity, env, mu, project);
         if (action === 'spawned') {
-          await updateDomainCentroid(domain, mu, env).catch(() => {});
+          await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
           storedMus.push(mu);
           stored++;
         } else {
@@ -1119,7 +1119,7 @@ Return ONLY valid JSON array:
         const memory_type = llmType ?? inferredType;
         const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default');
         if (action === 'spawned') {
-          await updateDomainCentroid(domain, mu, env).catch(() => {});
+          await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
           storedMus.push(mu);
           stored++;
         }
