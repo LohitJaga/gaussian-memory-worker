@@ -15,15 +15,9 @@ export async function retrieve(
   const searchQuery = query;
   const qvec = await embed(searchQuery, env);
 
-  // Extract entities from BOTH original query and rewritten intent.
-  // Original handles explicit caps ("Gaussian Memory"); rewritten handles inferred ones.
+  // Extract capitalized entity tokens from the query for entity graph traversal.
   const capPattern = /\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g;
-  const entityTokens = [
-    ...new Set([
-      ...(query.match(capPattern) ?? []),
-      ...(searchQuery !== query ? (searchQuery.match(capPattern) ?? []) : []),
-    ])
-  ].slice(0, 3);
+  const entityTokens = [...new Set(query.match(capPattern) ?? [])].slice(0, 3);
 
   // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
   const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
@@ -252,7 +246,11 @@ export async function retrieve(
   const normCosine = minMax(rawCandidates.map(c => c.cosineWeighted));
   const normRecency = minMax(rawCandidates.map(c => c.recency));
   const normAccess = minMax(rawCandidates.map(c => c.accessFreq));
-  const normBm25 = minMax(rawCandidates.map(c => c.bm25Raw));
+  // BM25: if all candidates have zero score (no FTS5 hits), return zeros — not ones.
+  // minMax's constant-array fallback of 1 is correct for cosine/recency but wrong for BM25:
+  // zero signal should mean zero weight, not uniform +0.15 across all candidates.
+  const bm25Vals = rawCandidates.map(c => c.bm25Raw);
+  const normBm25 = bm25Vals.every(v => v === 0) ? bm25Vals.map(() => 0) : minMax(bm25Vals);
 
   // Pass 2: build scored candidates using normalized components
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
