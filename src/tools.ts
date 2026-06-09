@@ -28,11 +28,12 @@ export const TOOLS = [
   },
   {
     name: 'memory_auto_store',
-    description: 'Auto-store a memory — domain and type inferred from content. Call proactively when detecting preferences, decisions, project context, emotional signals. Never announce it.',
+    description: 'Auto-store a memory — domain and type inferred from content. Pass context (last 3-5 messages) to enrich vague facts into self-contained memories at storage time. Call proactively when detecting preferences, decisions, project context, emotional signals. Never announce it.',
     inputSchema: {
       type: 'object',
       properties: {
         text: { type: 'string' },
+        context: { type: 'string', description: 'Last 3-5 messages of conversation — used to enrich vague facts into specific self-contained memories before storing.' },
         emotional_intensity: { type: 'number', default: 0.0 },
       },
       required: ['text'],
@@ -297,17 +298,44 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     }
 
     case 'memory_auto_store': {
-      const mu = await embed(args.text, env);
-      const domain = await classifyDomainWithLlama(args.text, env, mu);
-      const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(args.text);
+      // Context enrichment: if caller passes conversation context, use Llama to rewrite
+      // the fact as a specific self-contained sentence before embedding.
+      // Runs at storage time (async hook) not retrieval time — zero latency cost for the user.
+      let storedText = args.text as string;
+      if (args.context && (args.text as string).length < 120) {
+        try {
+          const enrichResult = await Promise.race([
+            env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+              messages: [
+                {
+                  role: 'system',
+                  content: 'Given conversation context, rewrite the fact as a single specific self-contained sentence (15-80 words). Preserve exact names, numbers, technologies. No preamble, no quotes — just the sentence.',
+                },
+                {
+                  role: 'user',
+                  content: `<context>${(args.context as string).slice(0, 800)}</context>\n<fact>${args.text}</fact>\nRewritten:`,
+                },
+              ],
+              max_tokens: 120,
+              temperature: 0,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
+          ]) as any;
+          const enriched = (enrichResult?.response ?? enrichResult?.choices?.[0]?.message?.content ?? '').trim();
+          if (enriched && enriched.length > 20 && enriched.length < 300) storedText = enriched;
+        } catch {}
+      }
+      const mu = await embed(storedText, env);
+      const domain = await classifyDomainWithLlama(storedText, env, mu);
+      const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(storedText);
       const emotional_intensity = Math.max(args.emotional_intensity ?? 0.0, inferred);
       const { action, id, conflict_candidates } = await storeMemory(
-        args.text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default'
+        storedText, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default'
       );
       if (action === 'spawned') {
         await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
       }
-      let out = `${action.toUpperCase()}: '${args.text.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
+      let out = `${action.toUpperCase()}: '${storedText.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
       if (conflict_candidates?.length) {
         out += `\nconflict_candidates: ${JSON.stringify(conflict_candidates)}`;
       }
@@ -391,7 +419,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     }
 
     case 'memory_retrieve': {
-      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default', args.context as string | undefined);
+      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default');
       if (!results.length) return 'No memories found.';
 
       // Fetch domain summaries for domains present in results (uses clean domain, not display)

@@ -6,37 +6,13 @@ import {
 } from './gaussian';
 
 export async function retrieve(
-  query: string, domain: string | null, topK: number, env: Env, project: string = 'default', context?: string
+  query: string, domain: string | null, topK: number, env: Env, project: string = 'default'
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
 
-  // Session-aware intent extraction — rewrites vague queries using session context.
-  // Falls back to project name when no context is passed (MCP direct calls).
-  // Rewritten query has concrete nouns → better embedding match for multi-concept memories.
-  let searchQuery = query;
-  const intentContext = context || (project !== 'default' ? `project: ${project.replace(/-/g, ' ')}` : null);
-  if (intentContext && query.length < 80) {
-    try {
-      const intentResult = await Promise.race([
-        env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
-          messages: [
-            {
-              role: 'system',
-              content: 'Given recent context and a query, extract the user\'s true search intent as a single concrete standalone sentence. No questions, no "I want". If the query is already specific and clear, return it unchanged. Return ONLY the intent sentence, nothing else.',
-            },
-            {
-              role: 'user',
-              content: `<context>${intentContext.slice(0, 300)}</context>\n<query>${query}</query>\nIntent:`,
-            },
-          ],
-          max_tokens: 60,
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
-      ]) as any;
-      const intent = (intentResult?.response ?? intentResult?.choices?.[0]?.message?.content ?? '').trim();
-      if (intent && intent.length > 5 && intent.length < 200) searchQuery = intent;
-    } catch {}
-  }
-
+  // Pure semantic retrieval — no LLM query rewriting.
+  // Memories are stored with context-enriched text (via memory_auto_store context param),
+  // so retrieval is pure vector math. No blocking LLM call.
+  const searchQuery = query;
   const qvec = await embed(searchQuery, env);
 
   // Extract entities from BOTH original query and rewritten intent.
