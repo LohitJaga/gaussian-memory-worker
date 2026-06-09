@@ -8,15 +8,11 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ## Priority 1 — Do before July 1
 
-### README (do first — it's the project's resume)
-- [ ] README: Bhattacharyya differentiator, neuroscience angle, architecture diagram, competitor table
-- [ ] Blog post (outline at Downloads/blog_post_outline.md)
-
-### Core / Retrieval
-- [ ] Multi-hop BFS spreading activation (configurable depth)
+### Core / Retrieval (do first)
 - [ ] Over-fetch + rerank — fetch `topK * 4`, rerank with BM25 + entity scores before returning top-k
 - [ ] Context at storage not retrieval — use last 10 messages during extraction, pure semantic at retrieval
 - [ ] Fix: homework/Bayer memories surfacing in unrelated queries — targeted domain rebuild
+- [ ] Multi-hop BFS spreading activation (configurable depth)
 
 ### Schema / Storage
 - [ ] `valid_from`/`valid_to` on memories + schema migration
@@ -24,6 +20,10 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
+
+### README + Blog (after features are stable)
+- [ ] README: Bhattacharyya differentiator, neuroscience angle, architecture diagram, competitor table
+- [ ] Blog post (outline at Downloads/blog_post_outline.md)
 
 ### Polish
 - [ ] Decision trails memory type — {decision, context, alternatives, outcome}
