@@ -81,12 +81,16 @@ export async function retrieve(
     env.VECTORIZE.query(Array.from(qvec), queryOpts),
     ftsQuery.length >= 3
       ? env.DB.prepare(
-          `SELECT id FROM memories_fts WHERE memories_fts MATCH ? AND (project = ? OR project = 'default') ORDER BY rank LIMIT ?`
-        ).bind(ftsQuery, project, topK * 4).all<{ id: string }>().catch(() => ({ results: [] }))
-      : Promise.resolve({ results: [] }),
+          `SELECT id, -bm25(memories_fts) as bm25_score FROM memories_fts WHERE memories_fts MATCH ? AND (project = ? OR project = 'default') ORDER BY rank LIMIT ?`
+        ).bind(ftsQuery, project, topK * 4).all<{ id: string; bm25_score: number }>().catch(() => ({ results: [] }))
+      : Promise.resolve({ results: [] as { id: string; bm25_score: number }[] }),
   ]);
 
-  // RRF fusion (k=60): combine vector ranks + FTS5 ranks
+  // BM25 score map — negated so higher = better match (FTS5 rank is negative)
+  const bm25Map = new Map<string, number>();
+  for (const r of (ftsResults.results ?? [])) bm25Map.set(r.id, r.bm25_score ?? 0);
+
+  // RRF fusion (k=60): combine vector ranks + FTS5 ranks for candidate set ordering
   const RRF_K = 60;
   const rrfScores = new Map<string, number>();
   (vecFinal.matches ?? []).forEach((m, rank) => {
@@ -260,7 +264,8 @@ export async function retrieve(
     const accessFreq = Math.min(1, (row.access_count ?? 0) / 50);
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
     const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
-    return { row, memSigma, cosineWeighted, recency, accessFreq };
+    const bm25Raw = bm25Map.get(row.id) ?? 0;
+    return { row, memSigma, cosineWeighted, recency, accessFreq, bm25Raw };
   });
 
   // Min-max normalization within batch — spreads scores across [0,1] per component
@@ -271,11 +276,12 @@ export async function retrieve(
   const normCosine = minMax(rawCandidates.map(c => c.cosineWeighted));
   const normRecency = minMax(rawCandidates.map(c => c.recency));
   const normAccess = minMax(rawCandidates.map(c => c.accessFreq));
+  const normBm25 = minMax(rawCandidates.map(c => c.bm25Raw));
 
   // Pass 2: build scored candidates using normalized components
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
-    const rrfBoost = Math.min(0.2, (rrfScores.get(row.id) ?? 0) * 12);
+    const rrfBoost = Math.min(0.1, (rrfScores.get(row.id) ?? 0) * 6); // reduced — BM25 now first-class
     const cohesionBonus = normCosine[i] >= 0.4 ? (clusterCohesionMap.get(row.id) ?? 0) : 0;
     // Temporal boost — memories whose timestamp falls within the cue window score higher.
     // "yesterday" → peak at 24h ago, falls off over a 2-day window (max +0.35).
@@ -290,7 +296,9 @@ export async function retrieve(
     const currentSigma = meanSigma(memSigma);
     const bhattScore = distributionalScore(normCosine[i], querySigmaVal, currentSigma);
     const bhattMultiplier = 0.70 + 0.70 * bhattScore;
-    const baseScore = 0.6 * normCosine[i] + 0.25 * normRecency[i] + 0.15 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
+    // BM25 as first-class rerank signal: keyword-matching memories surface even with mediocre cosine.
+    // Weights: cosine (semantic) 50%, BM25 (keyword) 15%, recency 22%, access 13%.
+    const baseScore = 0.50 * normCosine[i] + 0.15 * normBm25[i] + 0.22 * normRecency[i] + 0.13 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
     const primaryScore = baseScore * Math.min(1.40, Math.max(0.70, bhattMultiplier));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {

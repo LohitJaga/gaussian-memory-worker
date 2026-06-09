@@ -168,7 +168,7 @@ Every memory stores a confidence value σ ∈ [0, ∞):
 
 ### Retrieval
 
-Base score is a weighted combination of **cosine similarity** (0.6), **recency** (0.25), and **access frequency** (0.15). This is then modulated by a **Bhattacharyya multiplier** — the key differentiator.
+Base score is a weighted combination of **cosine similarity** (0.50), **BM25 keyword match** (0.15), **recency** (0.22), and **access frequency** (0.13), normalized within each retrieval batch. BM25 is a first-class signal — a memory that keyword-matches precisely surfaces even with a mediocre vector score. This base is then modulated by a **Bhattacharyya multiplier** — the key differentiator.
 
 Bhattacharyya distance measures distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (low σ) amplifies memories with similarly low σ — sharp, well-reinforced facts. A vague exploratory query (high σ) allows uncertain memories through. This is what makes retrieval context-sensitive rather than purely semantic.
 
@@ -213,7 +213,7 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 |---|---|
 | `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
 | `memory_auto_store` | Store with automatic domain and type inference |
-| `memory_retrieve` | Hybrid retrieval (cosine + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories |
+| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories |
 | `memory_extract_and_store` | LLM-based fact extraction from a raw session log |
 | `memory_capture_passive` | Parse structured notes with Key Learnings / Decisions / Problems Solved headers |
 | `memory_store_diff` | Store semantic meaning of a code diff or command output |
