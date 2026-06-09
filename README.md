@@ -43,16 +43,6 @@ Reload your shell (`source ~/.zshrc` or open a new terminal), then restart Claud
 
 On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as System Environment Variables instead.
 
-## Backup
-
-Export your D1 memory store to a local SQL file at any time:
-
-```bash
-npx gaussian-memory backup
-```
-
-Writes a timestamped `.sql` file in the current directory. Run before migrations or destructive cron operations.
-
 ## Cloudflare plan
 
 Workers AI has a 10,000 neuron/day limit on the free plan. Two sessions/day with the nightly cron runs around 2,000–2,500 neurons. The 10,000/day free limit is not a concern for normal use.
@@ -148,6 +138,16 @@ cp hooks/opencode-gaussian-memory.mjs ~/.opencode/gaussian-memory.mjs
 ### Other MCP-compatible editors
 Any editor that supports remote MCP servers works with Gaussian Memory: Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
 
+## Backup
+
+Export your D1 memory store to a local SQL file at any time:
+
+```bash
+npx gaussian-memory backup
+```
+
+Writes a timestamped `.sql` file in the current directory. Run before migrations or destructive cron operations.
+
 ## Known gaps
 
 **OpenCode: tool output capture not working.** The plugin implements `tool.execute.after` but it's never triggered in OpenCode v1.16.2 (issue [#25918](https://github.com/anomalyco/opencode/issues/25918) — declared but not wired up in the runtime). Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff; OpenCode can't do this yet. Conversation content is still captured via `chat.input`/`chat.message` hooks.
@@ -213,7 +213,7 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 |---|---|
 | `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
 | `memory_auto_store` | Store with automatic domain and type inference |
-| `memory_retrieve` | Bhattacharyya-weighted retrieval. `synthesize=true` blends equidistant memories |
+| `memory_retrieve` | Hybrid retrieval (cosine + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories |
 | `memory_extract_and_store` | LLM-based fact extraction from a raw session log |
 | `memory_capture_passive` | Parse structured notes with Key Learnings / Decisions / Problems Solved headers |
 | `memory_store_diff` | Store semantic meaning of a code diff or command output |
@@ -258,12 +258,12 @@ Trajectory (5 snapshots):
 
 ```
 src/index.ts              MCP server, routing, cron handler
-src/tools.ts              All 22 tool handlers
-src/retrieval.ts          Bhattacharyya retrieval, entity graph, temporal pipeline
+src/tools.ts              All 23 tool handlers
+src/retrieval.ts          Hybrid retrieval scoring, spreading activation, entity graph, temporal pipeline
 src/storage.ts            Store, merge, dedup, entity extraction queue
 src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
 src/cron.ts               Nightly maintenance jobs
-bin/gaussian-memory.js    CLI: init and ingest commands
+bin/gaussian-memory.js    CLI: init, ingest, and backup commands
 hooks/
   gaussian-retrieve.sh         UserPromptSubmit hook: retrieves context before each prompt
   gaussian-posttool.sh         PostToolUse hook: stores semantic meaning of code changes
