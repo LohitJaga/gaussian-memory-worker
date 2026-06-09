@@ -11,6 +11,10 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 ### Core / Retrieval
 - [x] Multi-hop BFS spreading activation ✓
 
+### Schema / Storage
+- [ ] `valid_from`/`valid_to` on memories + schema migration
+- [ ] Nightly consolidation — compress cold σ>1.5 via Llama → R2, drop from D1/Vectorize, lazy fallback
+
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
