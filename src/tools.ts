@@ -889,6 +889,12 @@ Verdicts:
 - "extends": A adds detail to B without contradicting it
 - "compatible": A and B are about different things, no conflict
 
+Examples:
+A: "My salary is $120k" B: "My salary is $95k" → {"verdict":"supersedes","confidence":0.95,"reason":"A is a newer salary figure that replaces B"}
+A: "The meeting is on Tuesday" B: "The meeting is on Thursday" → {"verdict":"conflicts_with","confidence":0.92,"reason":"A and B give contradictory days for the same meeting"}
+A: "Uses PostgreSQL with pgBouncer connection pooling" B: "Uses PostgreSQL for storage" → {"verdict":"extends","confidence":0.88,"reason":"A adds implementation detail without contradicting B"}
+A: "Prefers dark mode in VSCode" B: "Favorite language is Python" → {"verdict":"compatible","confidence":0.97,"reason":"A and B are about different preferences with no conflict"}
+
 Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible","confidence":0.0-1.0,"reason":"one sentence"}`,
               },
               {
