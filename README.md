@@ -170,7 +170,7 @@ Every memory stores a confidence value σ ∈ [0, ∞):
 
 Base score is a weighted combination of **cosine similarity** (0.50), **BM25 keyword match** (0.15), **recency** (0.22), and **access frequency** (0.13), normalized within each retrieval batch. BM25 is a first-class signal — a memory that keyword-matches precisely surfaces even with a mediocre vector score. This base is then modulated by a **Bhattacharyya multiplier** — the key differentiator.
 
-Bhattacharyya distance measures distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (low σ) amplifies memories with similarly low σ — sharp, well-reinforced facts. A vague exploratory query (high σ) allows uncertain memories through. This is what makes retrieval context-sensitive rather than purely semantic.
+The Bhattacharyya multiplier compares the query's confidence against each memory's σ. A precise technical query (low σ) amplifies memories with similarly low σ — sharp, well-reinforced facts. A vague exploratory query (high σ) allows uncertain memories through. This is what makes retrieval context-sensitive rather than purely semantic.
 
 After scoring:
 - **Temporal validity filter:** memories with `valid_to` set (superseded by a newer version) are excluded before scoring — expired facts never surface
