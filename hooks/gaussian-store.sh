@@ -1,7 +1,8 @@
 #!/bin/bash
 # Called by Stop hook — extracts facts from this session and stores them in Gaussian memory
 # Also pushes CLAUDE.md to KV for cross-device sync
-SESSION_ID=$(jq -r '.session_id // empty' 2>/dev/null)
+HOOK_INPUT=$(cat)
+SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$SESSION_ID" ] && exit 0
 
 WORKER="${GAUSSIAN_WORKER_URL}"
@@ -12,21 +13,23 @@ CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 PROJECT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
 [ -z "$PROJECT" ] && PROJECT="default"
 
+# Use transcript_path from hook input — project sessions store transcripts under a
+# different path than the HOME-encoded directory, so reconstruction was silently failing.
+TRANSCRIPT_FILE=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
+[ -z "$TRANSCRIPT_FILE" ] && TRANSCRIPT_FILE="$HOME/.claude/projects/$(echo "$HOME" | sed 's|/|-|g')/${SESSION_ID}.jsonl"
+
 # Short-circuit: skip Python parse entirely if transcript hasn't grown enough
-TRANSCRIPT_DIR="$HOME/.claude/projects/$(echo "$HOME" | sed 's|/|-|g')"
-TRANSCRIPT_FILE="${TRANSCRIPT_DIR}/${SESSION_ID}.jsonl"
 LOG_HASH_FILE="/tmp/gaussian_last_log_${SESSION_ID}"
 FILE_SIZE=$(stat -f%z "$TRANSCRIPT_FILE" 2>/dev/null || stat -c%s "$TRANSCRIPT_FILE" 2>/dev/null || echo "0")
 LAST_SIZE=$(cat "$LOG_HASH_FILE" 2>/dev/null || echo "0")
-# ~8000 bytes of raw JSONL ≈ 2000 chars of parsed output; skip if file hasn't grown enough
+# ~8000 bytes of raw JSONL ~= 2000 chars of parsed output; skip if file hasn't grown enough
 if [ "$FILE_SIZE" -lt $(( LAST_SIZE + 8000 )) ]; then exit 0; fi
 
 # Get full log from transcript file (includes assistant responses, not just user messages)
-FULL_LOG=$(python3 - "$SESSION_ID" "$TRANSCRIPT_DIR" << 'PYEOF'
+FULL_LOG=$(python3 - "$TRANSCRIPT_FILE" << 'PYEOF'
 import json, sys, re
 
-session_id = sys.argv[1]
-transcript_path = f"{sys.argv[2]}/{session_id}.jsonl"
+transcript_path = sys.argv[1]
 
 lines = []
 try:
@@ -71,7 +74,7 @@ if [ "$LOG_LEN" -lt $(( LAST_LOG_LEN + 2000 )) ]; then exit 0; fi
 echo "$LOG_LEN" > "$LAST_LOG_FILE"
 echo "$FILE_SIZE" > "$LOG_HASH_FILE"
 
-# GLM-4.7-flash has 131K context — pass full log up to 30K chars (covers even long sessions)
+# GLM-4.7-flash has 131K context -- pass full log up to 30K chars (covers even long sessions)
 LOG=$(echo "$FULL_LOG" | cut -c1-30000)
 
 [ -z "$LOG" ] && exit 0

@@ -79,16 +79,18 @@ wait
 END=$(date +%s)
 LATENCY_MS=$(( (END - START) * 1000 ))
 
-# Merge, filter identity domain (CLAUDE.md handles those), deduplicate, raise threshold to 0.90
+# Merge, filter identity domain (CLAUDE.md handles those), threshold >= 0.90, sort high-to-low
 MERGED=$(cat "$TMP"/q1 "$TMP"/q2 "$TMP"/q3 2>/dev/null \
   | grep -v '(identity/' \
-  | sort -u \
-  | grep -E '^\[1\.[0-9]|^\[0\.9[0-9]' \
+  | grep -E '^\[[0-9]' \
+  | awk -F'[][]' '$2+0 >= 0.90' \
+  | sort -t'[' -k2 -rn \
+  | awk '!seen[$0]++' \
   | head -15)
 
 rm -rf "$TMP"
 
-# Receipt logging — privacy-safe metadata only, no memory text
+# Receipt logging — metadata + 200-char memory text snippets for debugging
 {
   QUERY_HASH=$(echo "$PROMPT" | md5 2>/dev/null || echo "$PROMPT" | md5sum 2>/dev/null | cut -c1-8)
   QUERY_HASH=$(echo "$QUERY_HASH" | cut -c1-8)
@@ -96,9 +98,9 @@ rm -rf "$TMP"
   # grep -c always outputs a number even on no-match (exits 1 but outputs "0")
   # do NOT add || fallback — it would append a second "0" making the var invalid JSON
   TOTAL=$(echo "$MERGED" | grep -c '^\[' 2>/dev/null); TOTAL=${TOTAL:-0}
-  HIGH=$(echo "$MERGED" | grep -cE '^\[1\.[1-9]' 2>/dev/null); HIGH=${HIGH:-0}
-  MID=$(echo "$MERGED" | grep -cE '^\[1\.0|^\[0\.9[5-9]' 2>/dev/null); MID=${MID:-0}
-  LOW=$(echo "$MERGED" | grep -cE '^\[0\.9[0-4]' 2>/dev/null); LOW=${LOW:-0}
+  HIGH=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 1.10' | wc -l | tr -d ' '); HIGH=${HIGH:-0}
+  MID=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 0.95 && $2+0 < 1.10' | wc -l | tr -d ' '); MID=${MID:-0}
+  LOW=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 0.90 && $2+0 < 0.95' | wc -l | tr -d ' '); LOW=${LOW:-0}
   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
 
   MEMORIES_JSON=$(echo "$MERGED" | grep '^\[' | while IFS= read -r line; do

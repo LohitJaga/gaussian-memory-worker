@@ -52,7 +52,14 @@ export default {
         status: 413, headers: { 'Content-Type': 'application/json' },
       });
     }
-    const body = JSON.parse(rawBody) as any;
+    let body: any;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }), {
+        status: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
     const { method, params, id } = body;
 
     // MCP notifications have no id — must return 202 with no body
@@ -98,18 +105,16 @@ export default {
 
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await pruneJunkMemories(env);
+    await pruneJunkMemories(env).catch(() => {});
     await consolidateColdMemories(env).catch(() => {});
-    await updateDecay(env);
-    await deduplicateRecentMemories(env);
-    await deduplicateColdMemories(env);
-    await cleanupSingletons(env, 3);
-    await refreshStaleDomainSummaries(env);
-    await cronRebuildBatch(env, 2000, 10 * 60 * 1000);
-    await synthesizeIdentityProfile(env);
-    // Process up to 20 pending_judge pairs nightly — feeds memory_relations with verdicts
+    await updateDecay(env).catch(() => {});
+    await deduplicateRecentMemories(env).catch(() => {});
+    await deduplicateColdMemories(env).catch(() => {});
+    await cleanupSingletons(env, 3).catch(() => {});
+    await refreshStaleDomainSummaries(env).catch(() => {});
+    await cronRebuildBatch(env, 2000, 10 * 60 * 1000).catch(() => {});
+    await synthesizeIdentityProfile(env).catch(() => {});
     await handleToolCall('memory_judge', {}, env).catch(() => {});
-    // Process pending entity extraction queue (new memories queued during day)
-    await processPendingEntityQueue(env);
+    await processPendingEntityQueue(env).catch(() => {});
   },
 };
