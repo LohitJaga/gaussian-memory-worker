@@ -200,6 +200,20 @@ async function init() {
     console.log('done');
   } catch { console.log('check schema.sql path'); }
 
+  // Column migrations — safe to run on existing installs (ALTER TABLE errors = already exists)
+  process.stdout.write('  Applying column migrations... ');
+  for (const col of [
+    "ALTER TABLE memories ADD COLUMN valid_from INTEGER",
+    "ALTER TABLE memories ADD COLUMN valid_to INTEGER",
+  ]) {
+    try { execSync(`npx wrangler d1 execute gaussian-memory --remote --command "${col}" 2>&1`, { stdio: 'pipe' }); }
+    catch { /* column already exists — ignore */ }
+  }
+  try {
+    execSync('npx wrangler d1 execute gaussian-memory --remote --command "UPDATE memories SET valid_from = timestamp WHERE valid_from IS NULL" 2>&1', { stdio: 'pipe' });
+  } catch {}
+  console.log('done');
+
   // Deploy
   process.stdout.write('\n  Deploying worker... ');
   try {

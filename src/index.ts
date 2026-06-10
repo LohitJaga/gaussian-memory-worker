@@ -98,8 +98,8 @@ export default {
 
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await consolidateColdMemories(env);
     await pruneJunkMemories(env);
+    await consolidateColdMemories(env).catch(() => {});
     await updateDecay(env);
     await deduplicateRecentMemories(env);
     await deduplicateColdMemories(env);

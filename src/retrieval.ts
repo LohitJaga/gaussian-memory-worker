@@ -383,10 +383,10 @@ export async function retrieve(
     const newIds = [...newMatches.keys()];
     // Mirror the main fetch's project scoping: project='default' searches all projects.
     const bfsProjectClause = project === 'default' ? '' : `AND (project = ? OR project = 'default')`;
-    const bfsBinds = project === 'default' ? newIds : [...newIds, project];
+    const bfsBinds = project === 'default' ? [...newIds, nowSec] : [...newIds, project, nowSec];
     const newRows = await env.DB.prepare(
       `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-       FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) ${bfsProjectClause}`
+       FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) ${bfsProjectClause} AND (valid_to IS NULL OR valid_to > ?)`
     ).bind(...bfsBinds).all<{
       id: string; text: string; domain: string; memory_type: string;
       sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
