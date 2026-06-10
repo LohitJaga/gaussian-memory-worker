@@ -423,11 +423,13 @@ export async function retrieve(
   const floor = topKSlice.length > 0
     ? topKSlice[Math.floor(topKSlice.length / 2)].score * 0.88
     : 0;
-  const top = scored.filter(c => c.score >= floor).slice(0, topK * 3); // hard cap at 3× topK
+  const injectCap = querySigmaVal < 0.4 ? topK * 3 : querySigmaVal > 0.7 ? topK : topK * 2;
+  const top = scored.filter(c => c.score >= floor).slice(0, injectCap); // adaptive cap: precise→3×topK, vague→topK
 
   // Append activated associations not already in results
   const topIdSet = new Set(top.map(c => c.id));
-  top.push(...activatedExtras.filter(a => !topIdSet.has(a.id)).slice(0, 5));
+  const bfsExtras = querySigmaVal < 0.5 ? 5 : 2;
+  top.push(...activatedExtras.filter(a => !topIdSet.has(a.id)).slice(0, bfsExtras));
 
   // De-biasing: surface one high-value contradiction that got penalty-suppressed
   const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);

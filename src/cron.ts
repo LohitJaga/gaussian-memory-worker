@@ -18,13 +18,13 @@ export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: 
   const pruneIds: string[] = [];
 
   for (const row of rows.results ?? []) {
-    let sigma = decaySigma(deserializeSigma(row.sigma_diagonal));
-    // 3× decay for zero-access memories older than 7 days — clears cold pile
-    // in weeks instead of months without affecting anything that's been retrieved
+    const stability = 1 + Math.log((row.access_count ?? 0) + 1);
+    const effectiveDelta = 0.02 / stability;
+    let sigma = decaySigma(deserializeSigma(row.sigma_diagonal), effectiveDelta);
     const isColdStale = (row.access_count ?? 0) === 0 && (nowSec - (row.timestamp ?? 0)) > SEVEN_DAYS;
     if (isColdStale) {
-      sigma = decaySigma(sigma);
-      sigma = decaySigma(sigma); // 3 total applications = ~3× effective rate
+      sigma = decaySigma(sigma, effectiveDelta);
+      sigma = decaySigma(sigma, effectiveDelta); // 3 total = ~3× cold penalty
     }
     if (meanSigma(sigma) > 2.0) {
       pruneIds.push(row.id);
