@@ -179,9 +179,9 @@ export async function storeMemory(
     await env.DB.prepare(`
       INSERT INTO memories
         (id, text, sigma_diagonal, timestamp, last_accessed,
-         access_count, memory_type, domain, emotional_intensity, contradiction_flag, project)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
-    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project).run();
+         access_count, memory_type, domain, emotional_intensity, contradiction_flag, project, valid_from)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)
+    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now).run();
     await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
       .bind(id, text, project).run().catch(() => {});
     await env.VECTORIZE.upsert([{ id, values: Array.from(mu), metadata: { domain, memory_type: memoryType, project } }]);
@@ -222,9 +222,9 @@ export async function storeMemory(
   await env.DB.prepare(`
     INSERT INTO memories
       (id, text, sigma_diagonal, timestamp, last_accessed,
-       access_count, memory_type, domain, emotional_intensity, project)
-    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-  `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project).run();
+       access_count, memory_type, domain, emotional_intensity, project, valid_from)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+  `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now).run();
   await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
     .bind(id, text, project).run().catch(() => {});
 

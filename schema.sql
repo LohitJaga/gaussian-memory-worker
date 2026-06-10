@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS memories (
   contradiction_flag INTEGER DEFAULT 0,
   project TEXT NOT NULL DEFAULT 'default',
   topic_key TEXT,
-  revision_count INTEGER DEFAULT 0
+  revision_count INTEGER DEFAULT 0,
+  valid_from INTEGER,
+  valid_to INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
@@ -74,3 +76,5 @@ CREATE TABLE IF NOT EXISTS memory_entities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_memories_valid_to ON memories(valid_to) WHERE valid_to IS NOT NULL;
