@@ -349,3 +349,71 @@ export async function synthesizeIdentityProfile(env: Env): Promise<void> {
     await env.KV.put('IDENTITY_PROFILE', profile);
   }
 }
+
+export async function consolidateColdMemories(env: Env): Promise<{ archived: number }> {
+  const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400; // older than 30 days
+  const rows = await env.DB.prepare(`
+    SELECT id, text, sigma_diagonal, domain, memory_type, timestamp
+    FROM memories
+    WHERE access_count = 0
+      AND memory_type != 'session'
+      AND timestamp < ?
+  `).bind(cutoff).all<{
+    id: string; text: string; sigma_diagonal: string;
+    domain: string; memory_type: string; timestamp: number;
+  }>();
+
+  const cold = (rows.results ?? []).filter(r => meanSigma(deserializeSigma(r.sigma_diagonal)) > 1.5);
+  if (!cold.length) return { archived: 0 };
+
+  // Process in batches of 10 to stay within AI budget per cron tick
+  const BATCH = 10;
+  const archived: string[] = [];
+
+  for (let i = 0; i < cold.length && i < 100; i += BATCH) {
+    const batch = cold.slice(i, i + BATCH);
+    const summaries = await Promise.all(batch.map(async row => {
+      try {
+        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+          messages: [
+            { role: 'system', content: 'Summarize the following memory in one concise sentence. Return only the sentence.' },
+            { role: 'user', content: row.text },
+          ],
+          max_tokens: 80,
+        }) as any;
+        return (result?.response ?? result?.choices?.[0]?.message?.content ?? row.text).trim();
+      } catch {
+        return row.text.slice(0, 200);
+      }
+    }));
+
+    for (let j = 0; j < batch.length; j++) {
+      const row = batch[j];
+      const payload = JSON.stringify({
+        id: row.id,
+        original_text: row.text,
+        compressed_text: summaries[j],
+        domain: row.domain,
+        memory_type: row.memory_type,
+        archived_at: Math.floor(Date.now() / 1000),
+        original_timestamp: row.timestamp,
+      });
+      await env.R2.put(`memories/${row.id}.json`, payload, {
+        httpMetadata: { contentType: 'application/json' },
+      });
+      archived.push(row.id);
+    }
+  }
+
+  if (!archived.length) return { archived: 0 };
+
+  // Delete from D1 and Vectorize in chunks
+  const CHUNK = 500;
+  for (let i = 0; i < archived.length; i += CHUNK) {
+    const chunk = archived.slice(i, i + CHUNK);
+    await env.DB.batch(chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)));
+    await env.VECTORIZE.deleteByIds(chunk);
+  }
+
+  return { archived: archived.length };
+}

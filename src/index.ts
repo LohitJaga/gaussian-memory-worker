@@ -3,7 +3,7 @@ import { TOOLS, handleToolCall } from './tools';
 import {
   pruneJunkMemories, updateDecay, deduplicateRecentMemories,
   deduplicateColdMemories, cleanupSingletons, refreshStaleDomainSummaries,
-  cronRebuildBatch, synthesizeIdentityProfile,
+  cronRebuildBatch, synthesizeIdentityProfile, consolidateColdMemories,
 } from './cron';
 import { processPendingEntityQueue } from './storage';
 
@@ -98,6 +98,7 @@ export default {
 
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    await consolidateColdMemories(env);
     await pruneJunkMemories(env);
     await updateDecay(env);
     await deduplicateRecentMemories(env);

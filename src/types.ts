@@ -3,5 +3,6 @@ export interface Env {
   DB: D1Database;
   VECTORIZE: VectorizeIndex;
   KV: KVNamespace;
+  R2: R2Bucket;
   AUTH_TOKEN?: string;
 }

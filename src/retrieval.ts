@@ -159,10 +159,11 @@ export async function retrieve(
   const projectClause = project === 'default'
     ? ''
     : 'AND (project = ? OR project = \'default\')';
-  const binds = project === 'default' ? [...allIds] : [...allIds, project];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const binds = project === 'default' ? [...allIds, nowSec] : [...allIds, project, nowSec];
   const rows = await env.DB.prepare(
     `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-     FROM memories WHERE id IN (${placeholders}) ${projectClause}`
+     FROM memories WHERE id IN (${placeholders}) ${projectClause} AND (valid_to IS NULL OR valid_to > ?)`
   ).bind(...binds).all<{
     id: string; text: string; domain: string; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
@@ -211,7 +212,6 @@ export async function retrieve(
   }
 
   // Build candidates — compute raw components first, then normalize within batch
-  const nowSec = Math.floor(Date.now() / 1000);
   const NINETY_DAYS = 90 * 24 * 3600;
 
   // Quality gate: filter out bare strings, URLs, and sub-30-char fragments before scoring.
