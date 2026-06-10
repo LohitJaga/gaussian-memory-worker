@@ -173,6 +173,7 @@ Base score is a weighted combination of **cosine similarity** (0.50), **BM25 key
 Bhattacharyya distance measures distributional overlap between the query's uncertainty and each memory's σ. A precise technical query (low σ) amplifies memories with similarly low σ — sharp, well-reinforced facts. A vague exploratory query (high σ) allows uncertain memories through. This is what makes retrieval context-sensitive rather than purely semantic.
 
 After scoring:
+- **Temporal validity filter:** memories with `valid_to` set (superseded by a newer version) are excluded before scoring — expired facts never surface
 - **Spreading activation:** top-3 hits become anchors; neighboring memories in the entity graph score a secondary boost
 - **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
 - **σ tiebreaker:** equal-scoring memories resolve in favor of the sharper one (lower σ = more reinforced)
@@ -185,13 +186,14 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 ### Nightly cron (6am UTC)
 
 1. Prune cold low-quality memories (episodic, < 80 chars, age > 30 days, never accessed)
-2. Decay all σ values (3× rate for zero-access memories older than 7 days)
-3. Deduplicate recent memories (cosine > 0.90)
-4. Deduplicate cold memories (cosine > 0.93, oldest-first)
-5. Collapse singleton domains
-6. Refresh stale domain summaries
-7. Process entity extraction queue (50/run)
-8. Synthesize identity profile from semantic memories → push to KV
+2. Consolidate cold memories (σ > 1.5, age > 90 days) — compress via Llama to R2, delete from D1/Vectorize to reclaim space
+3. Decay all σ values — FSRS-inspired stability weighting: frequently accessed memories resist forgetting (`stability = 1 + log(access_count + 1)`, effective decay rate `0.02 / stability`)
+4. Deduplicate recent memories (cosine > 0.90)
+5. Deduplicate cold memories (cosine > 0.93, oldest-first)
+6. Collapse singleton domains
+7. Refresh stale domain summaries
+8. Process entity extraction queue (50/run)
+9. Synthesize identity profile from semantic memories → push to KV
 
 ## Architecture
 
@@ -201,9 +203,10 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 | D1 (SQLite) | Memory store: text, σ diagonal, domain, type, access metadata, σ history |
 | Vectorize | Dense vector search (768D BGE-base-en-v1.5) |
 | FTS5 virtual table | Full-text keyword search, fused with Vectorize via RRF (k=60) |
-| Workers AI | BGE embeddings, Llama 3.1 8B for extraction/synthesis, GLM-4.7-flash for quality gating |
+| Workers AI | BGE embeddings, Llama 3.1 8B for extraction/synthesis, Llama 3.3 70B for contradiction judgment |
 | KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
-| Cron | Nightly maintenance: decay, dedup, entity processing, identity synthesis |
+| R2 | Cold storage for consolidated memories (σ > 1.5, age > 90 days) |
+| Cron | Nightly maintenance: consolidation, decay, dedup, entity processing, identity synthesis |
 
 ## MCP tools
 
