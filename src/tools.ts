@@ -927,10 +927,10 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
              AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
           ).bind(target.id, cand.id, cand.id, target.id).run();
 
-          // If supersedes: flag old memory for decay acceleration
+          // If supersedes: expire old memory so it never surfaces in retrieval again
           if (verdict === 'supersedes') {
-            await env.DB.prepare('UPDATE memories SET contradiction_flag = 1 WHERE id = ?')
-              .bind(cand.id).run();
+            await env.DB.prepare('UPDATE memories SET contradiction_flag = 1, valid_to = ? WHERE id = ?')
+              .bind(Math.floor(Date.now() / 1000), cand.id).run();
           }
 
           results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${verdict} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
