@@ -358,6 +358,8 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
     WHERE access_count = 0
       AND memory_type != 'session'
       AND timestamp < ?
+    ORDER BY timestamp ASC
+    LIMIT 200
   `).bind(cutoff).all<{
     id: string; text: string; sigma_diagonal: string;
     domain: string; memory_type: string; timestamp: number;
@@ -381,9 +383,9 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
           ],
           max_tokens: 80,
         }) as any;
-        return (result?.response ?? result?.choices?.[0]?.message?.content ?? row.text).trim();
+        return (result?.response ?? result?.choices?.[0]?.message?.content ?? row.text ?? '').trim();
       } catch {
-        return row.text.slice(0, 200);
+        return (row.text ?? '').slice(0, 200);
       }
     }));
 
@@ -398,10 +400,12 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
         archived_at: Math.floor(Date.now() / 1000),
         original_timestamp: row.timestamp,
       });
-      await env.R2.put(`memories/${row.id}.json`, payload, {
-        httpMetadata: { contentType: 'application/json' },
-      });
-      archived.push(row.id);
+      try {
+        await env.R2.put(`memories/${row.id}.json`, payload, {
+          httpMetadata: { contentType: 'application/json' },
+        });
+        archived.push(row.id);
+      } catch { /* R2 failure — skip this memory, retry next cron run */ }
     }
   }
 
@@ -411,8 +415,11 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
   const CHUNK = 500;
   for (let i = 0; i < archived.length; i += CHUNK) {
     const chunk = archived.slice(i, i + CHUNK);
-    await env.DB.batch(chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)));
-    await env.VECTORIZE.deleteByIds(chunk);
+    await env.DB.batch([
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+    ]);
+    await env.VECTORIZE.deleteByIds(chunk).catch(() => {});
   }
 
   return { archived: archived.length };
