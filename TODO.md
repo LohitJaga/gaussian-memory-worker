@@ -8,14 +8,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ## Priority 1 — Do before July 1
 
-### Core / Retrieval
-- [x] Multi-hop BFS spreading activation ✓
-
-### Schema / Storage
-- [x] `valid_from`/`valid_to` on memories + schema migration ✓ (67k rows backfilled)
-- [x] Nightly consolidation — compress cold σ>1.5 via Llama → R2, drop from D1/Vectorize ✓ (lazy fallback deferred)
-- [ ] Wire `valid_to` on contradiction resolution — set `valid_to = now` on old memory when superseded
-
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
