@@ -172,6 +172,13 @@ async function init() {
     console.log(kvId ? `exists (${kvId})` : 'failed — check wrangler auth');
   }
 
+  // R2
+  process.stdout.write('  Creating R2 bucket (cold storage)... ');
+  try {
+    execSync('npx wrangler r2 bucket create gaussian-memory-cold 2>&1', { stdio: 'pipe' });
+    console.log('done');
+  } catch { console.log('exists or failed — continuing'); }
+
   // Patch wrangler.toml (create from example if not present — wrangler.toml is gitignored)
   const tomlPath = path.join(__dirname, '..', 'wrangler.toml');
   const examplePath = path.join(__dirname, '..', 'wrangler.example.toml');

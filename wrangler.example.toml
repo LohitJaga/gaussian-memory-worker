@@ -26,5 +26,10 @@ binding = "KV"
 id = "YOUR_KV_NAMESPACE_ID"
 # Create with: wrangler kv namespace create gaussian-memory-kv
 
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "gaussian-memory-cold"
+# Create with: wrangler r2 bucket create gaussian-memory-cold
+
 [triggers]
 crons = ["0 6 * * *"]
