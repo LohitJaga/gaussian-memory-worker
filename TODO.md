@@ -12,8 +12,9 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [x] Multi-hop BFS spreading activation ✓
 
 ### Schema / Storage
-- [ ] `valid_from`/`valid_to` on memories + schema migration
-- [ ] Nightly consolidation — compress cold σ>1.5 via Llama → R2, drop from D1/Vectorize, lazy fallback
+- [x] `valid_from`/`valid_to` on memories + schema migration ✓ (67k rows backfilled)
+- [x] Nightly consolidation — compress cold σ>1.5 via Llama → R2, drop from D1/Vectorize ✓ (lazy fallback deferred)
+- [ ] Wire `valid_to` on contradiction resolution — set `valid_to = now` on old memory when superseded
 
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
@@ -25,6 +26,13 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Verify + document: OpenAI Codex / CLI MCP support
 - [ ] Verify + document: Windsurf, Continue.dev, other Claude Code alternatives
 - [ ] Add "Supported Clients" table to README once confirmed
+
+### Benchmarking (define before running)
+- [ ] Identity coherence metric — 50 diverse queries, LLM-judge whether injected context forms coherent self-consistent picture
+- [ ] Association fidelity — annotate 100 memory pairs as related, measure BFS precision/recall on surfacing paired memories
+- [ ] Contradiction surface rate — how often does retrieval inject directly conflicting memories (lower = better)
+- [ ] Latency benchmark — p50/p95 on Cloudflare edge vs Mem0 API roundtrip
+- [ ] LoCoMo-style accuracy — run against MemArchitect's benchmark dataset to get a comparable number
 
 ### README + Blog (after features are stable)
 - [ ] README: Bhattacharyya differentiator, neuroscience angle, architecture diagram, competitor table
