@@ -817,31 +817,31 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const now = Math.floor(Date.now() / 1000);
 
       // Build candidate list: explicit ID or all unflagged contradiction memories
-      let targets: { id: string; text: string }[] = [];
+      let targets: { id: string; text: string; timestamp: number }[] = [];
       if (args.memory_id) {
         // Support both full UUIDs and 8-char display prefixes shown in tool output
         const memId = args.memory_id as string;
         const isPrefix = memId.length === 8 && !memId.includes('-');
         const row = isPrefix
-          ? await env.DB.prepare('SELECT id, text FROM memories WHERE id LIKE ?')
-              .bind(memId + '%').first<{ id: string; text: string }>()
-          : await env.DB.prepare('SELECT id, text FROM memories WHERE id = ?')
-              .bind(memId).first<{ id: string; text: string }>();
+          ? await env.DB.prepare('SELECT id, text, timestamp FROM memories WHERE id LIKE ?')
+              .bind(memId + '%').first<{ id: string; text: string; timestamp: number }>()
+          : await env.DB.prepare('SELECT id, text, timestamp FROM memories WHERE id = ?')
+              .bind(memId).first<{ id: string; text: string; timestamp: number }>();
         if (!row) return `Not found: ${memId}`;
         targets = [row];
       } else {
         // Process pending_judge queue first (near-misses queued at store time), then contradiction_flag
         const pendingRows = await env.DB.prepare(
-          `SELECT DISTINCT m.id, m.text FROM memory_relations mr
+          `SELECT DISTINCT m.id, m.text, m.timestamp FROM memory_relations mr
            JOIN memories m ON m.id = mr.from_id
            WHERE mr.relation_type = 'pending_judge' LIMIT 20`
-        ).all<{ id: string; text: string }>();
+        ).all<{ id: string; text: string; timestamp: number }>();
         targets = pendingRows.results ?? [];
 
         if (!targets.length) {
           const flagged = await env.DB.prepare(
-            'SELECT id, text FROM memories WHERE contradiction_flag = 1 LIMIT 20'
-          ).all<{ id: string; text: string }>();
+            'SELECT id, text, timestamp FROM memories WHERE contradiction_flag = 1 LIMIT 20'
+          ).all<{ id: string; text: string; timestamp: number }>();
           targets = flagged.results ?? [];
         }
         if (!targets.length) return 'No pending judgements or flagged contradictions.';
@@ -867,8 +867,8 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         }
 
         const candRows = await env.DB.prepare(
-          `SELECT id, text FROM memories WHERE id IN (${candidateIds.map(() => '?').join(',')})`
-        ).bind(...candidateIds).all<{ id: string; text: string }>();
+          `SELECT id, text, timestamp FROM memories WHERE id IN (${candidateIds.map(() => '?').join(',')})`
+        ).bind(...candidateIds).all<{ id: string; text: string; timestamp: number }>();
 
         for (const cand of candRows.results ?? []) {
           // Check if relation already judged
@@ -899,7 +899,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
               },
               {
                 role: 'user',
-                content: `<memory_a>${target.text}</memory_a>\n<memory_b>${cand.text}</memory_b>`,
+                content: `<memory_a stored_at="${target.timestamp}">${target.text}</memory_a>\n<memory_b stored_at="${cand.timestamp}">${cand.text}</memory_b>\nIf one supersedes the other, the newer memory (higher stored_at) supersedes the older.`,
               },
             ],
             max_tokens: 80,
@@ -933,10 +933,11 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
              AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
           ).bind(target.id, cand.id, cand.id, target.id).run();
 
-          // If supersedes: expire old memory so it never surfaces in retrieval again
+          // If supersedes: expire the older memory (lower timestamp) so it never surfaces again
           if (verdict === 'supersedes') {
+            const olderId = (target.timestamp ?? 0) <= (cand.timestamp ?? 0) ? target.id : cand.id;
             await env.DB.prepare('UPDATE memories SET contradiction_flag = 1, valid_to = ? WHERE id = ?')
-              .bind(Math.floor(Date.now() / 1000), cand.id).run();
+              .bind(Math.floor(Date.now() / 1000), olderId).run();
           }
 
           results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${verdict} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
@@ -1016,23 +1017,29 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
       const row = await env.DB.prepare('SELECT text FROM memories WHERE id = ?')
         .bind(args.id).first<{ text: string }>();
       if (!row) return `Not found: ${args.id}`;
-      await env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(args.id).run();
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(args.id),
+        env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(args.id),
+      ]);
       await env.VECTORIZE.deleteByIds([args.id]);
       return `DELETED: '${row.text.slice(0, 60)}' (id=${args.id.slice(0, 8)})`;
     }
 
     case 'memory_update': {
       const existing = await env.DB.prepare(
-        'SELECT sigma_diagonal, memory_type, domain FROM memories WHERE id = ?'
-      ).bind(args.id).first<{ sigma_diagonal: string; memory_type: string; domain: string }>();
+        'SELECT sigma_diagonal, memory_type, domain, project FROM memories WHERE id = ?'
+      ).bind(args.id).first<{ sigma_diagonal: string; memory_type: string; domain: string; project: string }>();
       if (!existing) return `Not found: ${args.id}`;
 
       const mu = await embed(args.text, env);
       const now = Math.floor(Date.now() / 1000);
+      const project = existing.project ?? 'default';
 
-      await env.DB.prepare(
-        'UPDATE memories SET text = ?, last_accessed = ? WHERE id = ?'
-      ).bind(args.text, now, args.id).run();
+      await env.DB.batch([
+        env.DB.prepare('UPDATE memories SET text = ?, last_accessed = ? WHERE id = ?').bind(args.text, now, args.id),
+        env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(args.id),
+        env.DB.prepare('INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)').bind(args.id, args.text, project),
+      ]);
 
       await env.VECTORIZE.upsert([{
         id: args.id,
@@ -1193,12 +1200,13 @@ Return ONLY valid JSON array:
       ).bind(...parts).all<{ id: string }>();
       const ids = (rows.results ?? []).map(r => r.id);
       if (!ids.length) return 'No memories matched pattern.';
-      for (const id of ids) {
-        await env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id).run();
-      }
-      // Vectorize hard limit: 100 IDs per deleteByIds call
       for (let i = 0; i < ids.length; i += 100) {
-        await env.VECTORIZE.deleteByIds(ids.slice(i, i + 100));
+        const chunk = ids.slice(i, i + 100);
+        await env.DB.batch([
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+        ]);
+        await env.VECTORIZE.deleteByIds(chunk);
       }
       return `Deleted ${ids.length} memories matching "${args.pattern}".`;
     }

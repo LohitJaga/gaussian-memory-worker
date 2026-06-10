@@ -204,8 +204,10 @@ export async function storeMemory(
         access_count = access_count + 1, text = ?${typeUpdate}
       WHERE id = ?
     `).bind(...typeParams).run();
-    await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
-      .bind(bestId, text, project).run().catch(() => {});
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(bestId),
+      env.DB.prepare('INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)').bind(bestId, text, project),
+    ]).catch(() => {});
 
     await env.VECTORIZE.upsert([{
       id: bestId,

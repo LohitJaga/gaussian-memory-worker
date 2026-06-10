@@ -44,11 +44,11 @@ export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: 
     await env.DB.batch(updateStmts.slice(i, i + CHUNK));
   }
   for (let i = 0; i < pruneIds.length; i += CHUNK) {
-    await env.DB.batch(
-      pruneIds.slice(i, i + CHUNK).map(id =>
-        env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)
-      )
-    );
+    const chunk = pruneIds.slice(i, i + CHUNK);
+    await env.DB.batch([
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+    ]);
   }
   if (pruneIds.length) await env.VECTORIZE.deleteByIds(pruneIds);
 
@@ -141,7 +141,10 @@ export async function pruneJunkMemories(env: Env): Promise<number> {
   const CHUNK = 500;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
-    await env.DB.batch(chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)));
+    await env.DB.batch([
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+    ]);
     await env.VECTORIZE.deleteByIds(chunk);
   }
   return ids.length;
@@ -177,9 +180,11 @@ export async function deduplicateRecentMemories(env: Env, windowSec = 86400, thr
   if (toDelete.length === 0) return 'No duplicates in last 24h.';
 
   for (let i = 0; i < toDelete.length; i += 500) {
-    await env.DB.batch(
-      toDelete.slice(i, i + 500).map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id))
-    );
+    const chunk = toDelete.slice(i, i + 500);
+    await env.DB.batch([
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+    ]);
   }
   await env.VECTORIZE.deleteByIds(toDelete);
   return `Deduped ${toDelete.length} duplicate memories from last 24h.`;
@@ -217,9 +222,11 @@ export async function deduplicateColdMemories(env: Env): Promise<string> {
 
   const CHUNK = 500;
   for (let i = 0; i < toDelete.length; i += CHUNK) {
-    await env.DB.batch(toDelete.slice(i, i + CHUNK).map(id =>
-      env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)
-    ));
+    const chunk = toDelete.slice(i, i + CHUNK);
+    await env.DB.batch([
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+    ]);
   }
   await env.VECTORIZE.deleteByIds(toDelete);
   return `Cold dedup: removed ${toDelete.length} duplicates from oldest cold memories.`;
