@@ -46,7 +46,8 @@ async function extractAndStore(input) {
     })
     .join('\n');
   if (!transcript || transcript.length < 100) return;
-  callWorker('memory_extract_and_store', { text: transcript }, 15000);
+  // Worker schema requires `log_text` (tools.ts), not `text` — `text` was silently rejected.
+  callWorker('memory_extract_and_store', { log_text: transcript }, 15000);
 }
 
 function debugWrite(msg) {
@@ -78,7 +79,6 @@ export const server = async () => {
       if (skip.some(s => tool.toLowerCase().includes(s))) return;
       const text = output?.output ?? '';
       if (!text || text.length < 30) return;
-      const context = `opencode tool.${tool} ${input?.args?.file_path ?? input?.args?.command ?? ''}`.trim().slice(0, 120);
       callWorker('memory_store_diff', { command: `${tool}: ${JSON.stringify(input?.args ?? {}).slice(0, 100)}`, output: text.slice(0, 800) });
     },
 
