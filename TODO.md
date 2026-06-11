@@ -12,8 +12,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
 - [ ] Fix gaussian-store.sh stop hook — two bugs: (1) hard-capped at 300 lines in python parse, so long sessions silently truncated; (2) `LOG_LEN < LAST_LOG_LEN + 2000` length gate blocks re-extraction even after file grows; drop length gate, size gate is sufficient
-- [ ] Fix gaussian-retrieve.sh short-prompt fallback — `<25 char` gate (line 66) substitutes synthetic query instead of actual prompt words, so short requests like "check the loreal repo" miss context entirely
-- [ ] Retrieval context pollution — Claude Code assistant depends entirely on retrieve hook for cross-session context (unlike OpenCode/deepseek which uses MCP tools like `memory_retrieve` directly). Hook noise hits harder. Root cause: sigma filter at `gaussian-retrieve.sh:86` only passes sigma ≥ 0.90, so recently-accessed (but low-relevance) memories drown out work context. Fix: add relevance-weighted reranking or per-domain sigma threshold
 
 ### Client Compatibility
 - [ ] Verify + document: Cursor MCP support (likely works, needs confirmation)
