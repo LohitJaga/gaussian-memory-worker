@@ -12,7 +12,7 @@ const ANCHOR_STOP = new Set([
   'used','make','take','give','come','know','think','work','need','want','call',
   'said','wrote','built','found','made','runs','worked','called','using','added',
   'going','getting','taking','making','hitting','trying','solving','building',
-  'finished','started','updated','fixed','added','removed','changed','created',
+  'finished','started','updated','fixed','removed','changed','created',
   // time / generic nouns
   'time','today','morning','evening','night','week','month','year','times','days',
   'hours','minutes','session','sessions','clear','head','once','twice',
@@ -69,8 +69,10 @@ async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise
   }
 
   const name = deriveAnchorName(text);
+  // OR IGNORE, not OR REPLACE: on a derived-name collision with an existing anchor,
+  // REPLACE wiped its centroid embedding, memory_count, and last_summarized_count.
   await env.DB.prepare(
-    'INSERT OR REPLACE INTO domain_anchors (name, embedding) VALUES (?, ?)'
+    'INSERT OR IGNORE INTO domain_anchors (name, embedding) VALUES (?, ?)'
   ).bind(name, JSON.stringify(muArr)).run();
   return name;
 }

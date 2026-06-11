@@ -419,7 +419,8 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     }
 
     case 'memory_retrieve': {
-      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 5, env, args.project ?? 'default');
+      // Default 8 — must match the declared inputSchema default (was 5, silently diverging from schema)
+      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 8, env, args.project ?? 'default');
       if (!results.length) return 'No memories found.';
 
       // Fetch domain summaries for domains present in results (uses clean domain, not display)
@@ -474,16 +475,28 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       if (args.domain) { conditions.push('domain = ?'); params.push(args.domain); }
       if (args.since) { conditions.push('timestamp >= ?'); params.push(Math.floor(new Date(args.since).getTime() / 1000)); }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const sortCol = args.sort === 'access_count' ? 'access_count DESC'
-                    : args.sort === 'sigma' ? 'sigma_diagonal ASC'
-                    : 'timestamp DESC';
       const limit = Math.min(Number(args.limit) || 50, 500);
-      const rows = await env.DB.prepare(
-        `SELECT id, text, sigma_diagonal, domain, memory_type, access_count, timestamp FROM memories ${where} ORDER BY ${sortCol} LIMIT ?`
-      ).bind(...params, limit).all<any>();
 
-      if (!rows.results?.length) return 'No memories stored.';
-      return rows.results.map((r: any) => {
+      // sort=sigma: sigma_diagonal is base64-serialized Float32 — SQL ORDER BY on it is a
+      // lexicographic string sort, not numeric. Fetch a wider window and sort by meanSigma in JS.
+      let resultRows: any[];
+      if (args.sort === 'sigma') {
+        const rows = await env.DB.prepare(
+          `SELECT id, text, sigma_diagonal, domain, memory_type, access_count, timestamp FROM memories ${where} LIMIT 2000`
+        ).bind(...params).all<any>();
+        resultRows = (rows.results ?? [])
+          .sort((a: any, b: any) => meanSigma(deserializeSigma(a.sigma_diagonal)) - meanSigma(deserializeSigma(b.sigma_diagonal)))
+          .slice(0, limit);
+      } else {
+        const sortCol = args.sort === 'access_count' ? 'access_count DESC' : 'timestamp DESC';
+        const rows = await env.DB.prepare(
+          `SELECT id, text, sigma_diagonal, domain, memory_type, access_count, timestamp FROM memories ${where} ORDER BY ${sortCol} LIMIT ?`
+        ).bind(...params, limit).all<any>();
+        resultRows = rows.results ?? [];
+      }
+
+      if (!resultRows.length) return 'No memories stored.';
+      return resultRows.map((r: any) => {
         const sigma = deserializeSigma(r.sigma_diagonal);
         const ts = r.timestamp ? new Date(r.timestamp * 1000).toISOString().slice(0, 16) : '';
         return `[${r.id}] [${ts}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 80)}`;

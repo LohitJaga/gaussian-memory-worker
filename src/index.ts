@@ -9,6 +9,14 @@ import { processPendingEntityQueue } from './storage';
 
 export type { Env };
 
+// TODO: CORS origin is wildcard. The endpoint is Bearer-token protected so this is not
+// directly exploitable, but if a browser-based client is ever pointed at this worker,
+// lock Access-Control-Allow-Origin to that client's origin instead of '*'.
+const JSON_HEADERS = {
+  'Content-Type': 'application/json',
+  'Access-Control-Allow-Origin': '*',
+};
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') {
@@ -29,27 +37,27 @@ export default {
     // Deploy must set AUTH_TOKEN secret via: wrangler secret put AUTH_TOKEN
     if (!env.AUTH_TOKEN) {
       return new Response(JSON.stringify({ error: 'Server misconfigured: AUTH_TOKEN not set. Run: wrangler secret put AUTH_TOKEN' }), {
-        status: 500, headers: { 'Content-Type': 'application/json' },
+        status: 500, headers: JSON_HEADERS,
       });
     }
     const authHeader = request.headers.get('Authorization') ?? '';
     const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
     if (headerToken !== env.AUTH_TOKEN) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        status: 401, headers: { 'Content-Type': 'application/json' },
+        status: 401, headers: JSON_HEADERS,
       });
     }
 
     const contentType = request.headers.get('Content-Type') ?? '';
     if (!contentType.includes('application/json')) {
       return new Response(JSON.stringify({ error: 'Content-Type must be application/json' }), {
-        status: 415, headers: { 'Content-Type': 'application/json' },
+        status: 415, headers: JSON_HEADERS,
       });
     }
     const rawBody = await request.text();
     if (rawBody.length > 1_048_576) { // 1MB max
       return new Response(JSON.stringify({ error: 'Request body too large (max 1MB)' }), {
-        status: 413, headers: { 'Content-Type': 'application/json' },
+        status: 413, headers: JSON_HEADERS,
       });
     }
     let body: any;
@@ -57,7 +65,7 @@ export default {
       body = JSON.parse(rawBody);
     } catch {
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }), {
-        status: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        status: 400, headers: JSON_HEADERS,
       });
     }
     const { method, params, id } = body;
@@ -92,14 +100,11 @@ export default {
       return new Response(JSON.stringify({
         jsonrpc: '2.0', id,
         error: { code: -32601, message: 'Method not found' },
-      }), { headers: { 'Content-Type': 'application/json' } });
+      }), { headers: JSON_HEADERS });
     }
 
     return new Response(JSON.stringify({ jsonrpc: '2.0', id, result }), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
+      headers: JSON_HEADERS,
     });
   },
 

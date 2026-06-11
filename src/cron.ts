@@ -196,8 +196,8 @@ export async function deduplicateRecentMemories(env: Env, windowSec = 86400, thr
 // from weeks ago get hit immediately rather than waiting for a full cycle.
 export async function deduplicateColdMemories(env: Env): Promise<string> {
   const rows = await env.DB.prepare(
-    'SELECT id, text FROM memories WHERE access_count = 0 ORDER BY timestamp ASC LIMIT 500'
-  ).all<{ id: string; text: string }>();
+    'SELECT id, text, project FROM memories WHERE access_count = 0 ORDER BY timestamp ASC LIMIT 500'
+  ).all<{ id: string; text: string; project: string }>();
 
   const cold = rows.results ?? [];
   if (!cold.length) return 'No cold memories to dedup.';
@@ -210,7 +210,12 @@ export async function deduplicateColdMemories(env: Env): Promise<string> {
     if (deleted.has(cold[i].id)) continue;
     const results = await env.VECTORIZE.query(mus[i], { topK: 3, returnMetadata: 'indexed' });
     for (const match of results.matches ?? []) {
-      if (match.id !== cold[i].id && (match.score ?? 0) >= 0.93 && !deleted.has(cold[i].id)) {
+      const matchProject = (match.metadata as any)?.project ?? 'default';
+      const rowProject = cold[i].project ?? 'default';
+      // Guard !deleted.has(match.id): if the surviving copy was itself deleted earlier
+      // in this pass, deleting this one too would destroy BOTH copies of the pair.
+      // Same-project guard mirrors deduplicateRecentMemories — never dedup across projects.
+      if (match.id !== cold[i].id && (match.score ?? 0) >= 0.93 && !deleted.has(match.id) && matchProject === rowProject) {
         toDelete.push(cold[i].id);
         deleted.add(cold[i].id);
         break;
