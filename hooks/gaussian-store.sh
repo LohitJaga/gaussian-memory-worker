@@ -9,54 +9,102 @@ WORKER="${GAUSSIAN_WORKER_URL}"
 [ -z "$WORKER" ] && exit 0
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 
-# Detect project from git root basename, normalized to lowercase-hyphenated
-PROJECT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
-[ -z "$PROJECT" ] && PROJECT="default"
+# S10: state lives in ~/.claude (persistent), not /tmp (cleared on reboot, which
+# made every post-reboot run re-send the whole transcript from offset 0)
+STATE_DIR="$HOME/.claude/gaussian-state"
+mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
-# Use transcript_path from hook input — project sessions store transcripts under a
-# different path than the HOME-encoded directory, so reconstruction was silently failing.
+# S9: per-session lock so concurrent hook invocations can't race on offset state.
+# mkdir is atomic and portable (macOS has no flock binary).
+LOCK_DIR="$STATE_DIR/lock_${SESSION_ID}"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  # Stale-lock recovery: a killed run can strand the lock; reclaim after 2 minutes
+  if find "$LOCK_DIR" -maxdepth 0 -mmin +2 2>/dev/null | grep -q .; then
+    rmdir "$LOCK_DIR" 2>/dev/null
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+  else
+    exit 0
+  fi
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+# S11: detect project from git root basename. No xargs — it word-splits paths
+# containing spaces, so "My Project" became project "project".
+GIT_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)
+if [ -n "$GIT_ROOT" ]; then
+  PROJECT=$(basename "$GIT_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
+else
+  PROJECT="default"
+fi
+
+# S1: trust transcript_path from the hook input only. The old fallback rebuilt a
+# path from a sed-encoding of $HOME (not the project cwd), which never matched the
+# real per-project transcript directories — it silently parsed nothing. If the hook
+# doesn't provide a path, there is nothing useful to parse.
 TRANSCRIPT_FILE=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
-[ -z "$TRANSCRIPT_FILE" ] && TRANSCRIPT_FILE="$HOME/.claude/projects/$(echo "$HOME" | sed 's|/|-|g')/${SESSION_ID}.jsonl"
+[ -z "$TRANSCRIPT_FILE" ] && exit 0
+[ ! -f "$TRANSCRIPT_FILE" ] && exit 0
 
-# Short-circuit: skip Python parse entirely if transcript hasn't grown enough
-LOG_HASH_FILE="/tmp/gaussian_last_log_${SESSION_ID}"
+# S2: byte-offset delta — only parse and send content appended since the last
+# *successful* POST. The old approach re-parsed the whole file and kept the FIRST
+# 30K chars, so long sessions repeatedly re-sent stale early content and never
+# reached recent turns.
+OFFSET_FILE="$STATE_DIR/offset_${SESSION_ID}"
 FILE_SIZE=$(stat -f%z "$TRANSCRIPT_FILE" 2>/dev/null || stat -c%s "$TRANSCRIPT_FILE" 2>/dev/null || echo "0")
-LAST_SIZE=$(cat "$LOG_HASH_FILE" 2>/dev/null || echo "0")
-# ~8000 bytes of raw JSONL ~= 2000 chars of parsed output; skip if file hasn't grown enough
-if [ "$FILE_SIZE" -lt $(( LAST_SIZE + 8000 )) ]; then exit 0; fi
+LAST_OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || echo "0")
+case "$LAST_OFFSET" in *[!0-9]*|'') LAST_OFFSET=0 ;; esac
+# Transcript shrank (replaced/rotated file at same path) — start over from 0
+[ "$LAST_OFFSET" -gt "$FILE_SIZE" ] && LAST_OFFSET=0
+# ~8000 bytes of raw JSONL ~= 2000 chars of parsed output; skip if not enough new content
+if [ "$FILE_SIZE" -lt $(( LAST_OFFSET + 8000 )) ]; then exit 0; fi
 
-# Get full log from transcript file (includes assistant responses, not just user messages)
-FULL_LOG=$(python3 - "$TRANSCRIPT_FILE" << 'PYEOF'
+# Parse only the new tail of the transcript (includes assistant responses)
+FULL_LOG=$(python3 - "$TRANSCRIPT_FILE" "$LAST_OFFSET" << 'PYEOF'
 import json, sys, re
 
 transcript_path = sys.argv[1]
+offset = int(sys.argv[2])
 
 lines = []
 try:
     with open(transcript_path) as f:
+        f.seek(offset)
         for line in f:
-            try:
-                e = json.loads(line)
-            except Exception:
-                continue
             if len(lines) >= 300:
                 break
-            msg = e.get('message', {})
-            role = msg.get('role', '')
-            content = msg.get('content', '')
-            if isinstance(content, str) and len(content) > 25:
-                lines.append(f"[{'User' if role=='user' else 'Assistant'}]: {content[:300]}")
-            elif isinstance(content, list):
-                for c in content:
-                    if c.get('type') != 'text': continue
-                    text = c.get('text', '').strip()
-                    if len(text) < 25: continue
-                    if re.match(r'^(SPAWNED|MERGED|SKIP|ERROR|Extracted \d)', text): continue
-                    if text.startswith('```') and text.count('\n') > 3: continue
-                    # Strip file path lines and extension-only tokens (noise from tool output)
-                    if re.match(r'^/(?:Users|home)/', text): continue
-                    if re.search(r'\.(csv|jsonl|pdf|png|ts|py|sh|json)\s*$', text): continue
-                    lines.append(f"[{'User' if role=='user' else 'Assistant'}]: {text[:400]}")
+            # S5: per-entry guard — one malformed entry (truncated JSON, unexpected
+            # shape, non-dict content item) must not abort the rest of the batch.
+            try:
+                e = json.loads(line)
+                msg = e.get('message') or {}
+                role = msg.get('role', '')
+                content = msg.get('content', '')
+                if isinstance(content, str) and len(content) > 25:
+                    lines.append(f"[{'User' if role=='user' else 'Assistant'}]: {content[:300]}")
+                elif isinstance(content, list):
+                    for c in content:
+                        try:
+                            if not isinstance(c, dict) or c.get('type') != 'text':
+                                continue
+                            text = c.get('text', '').strip()
+                            if len(text) < 25:
+                                continue
+                            if re.match(r'^(SPAWNED|MERGED|SKIP|ERROR|Extracted \d)', text):
+                                continue
+                            if text.startswith('```') and text.count('\n') > 3:
+                                continue
+                            # S6: only skip entries that are NOTHING BUT a bare path or
+                            # filename. The old suffix match dropped any sentence that
+                            # happened to end in a filename (e.g. "fixed the bug in app.py").
+                            if re.fullmatch(r'/(?:Users|home)/\S*', text):
+                                continue
+                            if re.fullmatch(r'\S+\.(csv|jsonl|pdf|png|ts|py|sh|json)', text):
+                                continue
+                            lines.append(f"[{'User' if role=='user' else 'Assistant'}]: {text[:400]}")
+                        except Exception:
+                            continue
+            except Exception:
+                continue
 except Exception:
     pass
 
@@ -66,31 +114,32 @@ PYEOF
 
 [ -z "$FULL_LOG" ] && exit 0
 
-# Update gate file with current transcript size (after successful parse)
+# Require enough new parsed content to justify an extraction call. State is NOT
+# committed on skip, so the pending content is picked up by a later run.
 LOG_LEN=${#FULL_LOG}
-LAST_LOG_FILE="/tmp/gaussian_last_parsed_${SESSION_ID}"
-LAST_LOG_LEN=$(cat "$LAST_LOG_FILE" 2>/dev/null || echo "0")
-if [ "$LOG_LEN" -lt $(( LAST_LOG_LEN + 2000 )) ]; then exit 0; fi
-echo "$LOG_LEN" > "$LAST_LOG_FILE"
-echo "$FILE_SIZE" > "$LOG_HASH_FILE"
+if [ "$LOG_LEN" -lt 2000 ]; then exit 0; fi
 
-# GLM-4.7-flash has 131K context -- pass full log up to 30K chars (covers even long sessions)
-LOG=$(echo "$FULL_LOG" | cut -c1-30000)
-
+# S3: cap on TOTAL size keeping the newest content. The old `cut -c1-30000`
+# truncated per-line (wrong tool for a total cap) and kept the oldest content.
+LOG=$(printf '%s' "$FULL_LOG" | tail -c 30000)
 [ -z "$LOG" ] && exit 0
 
-# Store session memories
-curl -sf -X POST "$WORKER" \
+# Store session memories. S8: --max-time so a hung Worker can't stall the hook.
+# S4: the offset is committed only AFTER a successful POST — a failed batch stays
+# pending and is retried on the next run instead of being silently skipped.
+if curl -sf --max-time 10 -X POST "$WORKER" \
   -H 'Content-Type: application/json' \
   ${GAUSSIAN_AUTH_TOKEN:+-H "Authorization: Bearer $GAUSSIAN_AUTH_TOKEN"} \
   -d "$(jq -n --arg l "$LOG" --arg p "$PROJECT" \
     '{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"memory_extract_and_store","arguments":{"log_text":$l,"project":$p}}}')" \
-  > /dev/null 2>&1
+  > /dev/null 2>&1; then
+  echo "$FILE_SIZE" > "$OFFSET_FILE"
+fi
 
 # Sync CLAUDE.md to KV if it exists (cross-device bootstrap source)
 if [ -s "$CLAUDE_MD" ]; then
   CONTENT=$(cat "$CLAUDE_MD")
-  curl -sf -X POST "$WORKER" \
+  curl -sf --max-time 10 -X POST "$WORKER" \
     -H 'Content-Type: application/json' \
     ${GAUSSIAN_AUTH_TOKEN:+-H "Authorization: Bearer $GAUSSIAN_AUTH_TOKEN"} \
     -d "$(jq -n --arg c "$CONTENT" \

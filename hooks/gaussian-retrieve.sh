@@ -8,18 +8,26 @@ WORKER="${GAUSSIAN_WORKER_URL}"
 [ -z "$WORKER" ] && exit 0
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 
-# Detect project from git root basename, normalized to lowercase-hyphenated
-PROJECT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
-[ -z "$PROJECT" ] && PROJECT="default"
+# Detect project from git root basename, normalized to lowercase-hyphenated.
+# No xargs — it word-splits paths containing spaces (S11-class bug).
+GIT_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)
+if [ -n "$GIT_ROOT" ]; then
+  PROJECT=$(basename "$GIT_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
+else
+  PROJECT="default"
+fi
 
 # Bootstrap CLAUDE.md from KV if missing on this device (runs once per new device)
+# R2: bounded with --max-time, and the response is validated before overwriting
+# CLAUDE.md — a "null", error string, or implausibly short payload is rejected so
+# a bad fetch can't clobber the profile target.
 if [ ! -s "$CLAUDE_MD" ]; then
-  PROFILE=$(curl -sf -X POST "$WORKER" \
-    -H "Authorization: Bearer $GAUSSIAN_AUTH_TOKEN" \
+  PROFILE=$(curl -sf --max-time 10 -X POST "$WORKER" \
+    ${GAUSSIAN_AUTH_TOKEN:+-H "Authorization: Bearer $GAUSSIAN_AUTH_TOKEN"} \
     -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identity_profile_get","arguments":{}}}' \
-    2>/dev/null | jq -r '.result.content[0].text // ""' 2>/dev/null)
-  if [ -n "$PROFILE" ]; then
+    2>/dev/null | jq -r 'if .error then "" else (.result.content[0].text // "") end' 2>/dev/null)
+  if [ -n "$PROFILE" ] && [ "$PROFILE" != "null" ] && [ "${#PROFILE}" -ge 50 ]; then
     echo "$PROFILE" > "$CLAUDE_MD"
   fi
 fi
@@ -60,7 +68,15 @@ fi
 
 TMP=$(mktemp -d)
 RECEIPT_FILE="$HOME/.claude/gaussian-receipts.jsonl"
-START=$(date +%s)
+
+# R4: latency must be measured in milliseconds. `date +%s` has 1-second granularity,
+# so (END-START)*1000 reported 0ms for almost every retrieval. macOS date lacks %N
+# and the system bash (3.2) lacks EPOCHREALTIME, so use perl's Time::HiRes.
+now_ms() {
+  perl -MTime::HiRes=time -e 'printf("%d", time()*1000)' 2>/dev/null \
+    || echo $(( $(date +%s) * 1000 ))
+}
+START=$(now_ms)
 
 # Q1: raw prompt if meaningful length, else project/prompt anchor
 if [ "$PROMPT_LEN" -lt 25 ]; then
@@ -76,8 +92,8 @@ query_memory "$Q2" "$TMP/q2" &
 query_memory "$Q3" "$TMP/q3" &
 wait
 
-END=$(date +%s)
-LATENCY_MS=$(( (END - START) * 1000 ))
+END=$(now_ms)
+LATENCY_MS=$(( END - START ))
 
 # Merge, filter identity domain (CLAUDE.md handles those), threshold >= 0.90, sort high-to-low
 MERGED=$(cat "$TMP"/q1 "$TMP"/q2 "$TMP"/q3 2>/dev/null \
@@ -126,13 +142,23 @@ rm -rf "$TMP"
     '{ts:$ts,project:$project,query_hash:$qhash,topic:$topic,latency_ms:$latency,injected:$injected,results:$total,score_buckets:{high:$high,mid:$mid,low:$low},memories:$memories}' \
     >> "$RECEIPT_FILE" 2>/dev/null
 
-  # Rotate: keep last 500 receipts (~150KB)
-  if [ -f "$RECEIPT_FILE" ] && [ "$(wc -l < "$RECEIPT_FILE")" -gt 500 ]; then
-    tail -500 "$RECEIPT_FILE" > "${RECEIPT_FILE}.tmp" && mv "${RECEIPT_FILE}.tmp" "$RECEIPT_FILE" 2>/dev/null
+  # Rotate: keep last 500 receipts (~150KB).
+  # R5: rotation runs only under an atomic mkdir lock so two concurrent hooks can't
+  # both run the tail+mv dance and clobber each other's writes. If the lock is held,
+  # rotation is simply skipped this round — it will happen on a later invocation.
+  ROTATE_LOCK="${RECEIPT_FILE}.lock"
+  if mkdir "$ROTATE_LOCK" 2>/dev/null; then
+    if [ -f "$RECEIPT_FILE" ] && [ "$(wc -l < "$RECEIPT_FILE")" -gt 500 ]; then
+      tail -500 "$RECEIPT_FILE" > "${RECEIPT_FILE}.tmp" && mv "${RECEIPT_FILE}.tmp" "$RECEIPT_FILE" 2>/dev/null
+    fi
+    rmdir "$ROTATE_LOCK" 2>/dev/null
   fi
 } &  # async — never blocks injection
 
 [ -z "$MERGED" ] && exit 0
 
-jq -n --arg ctx "Relevant session context (use as ground truth for recent work and decisions):\n$MERGED" \
+# R1: jq --arg takes values literally, so "\n" inside the bash string injected a
+# literal backslash-n into the context. Use a real newline instead.
+NL=$'\n'
+jq -n --arg ctx "Relevant session context (use as ground truth for recent work and decisions):${NL}${MERGED}" \
   '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
