@@ -8,8 +8,14 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 WORKER="${GAUSSIAN_WORKER_URL}"
 [ -z "$WORKER" ] && exit 0
 
-PROJECT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
-[ -z "$PROJECT" ] && PROJECT="default"
+# Detect project from git root basename. No xargs — it word-splits paths
+# containing spaces (S11-class bug, same fix as gaussian-store.sh/-retrieve.sh).
+GIT_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)
+if [ -n "$GIT_ROOT" ]; then
+  PROJECT=$(basename "$GIT_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
+else
+  PROJECT="default"
+fi
 
 store_diff() {
   local payload="$1"
@@ -47,7 +53,9 @@ case "$TOOL_NAME" in
     echo "$CMD" | grep -qE '^\s*(git add|git commit|git status|git diff|git log|git push|git pull|git checkout|git stash|npm install|pip install|mkdir|touch|chmod|rm |mv |cp )' && exit 0
     echo "$CMD" | grep -qE '^\s*(sleep|wait|true|false|exit)' && exit 0
     echo "$CMD" | grep -qE 'wrangler deploy|npx wrangler' && exit 0
-    OUTPUT=$(echo "$INPUT" | jq -r '.tool_response // ""' | head -5 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-200)
+    # tool_response for Bash is an object ({stdout, stderr, ...}), not a string —
+    # extracting it raw stored pretty-printed JSON braces instead of the output.
+    OUTPUT=$(echo "$INPUT" | jq -r 'if (.tool_response|type) == "object" then (.tool_response.stdout // "") else (.tool_response // "") end' | head -5 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-200)
     CMD_SHORT=$(echo "$CMD" | head -2 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-200)
     [ ${#OUTPUT} -lt 15 ] && exit 0
     PAYLOAD=$(jq -n \
