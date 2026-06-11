@@ -1,6 +1,6 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
-import { hotTierGet, hotTierAdd } from './storage';
+import { hotTierGet, hotTierAddMany } from './storage';
 import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
 } from './gaussian';
@@ -8,6 +8,8 @@ import {
 export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default'
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
+  // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
+  if (!query || !query.trim()) return [];
 
   // Pure semantic retrieval — no LLM query rewriting.
   // Memories are stored with context-enriched text (via memory_auto_store context param),
@@ -115,7 +117,7 @@ export async function retrieve(
   const mergedSet = new Set(mergedIds);
   const hotOnlyIds = hotIds.filter(id => !mergedSet.has(id));
 
-  if (!results.matches.length && !ftsOnlyIds.length && !hotOnlyIds.length) return [];
+  if (!results.matches.length && !ftsOnlyIds.length && !hotOnlyIds.length && !temporalOnlyIds.length) return [];
 
   // Entity boost — Mem0-style: embed each entity, query Vectorize, boost memories that appear
   // Attenuated by spread (more entity hits = lower individual boost, same as Mem0)
@@ -431,8 +433,10 @@ export async function retrieve(
   const bfsExtras = querySigmaVal < 0.5 ? 5 : 2;
   top.push(...activatedExtras.filter(a => !topIdSet.has(a.id)).slice(0, bfsExtras));
 
-  // De-biasing: surface one high-value contradiction that got penalty-suppressed
-  const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7);
+  // De-biasing: surface one high-value contradiction that got penalty-suppressed.
+  // Skip if it already made the cut — top can extend past index topK, so without
+  // this check the same memory could be injected twice.
+  const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7 && !topIdSet.has(c.id));
   if (suppressed) top.push(suppressed);
 
   // Temporal de-biasing: activation clusters can drown temporal hits even with a score boost.
@@ -452,24 +456,28 @@ export async function retrieve(
   const gated = top.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
   const finalTop = gated.length >= 2 ? gated : top.slice(0, Math.max(2, Math.ceil(top.length / 2)));
 
-  // Sharpen accessed memories + record history if σ changed meaningfully
+  // Sharpen accessed memories + record history if σ changed meaningfully.
+  // Batched: previously one UPDATE (+ optional INSERT) + one KV read-modify-write
+  // per memory — N+1 D1 round-trips and racy KV writes on every retrieve.
   const now = Math.floor(Date.now() / 1000);
+  const writeStmts: D1PreparedStatement[] = [];
   for (const mem of finalTop) {
     const domSize = domainSizeMap.get(mem.domain) ?? 10;
     const newSigma = sharpenSigma(mem.sigma, 0.85, 0.15, mem.contradiction, domSize);
-    await env.DB.prepare(
+    writeStmts.push(env.DB.prepare(
       'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
-    ).bind(now, serializeSigma(newSigma), mem.id).run();
-    await hotTierAdd(mem.id, env); // hot tier = recently accessed, not recently stored
+    ).bind(now, serializeSigma(newSigma), mem.id));
     // Record sigma history if it moved by more than 0.05 — avoids spammy writes on tiny changes
     const oldMean = meanSigma(mem.sigma);
     const newMean = meanSigma(newSigma);
     if (Math.abs(newMean - oldMean) >= 0.05) {
-      await env.DB.prepare(
+      writeStmts.push(env.DB.prepare(
         'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
-      ).bind(crypto.randomUUID(), mem.id, newMean, 'sharpen', now).run().catch(() => {});
+      ).bind(crypto.randomUUID(), mem.id, newMean, 'sharpen', now));
     }
   }
+  if (writeStmts.length) await env.DB.batch(writeStmts).catch(() => {});
+  await hotTierAddMany(finalTop.map(m => m.id), env); // hot tier = recently accessed, not recently stored
 
   // Check memory_relations: mark superseded memories so caller knows they've been replaced
   const topIds = top.map(m => m.id);

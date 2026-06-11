@@ -78,12 +78,26 @@ now_ms() {
 }
 START=$(now_ms)
 
-# Q1: raw prompt if meaningful length, else project/prompt anchor
+# Q1: raw prompt if meaningful length. Short prompts anchor on their REAL content
+# words (plus project when available) — never a synthetic query that drops the
+# user's topic ("check the loreal repo" must query "loreal repo", not
+# "<project> recent work decisions").
 if [ "$PROMPT_LEN" -lt 25 ]; then
-  if [ "$PROJECT" = "default" ]; then
-    query_memory "${PROMPT_WORDS}context decisions" "$TMP/q1" "$PROMPT" &
+  CONTENT_WORDS=$(echo "$PROMPT_WORDS" | sed 's/ *$//')
+  if [ -n "$CONTENT_WORDS" ]; then
+    if [ "$PROJECT" = "default" ]; then
+      query_memory "$CONTENT_WORDS" "$TMP/q1" "$PROMPT" &
+    else
+      query_memory "$PROJECT $CONTENT_WORDS" "$TMP/q1" "$PROMPT" &
+    fi
   else
-    query_memory "$PROJECT recent work decisions" "$TMP/q1" "$PROMPT" &
+    # Prompt has no content words at all (e.g. "hi", "ok go") — generic anchor is
+    # the only option left
+    if [ "$PROJECT" = "default" ]; then
+      query_memory "recent context decisions" "$TMP/q1" "$PROMPT" &
+    else
+      query_memory "$PROJECT recent work decisions" "$TMP/q1" "$PROMPT" &
+    fi
   fi
 else
   query_memory "$PROMPT" "$TMP/q1" "$PROMPT" &
@@ -95,14 +109,17 @@ wait
 END=$(now_ms)
 LATENCY_MS=$(( END - START ))
 
-# Merge, filter identity domain (CLAUDE.md handles those), threshold >= 0.90, sort high-to-low
+# Merge, filter identity domain (CLAUDE.md handles those), threshold >= 0.70, sort
+# high-to-low, cap at 12. The old 0.90 gate selected on score (which rewards recent
+# high-sigma memories) and let low-relevance items flood the context; 0.70 + top-12
+# keeps relevant mid-score hits while bounding injection size.
 MERGED=$(cat "$TMP"/q1 "$TMP"/q2 "$TMP"/q3 2>/dev/null \
   | grep -v '(identity/' \
   | grep -E '^\[[0-9]' \
-  | awk -F'[][]' '$2+0 >= 0.90' \
+  | awk -F'[][]' '$2+0 >= 0.70' \
   | sort -t'[' -k2 -rn \
   | awk '!seen[$0]++' \
-  | head -15)
+  | head -12)
 
 rm -rf "$TMP"
 
@@ -116,7 +133,7 @@ rm -rf "$TMP"
   TOTAL=$(echo "$MERGED" | grep -c '^\[' 2>/dev/null); TOTAL=${TOTAL:-0}
   HIGH=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 1.10' | wc -l | tr -d ' '); HIGH=${HIGH:-0}
   MID=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 0.95 && $2+0 < 1.10' | wc -l | tr -d ' '); MID=${MID:-0}
-  LOW=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 0.90 && $2+0 < 0.95' | wc -l | tr -d ' '); LOW=${LOW:-0}
+  LOW=$(echo "$MERGED" | awk -F'[][]' '$2+0 >= 0.70 && $2+0 < 0.95' | wc -l | tr -d ' '); LOW=${LOW:-0}
   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
 
   MEMORIES_JSON=$(echo "$MERGED" | grep '^\[' | while IFS= read -r line; do

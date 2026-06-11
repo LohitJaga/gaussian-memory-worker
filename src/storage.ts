@@ -18,6 +18,19 @@ export async function hotTierAdd(id: string, env: Env): Promise<void> {
   } catch {}
 }
 
+// Batch variant — one KV read-modify-write for N ids instead of N round-trips.
+// Used by retrieve() which previously called hotTierAdd per result (N+1 KV writes, racy).
+export async function hotTierAddMany(ids: string[], env: Env): Promise<void> {
+  if (!ids.length) return;
+  try {
+    const raw = await env.KV.get(HOT_KEY);
+    const existing: string[] = raw ? JSON.parse(raw) : [];
+    const incoming = new Set(ids);
+    const updated = [...ids, ...existing.filter(i => !incoming.has(i))].slice(0, HOT_MAX);
+    await env.KV.put(HOT_KEY, JSON.stringify(updated), { expirationTtl: HOT_TTL });
+  } catch {}
+}
+
 export async function hotTierGet(env: Env): Promise<string[]> {
   try {
     const raw = await env.KV.get(HOT_KEY);

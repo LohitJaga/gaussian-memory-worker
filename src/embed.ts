@@ -15,8 +15,9 @@ async function aiRunWithRetry(env: Env, model: string, input: any, retries = 2):
 
 export async function embed(text: string, env: Env): Promise<Float32Array> {
   const result = await aiRunWithRetry(env, '@cf/baai/bge-base-en-v1.5', { text: [text] }) as any;
-  const vec = result.data[0] as number[];
-  const norm = Math.sqrt(vec.reduce((s: number, v: number) => s + v * v, 0));
+  const vec = result?.data?.[0] as number[] | undefined;
+  if (!vec || !vec.length) throw new Error(`Embedding failed: model returned no vector for text (${text.length} chars)`);
+  const norm = Math.sqrt(vec.reduce((s: number, v: number) => s + v * v, 0)) || 1;
   return new Float32Array(vec.map((v: number) => v / norm));
 }
 
@@ -25,8 +26,12 @@ export async function batchEmbed(texts: string[], env: Env): Promise<Float32Arra
   const out: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += CHUNK) {
     const result = await aiRunWithRetry(env, '@cf/baai/bge-base-en-v1.5', { text: texts.slice(i, i + CHUNK) }) as any;
-    for (const vec of result.data as number[][]) {
-      const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+    const data = (result?.data ?? []) as number[][];
+    if (data.length !== Math.min(CHUNK, texts.length - i)) {
+      throw new Error(`Batch embedding failed: expected ${Math.min(CHUNK, texts.length - i)} vectors, got ${data.length}`);
+    }
+    for (const vec of data) {
+      const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
       out.push(new Float32Array(vec.map(v => v / norm)));
     }
   }

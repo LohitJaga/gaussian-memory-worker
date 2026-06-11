@@ -27,9 +27,12 @@ export function kalmanMerge(
   const muNew = new Float32Array(dim);
   const sigmaNew = new Float32Array(dim);
 
+  const EPS = 1e-9; // guard against zero sigma (corrupted row) producing NaN mu
   for (let i = 0; i < dim; i++) {
-    sigmaNew[i] = 1.0 / (1.0 / sigmaA[i] + 1.0 / sigmaB[i]);
-    muNew[i] = sigmaNew[i] * (muA[i] / sigmaA[i] + muB[i] / sigmaB[i]);
+    const sa = sigmaA[i] > EPS ? sigmaA[i] : EPS;
+    const sb = sigmaB[i] > EPS ? sigmaB[i] : EPS;
+    sigmaNew[i] = 1.0 / (1.0 / sa + 1.0 / sb);
+    muNew[i] = sigmaNew[i] * (muA[i] / sa + muB[i] / sb);
   }
 
   return [muNew, sigmaNew];
