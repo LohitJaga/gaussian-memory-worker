@@ -11,7 +11,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 ### Infrastructure / Quality
 - [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
-- [ ] Fix gaussian-store.sh stop hook — two bugs: (1) hard-capped at 300 lines in python parse, so long sessions silently truncated; (2) `LOG_LEN < LAST_LOG_LEN + 2000` length gate blocks re-extraction even after file grows; drop length gate, size gate is sufficient
 
 ### Client Compatibility
 - [ ] Verify + document: Cursor MCP support (likely works, needs confirmation)
