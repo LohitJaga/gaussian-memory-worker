@@ -9,9 +9,6 @@ import { processPendingEntityQueue } from './storage';
 
 export type { Env };
 
-// TODO: CORS origin is wildcard. The endpoint is Bearer-token protected so this is not
-// directly exploitable, but if a browser-based client is ever pointed at this worker,
-// lock Access-Control-Allow-Origin to that client's origin instead of '*'.
 const JSON_HEADERS = {
   'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
