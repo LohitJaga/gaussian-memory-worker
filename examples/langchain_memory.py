@@ -72,7 +72,7 @@ class GaussianMemory(BaseMemory):
             return content[0]["text"]
         return ""
 
-    def load_memory_variables(self, inputs: dict[str, Any]) -> dict[str, str]:
+    def load_memory_variables(self, inputs: dict[str, Any]) -> dict[str, Any]:
         query = inputs.get("input") or inputs.get("query") or ""
         if not query:
             return {self.memory_key: ""}
