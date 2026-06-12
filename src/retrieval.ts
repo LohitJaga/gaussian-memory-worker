@@ -286,7 +286,9 @@ export async function retrieve(
       primaryScore,
       vector: vectorMap.get(row.id) ?? [],
       contradiction: row.contradiction_flag === 1,
-      fresh: ageSeconds < 1800,  // stored within last 30 min
+      // Decaying freshness: max boost (+0.20) at store time, fades to 0 over 48h.
+      // Binary 30-min window meant yesterday's session summary got zero lift.
+      freshnessBoost: Math.max(0, 0.20 * (1 - ageSeconds / (48 * 3600))),
       isFileEdit: /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text),
     };
   });
@@ -319,8 +321,7 @@ export async function retrieve(
     // for "what were we working on" queries — give them a strong lift over atomic facts
     const sessionBoost = c.type === 'session' ? 0.20 : 0;
 
-    // Recency boost: memories stored in this session (last 30 min) get a lift
-    const recencyBoost = c.fresh ? 0.12 : 0;
+    const recencyBoost = c.freshnessBoost;
 
     // File-edit penalty: "Edited: foo.ts" memories have short generic embeddings
     // that falsely match almost any query — suppress unless no better candidates
@@ -408,7 +409,7 @@ export async function retrieve(
         id: row.id, text: row.text, domain: row.domain, type: row.memory_type,
         sigma: memSigma, primaryScore: match.score, score: match.score,
         vector: [], contradiction: row.contradiction_flag === 1,
-        fresh: false, isFileEdit: false, activated: true,
+        freshnessBoost: 0, isFileEdit: false, activated: true,
       } as any);
       if (match.values.length > 0) {
         frontier.push({ id: row.id, vector: match.values });
