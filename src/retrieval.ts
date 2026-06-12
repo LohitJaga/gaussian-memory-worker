@@ -233,7 +233,7 @@ export async function retrieve(
     const cosineSim = cosineMap.get(row.id) ?? 0;
     const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
     const recency = Math.max(0, 1 - (nowSec - lastAccessed) / NINETY_DAYS);
-    const accessFreq = Math.min(1, (row.access_count ?? 0) / 50);
+    const accessFreq = Math.min(1, Math.log1p(row.access_count ?? 0) / Math.log1p(50));
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
     const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
     const bm25Raw = bm25Map.get(row.id) ?? 0;
