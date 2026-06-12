@@ -21,7 +21,7 @@ const AUTH_TOKEN = process.env.GAUSSIAN_AUTH_TOKEN ?? '';
 // Skip the whole suite when no live worker is configured (e.g., in CI without secrets)
 const describeE2E = WORKER_URL ? describe : describe.skip;
 
-const SUITE_ID = Date.now().toString().slice(-7);
+const SUITE_ID = Date.now().toString(36); // full base-36 ms timestamp — no 2.78h wrap collision
 const TEST_PREFIX = `[E2E-${SUITE_ID}]`;
 const TEST_PROJECT = `e2e-${SUITE_ID}`;
 
@@ -37,7 +37,8 @@ function call(name: string, args: Record<string, unknown> = {}, timeoutMs = 20_0
     const http2 = require('http2');
     const body = JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: args } });
     const client = http2.connect(WORKER_URL!);
-    client.on('error', (e: Error) => reject(e));
+    const timer = setTimeout(() => { client.close(); reject(new Error(`call(${name}) timed out after ${timeoutMs}ms`)); }, timeoutMs);
+    client.on('error', (e: Error) => { clearTimeout(timer); reject(e); });
 
     const req = client.request({
       ':method': 'POST',
@@ -46,8 +47,6 @@ function call(name: string, args: Record<string, unknown> = {}, timeoutMs = 20_0
       'content-length': String(Buffer.byteLength(body)),
       ...(AUTH_TOKEN ? { authorization: `Bearer ${AUTH_TOKEN}` } : {}),
     });
-
-    const timer = setTimeout(() => { client.close(); reject(new Error(`call(${name}) timed out after ${timeoutMs}ms`)); }, timeoutMs);
 
     req.setEncoding('utf8');
     let data = '';
@@ -83,7 +82,9 @@ async function pollUntilFound(
   const deadline = Date.now() + timeoutMs;
   let lastResult = '';
   while (Date.now() < deadline) {
-    lastResult = await call('memory_retrieve', { query, project: TEST_PROJECT, top_k: 10 });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    lastResult = await call('memory_retrieve', { query, project: TEST_PROJECT, top_k: 10 }, Math.min(10_000, remaining));
     if (lastResult.includes(expectedSnippet)) return lastResult;
     await new Promise(r => setTimeout(r, intervalMs));
   }
@@ -103,7 +104,7 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
 
   afterAll(async () => {
     if (!WORKER_URL) return;
-    const result = await call('memory_bulk_delete', { pattern: `${TEST_PREFIX}%` });
+    const result = await call('memory_bulk_delete', { pattern: `${TEST_PREFIX}%` }, 29_000);
     expect(result).toMatch(/Deleted \d+ memories|No memories matched/);
   }, 30_000);
 
@@ -182,8 +183,10 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
 
   // ── sigma sharpening ──────────────────────────────────────────────────────
 
-  it('sigma: repeated retrieval sharpens confidence — indicator stays ◑ or ●', async () => {
-    // Retrieve TEXT_A four times to accumulate sharpen calls
+  it('sigma: repeated retrieval does not degrade confidence below initial ◑', async () => {
+    // TEXT_A was stored with emotional_intensity=0.5 → initialSigma=0.375 (◑).
+    // After 5 retrieves sigma should stay ≤ 0.375 — verifies no regression to ○ (≥0.5).
+    // Note: proving advancement to ● requires starting from ○; a separate test covers that.
     for (let i = 0; i < 4; i++) {
       await call('memory_retrieve', {
         query: 'Bayesian distributions sharpen with repeated access',
@@ -196,12 +199,10 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
       project: TEST_PROJECT,
       top_k: 5,
     });
-    // After 5 retrieve calls total, sigma should be ≤ 0.375 (the initial value).
-    // We verify no ○ (fuzzy) entries surfaced — sharpening is working, not decaying.
     expect(result).not.toContain('No memories found');
-    const lines = result.split('\n').filter(l => l.includes('sharpen with repeated access'));
+    // Filter by TEST_PREFIX to exclude default-project memories from the assertion
+    const lines = result.split('\n').filter(l => l.includes(TEST_PREFIX) && l.includes('sharpen with repeated access'));
     expect(lines.length).toBeGreaterThan(0);
-    // The matching line should not carry ○ (sigma ≥ 0.5)
     for (const line of lines) {
       expect(line).not.toMatch(/○/);
     }

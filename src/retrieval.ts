@@ -288,7 +288,7 @@ export async function retrieve(
       contradiction: row.contradiction_flag === 1,
       // Decaying freshness: max boost (+0.20) at store time, fades to 0 over 48h.
       // Binary 30-min window meant yesterday's session summary got zero lift.
-      freshnessBoost: Math.max(0, 0.20 * (1 - ageSeconds / (48 * 3600))),
+      freshnessBoost: Math.min(0.20, Math.max(0, 0.20 * (1 - ageSeconds / (48 * 3600)))),
       isFileEdit: /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text),
     };
   });
