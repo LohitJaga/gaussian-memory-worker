@@ -7,7 +7,8 @@
     "gaussian-memory": "./bin/gaussian-memory.js"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run src/gaussian.test.ts",
+    "test:e2e": "vitest run src/e2e.test.ts",
     "lint": "biome check src/",
     "typecheck": "tsc --noEmit"
   },
