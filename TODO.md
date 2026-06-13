@@ -9,7 +9,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 ## Priority 1 — Do before July 1
 
 ### Infrastructure / Quality
-- [ ] E2E test suite (store → retrieve → sigma → dedup → decay)
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
 
 ### Client Compatibility
@@ -33,7 +32,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### Polish
 - [ ] Decision trails memory type — {decision, context, alternatives, outcome}
-- [ ] LangChain BaseMemory wrapper example — thin HTTP client, lives in examples/langchain_memory.py
 - [ ] `npx gaussian-memory show [N]` — pretty-print last N retrievals
 - [ ] D3 `/viz` endpoint — domain graph + activation overlay, ship as standalone HTML for Twitter demo
 - [ ] Platform import (`npx gaussian-memory import --from mem0`)
