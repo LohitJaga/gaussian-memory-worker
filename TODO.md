@@ -59,7 +59,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ### Broader Agent OS
 - [ ] Universal Hooks Protocol — spec + per-agent adapters normalizing agent events to common schema
-- [x] Browser extension — claude.ai working: retrieval injection, memory hidden from UI, per-message storage via memory_auto_store, shared 'default' project pool with Claude Code
 - [ ] Browser extension — tool calling: marker approach or wait for remote MCP support
 - [ ] Browser extension — Gemini + ChatGPT support (protobuf parsing needed for Gemini)
 - [ ] DO hosted version (per-user isolation, free beta → $1-2/month)
