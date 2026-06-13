@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Gaussian Memory",
+  "version": "0.1.0",
+  "description": "Persistent Bayesian memory layer — works across Claude.ai, Gemini, and your coding agents",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://claude.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gaussian Memory"
+  }
+}
