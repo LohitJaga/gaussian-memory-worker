@@ -368,7 +368,7 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
     SELECT id, text, sigma_diagonal, domain, memory_type, timestamp
     FROM memories
     WHERE access_count = 0
-      AND memory_type != 'session'
+      AND memory_type NOT IN ('session', 'decision')
       AND timestamp < ?
     ORDER BY timestamp ASC
     LIMIT 200
