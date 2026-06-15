@@ -519,6 +519,41 @@ async function init() {
   }
 }
 
+// ── show ──────────────────────────────────────────────────────────────────────
+
+async function show(rawN) {
+  const workerUrl = process.env.GAUSSIAN_WORKER_URL;
+  const token = process.env.GAUSSIAN_AUTH_TOKEN;
+  if (!workerUrl || !token) {
+    console.error('Set GAUSSIAN_WORKER_URL and GAUSSIAN_AUTH_TOKEN environment variables first.');
+    process.exit(1);
+  }
+  const limit = Math.max(1, Math.min(parseInt(rawN || '10', 10) || 10, 200));
+  const res = await post(workerUrl, token, {
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'memory_list', arguments: { limit, sort: 'last_accessed' } }
+  });
+  // post() resolves with raw string on non-JSON body (auth error, 502, etc.) — detect and surface it
+  if (typeof res === 'string') { console.error('Worker error:', res.slice(0, 200)); process.exit(1); }
+  if (res?.error) { console.error('RPC error:', res.error.message ?? JSON.stringify(res.error)); process.exit(1); }
+  const text = res?.result?.content?.[0]?.text ?? '';
+  if (!text || text === 'No memories stored.') { console.log('No memories stored.'); return; }
+
+  const lines = text.split('\n').filter(Boolean);
+  const re = /^\[([^\]]+)\] \[([^\]]*)\] \[σ=([^\]]+)\] \[(\d+)x\] \(([^/]+)\/([^)]+)\) (.+)$/;
+  console.log(`\nLast ${lines.length} memor${lines.length === 1 ? 'y' : 'ies'} (newest first):\n`);
+  for (const line of lines) {
+    const m = line.match(re);
+    if (!m) { console.log('  ' + line); continue; }
+    const [, , ts, sigmaStr, accCount, domain, type, memText] = m;
+    const sigma = parseFloat(sigmaStr);
+    const sym = sigma < 0.3 ? '●' : sigma < 0.5 ? '◑' : '○';
+    console.log(`  ${sym} ${memText}`);
+    console.log(`     ${domain}/${type} · ${ts.slice(0, 10)} · σ=${sigmaStr} · ${accCount}x`);
+    console.log();
+  }
+}
+
 // ── backup ────────────────────────────────────────────────────────────────────
 
 async function backup() {
@@ -544,10 +579,12 @@ switch (cmd) {
   case 'ingest': ingest(args[0]); break;
   case 'init':   init(); break;
   case 'backup': backup(); break;
+  case 'show':   show(args[0]).catch(e => { console.error('Error:', e.message); process.exit(1); }); break;
   default:
     console.log('Usage:');
     console.log('  npx gaussian-memory init              — deploy worker + configure resources');
     console.log('  npx gaussian-memory ingest <file.md>  — seed memories from markdown file');
     console.log('  npx gaussian-memory backup            — export D1 database to SQL file');
+    console.log('  npx gaussian-memory show [N]          — pretty-print last N memories (default: 10)');
     process.exit(0);
 }

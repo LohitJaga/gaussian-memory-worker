@@ -40,6 +40,22 @@ export const TOOLS = [
     },
   },
   {
+    name: 'memory_store_decision',
+    description: 'Store a structured decision trail: what was decided, why, what alternatives were considered, and what happened. Stored with memory_type=decision so it can be retrieved as a group and surfaced when facing similar choices.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        decision: { type: 'string', description: 'What was decided (the chosen option)' },
+        context: { type: 'string', description: 'Why this decision was needed — the problem or situation' },
+        alternatives: { type: 'string', description: 'Other options considered (comma-separated or prose)' },
+        outcome: { type: 'string', description: 'Result or current status — what happened after' },
+        domain: { type: 'string', description: 'Memory domain (inferred if omitted)' },
+        project: { type: 'string' },
+      },
+      required: ['decision'],
+    },
+  },
+  {
     name: 'memory_store_diff',
     description: 'Store a semantic description of a code edit or bash command. Pass raw diff (file_path + old_string + new_string) or command context; worker infers meaning via Llama before storing.',
     inputSchema: {
@@ -342,6 +358,39 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       return out;
     }
 
+    case 'memory_store_decision': {
+      // Fix #8: guard required field before .trim()
+      if (!args.decision || typeof args.decision !== 'string') {
+        return "ERROR: 'decision' field is required and must be a non-empty string";
+      }
+      const decision = args.decision.trim();
+      if (!decision) return "ERROR: 'decision' must not be blank";
+
+      const parts = [`Decision: ${decision}`];
+      // Fix #9: trim before truthiness check so whitespace-only values are skipped
+      for (const [label, key] of [['Context', 'context'], ['Alternatives considered', 'alternatives'], ['Outcome', 'outcome']] as const) {
+        const val = typeof args[key] === 'string' ? (args[key] as string).trim() : '';
+        if (val) parts.push(`${label}: ${val}`);
+      }
+      const text = parts.join(' | ');
+      const mu = await embed(text, env);
+      // Fix #5: fallback to 'general' if classification fails
+      const domain = (typeof args.domain === 'string' && args.domain.trim())
+        ? args.domain.trim()
+        : await classifyDomainWithLlama(text, env, mu).catch(() => 'general');
+      // Fix #7: nudge centroid when auto-classifying (matches memory_auto_store pattern)
+      const { action, id, conflict_candidates } = await storeMemory(
+        text, 'decision', domain, 0.6, env, mu, args.project ?? 'default'
+      );
+      if (action === 'spawned' && !args.domain) {
+        await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
+      }
+      // Fix #4: surface conflict_candidates like sibling store handlers
+      let out = `${action.toUpperCase()}: '${text.slice(0, 80)}' -> (${domain}/decision, id=${id.slice(0, 8)})`;
+      if (conflict_candidates?.length) out += `\nconflict_candidates: ${JSON.stringify(conflict_candidates)}`;
+      return out;
+    }
+
     case 'memory_store_diff': {
       // Build raw context for Llama to interpret
       let diffContext = '';
@@ -488,7 +537,9 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           .sort((a: any, b: any) => meanSigma(deserializeSigma(a.sigma_diagonal)) - meanSigma(deserializeSigma(b.sigma_diagonal)))
           .slice(0, limit);
       } else {
-        const sortCol = args.sort === 'access_count' ? 'access_count DESC' : 'timestamp DESC';
+        const sortCol = args.sort === 'access_count' ? 'access_count DESC'
+          : args.sort === 'last_accessed' ? 'last_accessed DESC'
+          : 'timestamp DESC';
         const rows = await env.DB.prepare(
           `SELECT id, text, sigma_diagonal, domain, memory_type, access_count, timestamp FROM memories ${where} ORDER BY ${sortCol} LIMIT ?`
         ).bind(...params, limit).all<any>();

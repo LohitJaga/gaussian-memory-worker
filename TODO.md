@@ -31,8 +31,8 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Blog post (outline at Downloads/blog_post_outline.md)
 
 ### Polish
-- [ ] Decision trails memory type — {decision, context, alternatives, outcome}
-- [ ] `npx gaussian-memory show [N]` — pretty-print last N retrievals
+- [x] Decision trails memory type — {decision, context, alternatives, outcome}
+- [x] `npx gaussian-memory show [N]` — pretty-print last N retrievals
 - [ ] D3 `/viz` endpoint — domain graph + activation overlay, ship as standalone HTML for Twitter demo
 - [ ] Platform import (`npx gaussian-memory import --from mem0`)
 
