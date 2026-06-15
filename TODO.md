@@ -12,7 +12,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
 
 ### Client Compatibility
-- [x] Verify + document: Cursor MCP support — tools work, sessionEnd hook stores memories, sessionStart injection bugged upstream
 - [ ] Verify + document: Zed MCP support
 - [ ] Verify + document: OpenAI Codex / CLI MCP support
 - [ ] Verify + document: Windsurf, Continue.dev, other Claude Code alternatives
@@ -31,8 +30,6 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Blog post (outline at Downloads/blog_post_outline.md)
 
 ### Polish
-- [x] Decision trails memory type — {decision, context, alternatives, outcome}
-- [x] `npx gaussian-memory show [N]` — pretty-print last N retrievals
 - [ ] D3 `/viz` endpoint — domain graph + activation overlay, ship as standalone HTML for Twitter demo
 - [ ] Platform import (`npx gaussian-memory import --from mem0`)
 
