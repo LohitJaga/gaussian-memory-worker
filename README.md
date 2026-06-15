@@ -135,8 +135,67 @@ cp hooks/opencode-gaussian-memory.mjs ~/.opencode/gaussian-memory.mjs
 - **Session-end extraction** — `session.idle` and `session.compacted` hooks trigger `memory_extract_and_store` on the full session transcript.
 - **Cross-editor memory** — Claude Code and OpenCode share the same D1/Vectorize backend. Context stored in one editor surfaces in the other.
 
+### Cursor
+Configured automatically by `npx gaussian-memory init` if `~/.cursor` is detected. Nothing to do.
+
+Manual setup: create or edit `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gaussian-memory": {
+      "type": "http",
+      "url": "https://your-worker.workers.dev",
+      "headers": {
+        "Authorization": "Bearer your-token"
+      }
+    }
+  }
+}
+```
+
+For auto-storage on session end, create `~/.cursor/hooks.json`:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionEnd": [
+      {
+        "type": "command",
+        "command": "bash ~/.cursor/hooks/gaussian-store.sh",
+        "timeout": 30
+      }
+    ]
+  }
+}
+```
+
+Then copy the hook script:
+```bash
+cp hooks/cursor-gaussian-store.sh ~/.cursor/hooks/gaussian-store.sh
+chmod +x ~/.cursor/hooks/gaussian-store.sh
+```
+
+**What you get:**
+- **MCP tools** — all 23 memory tools available in agent mode. Call `memory_retrieve` or `memory_store` directly.
+- **Auto-store** — `sessionEnd` hook extracts and stores memories when you close a conversation.
+- **Auto-inject** — not available yet. Cursor's `sessionStart` hook supports an `additional_context` output field that would enable this, but injection is currently broken upstream ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). When they fix it, Cursor will have full parity with Claude Code.
+
 ### Other MCP-compatible editors
-Any editor that supports remote MCP servers works with Gaussian Memory: Cursor, Zed, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
+
+Any editor that supports remote HTTP MCP servers works for tool calls: Zed, Continue.dev, Windsurf, etc. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
+
+Auto-inject and auto-store depend on each editor's hook system. Results may vary — hook coverage is not consistent across editors. Verified client support:
+
+| Client | MCP Tools | Auto-Inject | Auto-Store |
+|---|---|---|---|
+| Claude Code | Full | Yes | Yes |
+| OpenCode | Full | Yes | Yes (tool capture pending upstream fix) |
+| Cursor | Full | No (upstream bug) | Yes |
+| Zed | Likely | Unknown | Unknown |
+| Windsurf | Likely | Unknown | Unknown |
+| Continue.dev | Likely | Unknown | Unknown |
 
 ## Backup
 
@@ -149,6 +208,8 @@ npx gaussian-memory backup
 Writes a timestamped `.sql` file in the current directory. Run before migrations or destructive cron operations.
 
 ## Known gaps
+
+**Cursor: auto-inject not working.** Cursor's `sessionStart` hook supports an `additional_context` return field designed for exactly this — inject retrieved memories before the first message. It's broken in the current Cursor release ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). Until it's fixed, you can call `memory_retrieve` manually at the start of a session, or rely on the model to do it proactively since the tools are registered.
 
 **OpenCode: tool output capture not working.** The plugin implements `tool.execute.after` but it's never triggered in OpenCode v1.16.2 (issue [#25918](https://github.com/anomalyco/opencode/issues/25918) — declared but not wired up in the runtime). Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff; OpenCode can't do this yet. Conversation content is still captured via `chat.input`/`chat.message` hooks.
 
