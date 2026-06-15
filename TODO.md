@@ -12,7 +12,7 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
 
 ### Client Compatibility
-- [ ] Verify + document: Cursor MCP support (likely works, needs confirmation)
+- [x] Verify + document: Cursor MCP support — tools work, sessionEnd hook stores memories, sessionStart injection bugged upstream
 - [ ] Verify + document: Zed MCP support
 - [ ] Verify + document: OpenAI Codex / CLI MCP support
 - [ ] Verify + document: Windsurf, Continue.dev, other Claude Code alternatives

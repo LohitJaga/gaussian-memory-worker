@@ -9,6 +9,10 @@ const readline = require('readline');
 
 const [,, cmd, ...args] = process.argv;
 
+function readJsonOrEmpty(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
+}
+
 function ask(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise(r => rl.question(question, ans => { rl.close(); r(ans.trim()); }));
@@ -259,10 +263,7 @@ async function init() {
         }
 
         // Patch settings.json — merge into existing hooks rather than replacing
-        let settings = {};
-        if (fs.existsSync(settingsPath)) {
-          try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
-        }
+        const settings = readJsonOrEmpty(settingsPath);
         if (!settings.hooks) settings.hooks = {};
         const gaussianHooks = {
           UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-retrieve.sh', statusMessage: 'Recalling memories...' }] }],
@@ -282,17 +283,18 @@ async function init() {
       }
 
       // Write MCP config to ~/.claude/mcp.json with Bearer token
-      process.stdout.write('  Writing ~/.claude/mcp.json with Bearer auth... ');
-      let mcpConfig = {};
-      try { mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf8')); } catch {}
-      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-      mcpConfig.mcpServers['gaussian-memory'] = {
-        type: 'http',
-        url,
-        headers: { Authorization: `Bearer ${token}` },
-      };
-      fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2));
-      console.log('done');
+      if (url) {
+        process.stdout.write('  Writing ~/.claude/mcp.json with Bearer auth... ');
+        const mcpConfig = readJsonOrEmpty(mcpJsonPath);
+        if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+        mcpConfig.mcpServers['gaussian-memory'] = {
+          type: 'http',
+          url,
+          headers: { Authorization: `Bearer ${token}` },
+        };
+        fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2));
+        console.log('done');
+      }
     }
 
     // Write env vars to a sourceable file
@@ -318,16 +320,62 @@ async function init() {
           fs.copyFileSync(pluginPkg, pluginDst);
         }
         // Patch opencode.json
-        let oconfig = {};
-        if (fs.existsSync(opencodeJson)) {
-          try { oconfig = JSON.parse(fs.readFileSync(opencodeJson, 'utf8')); } catch {}
-        }
+        const oconfig = readJsonOrEmpty(opencodeJson);
         if (!oconfig.$schema) oconfig.$schema = 'https://opencode.ai/config.json';
         if (!oconfig.plugin) oconfig.plugin = [];
         if (!oconfig.plugin.includes(pluginDst)) oconfig.plugin.push(pluginDst);
         if (!oconfig.mcp) oconfig.mcp = {};
         oconfig.mcp['gaussian-memory'] = { type: 'remote', url, headers: { Authorization: `Bearer ${token}` } };
         fs.writeFileSync(opencodeJson, JSON.stringify(oconfig, null, 2));
+        console.log('done');
+      } catch (e) {
+        console.log('failed:', e.message);
+      }
+    }
+
+    // Auto-install Cursor hooks + MCP config if ~/.cursor exists
+    const cursorDir = path.join(process.env.HOME, '.cursor');
+    if (fs.existsSync(cursorDir)) {
+      process.stdout.write('  Installing Cursor hooks + MCP config... ');
+      try {
+        // Copy sessionEnd hook script
+        const cursorHooksDir = path.join(cursorDir, 'hooks');
+        fs.mkdirSync(cursorHooksDir, { recursive: true });
+        const hookSrc = path.join(__dirname, '..', 'hooks', 'cursor-gaussian-store.sh');
+        const hookDst = path.join(cursorHooksDir, 'gaussian-store.sh');
+        let hookCopied = false;
+        if (fs.existsSync(hookSrc)) {
+          fs.writeFileSync(hookDst, fs.readFileSync(hookSrc, 'utf8'));
+          fs.chmodSync(hookDst, '755');
+          hookCopied = true;
+        }
+
+        // Only register hooks.json/mcp.json if the hook script was actually copied —
+        // otherwise we'd point Cursor at a script that doesn't exist.
+        if (hookCopied) {
+          // Write hooks.json — merge alongside existing sessionEnd hooks
+          const cursorHooksJson = path.join(cursorDir, 'hooks.json');
+          const hooksConfig = readJsonOrEmpty(cursorHooksJson);
+          if (!hooksConfig.version) hooksConfig.version = 1;
+          if (!hooksConfig.hooks) hooksConfig.hooks = {};
+          const gaussianCursorHook = { type: 'command', command: 'bash ~/.cursor/hooks/gaussian-store.sh', timeout: 30 };
+          const existingSessionEnd = hooksConfig.hooks.sessionEnd;
+          if (!existingSessionEnd) {
+            hooksConfig.hooks.sessionEnd = [gaussianCursorHook];
+          } else if (!JSON.stringify(existingSessionEnd).includes('gaussian')) {
+            hooksConfig.hooks.sessionEnd = [...existingSessionEnd, gaussianCursorHook];
+          }
+          fs.writeFileSync(cursorHooksJson, JSON.stringify(hooksConfig, null, 2));
+
+          // Write mcp.json
+          if (url) {
+            const cursorMcpJson = path.join(cursorDir, 'mcp.json');
+            const mcpCursorConfig = readJsonOrEmpty(cursorMcpJson);
+            if (!mcpCursorConfig.mcpServers) mcpCursorConfig.mcpServers = {};
+            mcpCursorConfig.mcpServers['gaussian-memory'] = { type: 'http', url, headers: { Authorization: `Bearer ${token}` } };
+            fs.writeFileSync(cursorMcpJson, JSON.stringify(mcpCursorConfig, null, 2));
+          }
+        }
         console.log('done');
       } catch (e) {
         console.log('failed:', e.message);
