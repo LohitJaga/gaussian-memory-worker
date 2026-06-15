@@ -184,18 +184,18 @@ chmod +x ~/.cursor/hooks/gaussian-store.sh
 
 ### Other MCP-compatible editors
 
-Any editor that supports remote HTTP MCP servers works for tool calls: Zed, Continue.dev, Windsurf, etc. Point the MCP config at `$GAUSSIAN_WORKER_URL` with `Authorization: Bearer $GAUSSIAN_AUTH_TOKEN`. No SSE or OAuth required.
+Any editor that supports remote HTTP MCP servers should work for tool calls: Zed, Windsurf, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint — no SSE or OAuth required.
 
-Auto-inject and auto-store depend on each editor's hook system. Results may vary — hook coverage is not consistent across editors. Verified client support:
+General config (adapt to your editor's MCP settings format):
 
-| Client | MCP Tools | Auto-Inject | Auto-Store |
-|---|---|---|---|
-| Claude Code | Full | Yes | Yes |
-| OpenCode | Full | Yes | Yes (tool capture pending upstream fix) |
-| Cursor | Full | No (upstream bug) | Yes |
-| Zed | Likely | Unknown | Unknown |
-| Windsurf | Likely | Unknown | Unknown |
-| Continue.dev | Likely | Unknown | Unknown |
+```json
+{
+  "url": "https://your-worker.workers.dev",
+  "headers": { "Authorization": "Bearer your-token" }
+}
+```
+
+Auto-inject and auto-store depend on each editor's hook system and aren't verified beyond Claude Code, OpenCode, and Cursor. If you get it working in another editor, PRs welcome.
 
 ## Backup
 
