@@ -382,6 +382,45 @@ async function init() {
       }
     }
 
+    // Auto-configure Zed if ~/.config/zed exists
+    const zedDir = path.join(process.env.HOME, '.config', 'zed');
+    const zedSettings = path.join(zedDir, 'settings.json');
+    if (url && (fs.existsSync(zedSettings) || fs.existsSync(zedDir))) {
+      process.stdout.write('  Configuring Zed context server... ');
+      try {
+        fs.mkdirSync(zedDir, { recursive: true });
+        const zedConfig = readJsonOrEmpty(zedSettings);
+        if (!zedConfig.context_servers) zedConfig.context_servers = {};
+        zedConfig.context_servers['gaussian-memory'] = {
+          url,
+          headers: { Authorization: `Bearer ${token}` },
+        };
+        fs.writeFileSync(zedSettings, JSON.stringify(zedConfig, null, 2));
+        console.log('done');
+      } catch (e) {
+        console.log('failed:', e.message);
+      }
+    }
+
+    // Write universal ~/.mcp.json fallback for any other MCP-compatible editor
+    {
+      process.stdout.write('  Writing ~/.mcp.json (universal MCP fallback)... ');
+      try {
+        const universalMcpPath = path.join(process.env.HOME, '.mcp.json');
+        const universalMcp = readJsonOrEmpty(universalMcpPath);
+        if (!universalMcp.mcpServers) universalMcp.mcpServers = {};
+        universalMcp.mcpServers['gaussian-memory'] = {
+          type: 'http',
+          url,
+          headers: { Authorization: `Bearer ${token}` },
+        };
+        fs.writeFileSync(universalMcpPath, JSON.stringify(universalMcp, null, 2));
+        console.log('done');
+      } catch (e) {
+        console.log('failed:', e.message);
+      }
+    }
+
     // Cold start onboarding survey
     console.log('\n' + '━'.repeat(60));
     console.log('Quick setup — a few questions to seed your memory (Enter to skip any):\n');
@@ -460,6 +499,20 @@ async function init() {
     if (!fs.existsSync(claudeDir)) {
       console.log('\nFor Claude Code hooks, see hooks/README.md');
     }
+    console.log('━'.repeat(60));
+
+    // For other MCP-compatible editors — print a copy-paste snippet
+    console.log('\nFor other editors, add this to your MCP config:\n');
+    console.log(JSON.stringify({
+      mcpServers: {
+        'gaussian-memory': {
+          type: 'http',
+          url,
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      },
+    }, null, 2));
+    console.log('\n(A universal copy was written to ~/.mcp.json — some editors pick this up automatically.)');
     console.log('━'.repeat(60));
   } catch (e) {
     console.log('deploy failed:', e.message);

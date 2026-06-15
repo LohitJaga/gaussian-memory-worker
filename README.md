@@ -182,18 +182,42 @@ chmod +x ~/.cursor/hooks/gaussian-store.sh
 - **Auto-store** — `sessionEnd` hook extracts and stores memories when you close a conversation.
 - **Auto-inject** — not available yet. Cursor's `sessionStart` hook supports an `additional_context` output field that would enable this, but injection is currently broken upstream ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). When they fix it, Cursor will have full parity with Claude Code.
 
-### Other MCP-compatible editors
+### Zed
 
-Any editor that supports remote HTTP MCP servers should work for tool calls: Zed, Windsurf, Continue.dev, etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint — no SSE or OAuth required.
-
-General config (adapt to your editor's MCP settings format):
+`init` auto-configures Zed if `~/.config/zed/` exists. It merges a `context_servers` entry into `~/.config/zed/settings.json`:
 
 ```json
 {
-  "url": "https://your-worker.workers.dev",
-  "headers": { "Authorization": "Bearer your-token" }
+  "context_servers": {
+    "gaussian-memory": {
+      "url": "https://your-worker.workers.dev",
+      "headers": { "Authorization": "Bearer your-token" }
+    }
+  }
 }
 ```
+
+Restart Zed and the memory tools are available in the assistant.
+
+### Other MCP-compatible editors
+
+Any editor that supports remote HTTP MCP servers should work for tool calls: Windsurf, Continue.dev, VS Code (MCP extension), etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint — no SSE or OAuth required.
+
+`init` also writes a universal `~/.mcp.json` using the emerging MCP standard format. Some editors pick this up automatically; for others, copy it into your editor's own MCP config:
+
+```json
+{
+  "mcpServers": {
+    "gaussian-memory": {
+      "type": "http",
+      "url": "https://your-worker.workers.dev",
+      "headers": { "Authorization": "Bearer your-token" }
+    }
+  }
+}
+```
+
+`init` also prints this snippet at the end of setup with your real URL and token filled in.
 
 Auto-inject and auto-store depend on each editor's hook system and aren't verified beyond Claude Code, OpenCode, and Cursor. If you get it working in another editor, PRs welcome.
 
