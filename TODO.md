@@ -6,16 +6,58 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ---
 
-## Do Tomorrow (2026-06-17)
-- [ ] Full wipe domain rebuild (`targeted=false`) — personal-life + leetcode-practice seeds added but scattered memories still in wrong domains
+## Priority 1 — Do before July 1
+
+### Pending — Do Tomorrow (2026-06-17)
+- [ ] Full wipe domain rebuild (`targeted=false`) — personal-life + leetcode-practice seeds added but scattered memories still in wrong domains; need full pass to fix
+
+### Infrastructure / Quality
+- [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
+
+### Client Compatibility
+- [ ] Verify + document: Zed MCP support
+- [ ] Verify + document: OpenAI Codex / CLI MCP support
+- [ ] Verify + document: Windsurf, Continue.dev, other Claude Code alternatives
+- [ ] Add "Supported Clients" table to README once confirmed
+
+### Benchmarking (define before running)
+- [ ] Identity coherence metric — 50 diverse queries, LLM-judge whether injected context forms coherent self-consistent picture
+- [ ] Association fidelity — annotate 100 memory pairs as related, measure BFS precision/recall on surfacing paired memories
+- [ ] Contradiction surface rate — how often does retrieval inject directly conflicting memories (lower = better)
+- [ ] Latency benchmark — p50/p95 on Cloudflare edge vs Mem0 API roundtrip
+- [ ] LoCoMo-style accuracy — run against MemArchitect's benchmark dataset to get a comparable number
+- [ ] Reconstruction benchmark — given a query, score how well injected memories allow reconstructing the original context (vs ground truth)
+
+### README + Blog (after features are stable)
+- [ ] README: Bhattacharyya differentiator, neuroscience angle, architecture diagram, competitor table
+- [ ] Blog post (outline at Downloads/blog_post_outline.md)
+
+### Polish
+- [ ] D3 `/viz` endpoint — domain graph + activation overlay, ship as standalone HTML for Twitter demo (domains now clean — unblocked)
+- [ ] Platform import (`npx gaussian-memory import --from mem0`)
 
 ---
 
-## Priority 1 — Before July 1
+## Priority 2 — July+ (Agent OS roadmap)
 
-- [ ] D3 `/viz` endpoint — domain graph + activation overlay, ship as standalone HTML for Twitter demo (domains are now clean, unblocked)
-- [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set
-- [ ] README: Bhattacharyya differentiator, neuroscience angle, architecture diagram, competitor table
-- [ ] Blog post (outline at Downloads/blog_post_outline.md)
-- [ ] Verify + document client support: Zed, OpenAI Codex CLI, Windsurf, Continue.dev
-- [ ] Platform import (`npx gaussian-memory import --from mem0`)
+### State Checkpointing (~1-2 weeks)
+- [ ] `checkpoints` table in D1: `agent_id`, `task_id`, `step`, `state_json`, `timestamp`
+- [ ] Serialize agent context (tool calls made, intermediate results, next step) at each step
+- [ ] Resume from checkpoint on failure or cross-agent handoff
+
+### Inter-Agent Messaging (~2-3 weeks)
+- [ ] Message queue in D1 or Cloudflare Queues: `from_agent`, `to_agent`, `payload`, `status`
+- [ ] Routing layer to dispatch messages to the right agent
+- [ ] Session bus / `handoffs` table as cross-LLM coordination layer
+
+### Orchestration — Durable Objects (~3-4 weeks, hardest piece)
+- [ ] One Durable Object per agent instance — persistent state, communicates with other DOs
+- [ ] Spawn sub-agents, pass context, await results
+- [ ] Model routing: hard tasks → Opus, fast/cheap → DeepSeek, both share memory ground truth
+
+### Broader Agent OS
+- [ ] Universal Hooks Protocol — spec + per-agent adapters normalizing agent events to common schema
+- [ ] Browser extension — tool calling: marker approach or wait for remote MCP support
+- [ ] Browser extension — Gemini + ChatGPT support (protobuf parsing needed for Gemini)
+- [ ] DO hosted version (per-user isolation, free beta → $1-2/month)
+- [ ] Rebrand (Mnemo taken, need new name)
