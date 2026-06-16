@@ -208,7 +208,7 @@ export async function refreshDomainSummary(domainName: string, newCount: number,
   const facts = ((fallback ?? rows).results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+  const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
     messages: [
       { role: 'system', content: `Summarize what this person knows, does, or prefers specifically in the "${domainName}" domain. Focus only on what distinguishes this domain from others. 2 sentences, specific and factual. No speculation or preamble.` },
       { role: 'user', content: facts },
@@ -241,11 +241,11 @@ export async function classifyBatchDomains(
     if (Date.now() - startTime > timeBudgetMs) break;
     const group = texts.slice(g, g + GROUP);
     const numbered = group.map((t, j) => `${j + 1}. ${t.slice(0, 150)}`).join('\n');
-    const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+    const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
       messages: [
         {
           role: 'system',
-          content: `Classify each memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+          content: `Classify each memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, or PERSON — never a generic activity.\nGOOD: "gaussian-memory-dev", "loreal-internship", "color-wow-agents", "career-job-search", "stat-416"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
         },
         { role: 'user', content: numbered },
       ],

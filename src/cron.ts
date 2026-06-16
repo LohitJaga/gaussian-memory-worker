@@ -345,7 +345,7 @@ export async function synthesizeIdentityProfile(env: Env): Promise<void> {
   const facts = (rows.results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+  const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
     messages: [
       {
         role: 'system',
@@ -388,7 +388,7 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
     const batch = cold.slice(i, i + BATCH);
     const summaries = await Promise.all(batch.map(async row => {
       try {
-        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
           messages: [
             { role: 'system', content: 'Summarize the following memory in one concise sentence. Return only the sentence.' },
             { role: 'user', content: row.text },
