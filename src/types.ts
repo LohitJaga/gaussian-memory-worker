@@ -5,4 +5,5 @@ export interface Env {
   KV: KVNamespace;
   R2: R2Bucket;
   AUTH_TOKEN?: string;
+  WORKER_URL?: string;
 }
