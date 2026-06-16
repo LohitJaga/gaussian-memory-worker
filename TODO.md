@@ -8,6 +8,9 @@ Open source + blog post + one-command setup. Not commercial, not hosted.
 
 ## Priority 1 — Do before July 1
 
+### Pending — Do Tomorrow (2026-06-17)
+- [ ] Full wipe domain rebuild (`targeted=false`) — personal-life + leetcode-practice seeds added but scattered memories still in wrong domains; need full pass to fix
+
 ### Infrastructure / Quality
 - [ ] Benchmarking — retrieval latency (p50/p95), scoring quality on labeled query set, D1 query count per retrieve call
 

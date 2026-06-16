@@ -1,5 +1,6 @@
 import type { Env } from './types';
 import { TOOLS, handleToolCall } from './tools';
+import { embed } from './embed';
 import {
   pruneJunkMemories, updateDecay, deduplicateRecentMemories,
   deduplicateColdMemories, cleanupSingletons, refreshStaleDomainSummaries,
@@ -38,6 +39,28 @@ export default {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: JSON_HEADERS });
       }
       return handleVizData(env);
+    }
+
+    if (request.method === 'POST' && url.pathname === '/admin/seed-domains') {
+      const apiKey = (request.headers.get('Authorization') ?? '').replace('Bearer ', '');
+      if (apiKey !== (env.AUTH_TOKEN ?? '')) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: JSON_HEADERS });
+      }
+      const body: { clear?: boolean; seeds: { name: string; text: string }[] } = await request.json();
+      if (body.clear) await env.DB.prepare('DELETE FROM domain_anchors').run();
+      const results: string[] = [];
+      for (const seed of body.seeds) {
+        try {
+          const mu = await embed(seed.text, env);
+          await env.DB.prepare(
+            'INSERT OR REPLACE INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, 0, 0)'
+          ).bind(seed.name, JSON.stringify(Array.from(mu))).run();
+          results.push(`seeded: ${seed.name}`);
+        } catch (e: any) {
+          results.push(`failed: ${seed.name} — ${e?.message}`);
+        }
+      }
+      return new Response(JSON.stringify({ results }), { headers: JSON_HEADERS });
     }
 
     if (request.method !== 'POST') {
@@ -261,8 +284,23 @@ window.addEventListener('resize', () => { resize(); draw(); });
 
 async function load() {
   const url = WORKER + '/viz/data?key=' + encodeURIComponent(KEY);
-  const res = await fetch(url);
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const txt = await res.text();
+      showError('Fetch failed: ' + res.status + ' — ' + txt.slice(0, 120));
+      return;
+    }
+    data = await res.json();
+  } catch(e) {
+    showError('Network error: ' + e.message);
+    return;
+  }
+  if (!data.nodes?.length) {
+    showError('No memory data found in D1. Store some memories first.');
+    return;
+  }
 
   // Aggregate nodes by domain
   const domainMap = new Map();
@@ -273,20 +311,28 @@ async function load() {
     d.types.add(r.memory_type);
     domainMap.set(r.domain, d);
   }
-  nodes = Array.from(domainMap.values()).map(d => ({
-    ...d,
-    activation: d.activation / d.count,
-    x: W/2 + (Math.random()-0.5)*300,
-    y: H/2 + (Math.random()-0.5)*300,
-    vx: 0, vy: 0,
-    r: Math.max(14, Math.min(52, 10 + d.count * 2.5)),
-    color: colorFor(d.domain),
-  }));
+  const nodeList = Array.from(domainMap.values());
+  // Spread initial positions evenly around a circle so sim has room to work
+  nodes = nodeList.map((d, i) => {
+    const angle = (i / nodeList.length) * Math.PI * 2;
+    const radius = Math.min(W, H) * 0.32;
+    return {
+      ...d,
+      activation: d.activation / d.count,
+      x: W/2 + Math.cos(angle) * radius,
+      y: H/2 + Math.sin(angle) * radius,
+      vx: 0, vy: 0,
+      r: Math.max(18, Math.min(48, 12 + d.count * 3)),
+      color: colorFor(d.domain),
+    };
+  });
 
-  edges = data.edges.filter(e => e.source !== e.target).map(e => ({
-    ...e,
-    opacity: Math.min(0.7, 0.1 + e.weight / Math.max(1, e.count) * 0.6),
-  }));
+  // Only keep top edges to avoid everything collapsing to center
+  edges = data.edges
+    .filter(e => e.source !== e.target)
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 30)
+    .map(e => ({ ...e, opacity: Math.min(0.5, 0.08 + e.weight * 0.3) }));
 
   simulate();
 }
@@ -295,38 +341,40 @@ function simulate() {
   let iter = 0;
   function step() {
     const alpha = Math.max(0.001, 0.3 * Math.pow(0.97, iter++));
-    // Repulsion
+    // Repulsion — strong enough to keep nodes separated
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i+1; j < nodes.length; j++) {
-        const dx = nodes[j].x - nodes[i].x, dy = nodes[j].y - nodes[i].y;
-        const d2 = dx*dx + dy*dy || 1;
-        const force = (nodes[i].r + nodes[j].r + 60)**2 / d2 * 0.5;
-        nodes[i].vx -= dx/Math.sqrt(d2)*force*alpha;
-        nodes[i].vy -= dy/Math.sqrt(d2)*force*alpha;
-        nodes[j].vx += dx/Math.sqrt(d2)*force*alpha;
-        nodes[j].vy += dy/Math.sqrt(d2)*force*alpha;
+        const dx = nodes[j].x - nodes[i].x || 0.1, dy = nodes[j].y - nodes[i].y || 0.1;
+        const d = Math.sqrt(dx*dx + dy*dy) || 1;
+        const minDist = nodes[i].r + nodes[j].r + 80;
+        if (d < minDist) {
+          const force = (minDist - d) / d * 0.6 * alpha;
+          nodes[i].vx -= dx * force; nodes[i].vy -= dy * force;
+          nodes[j].vx += dx * force; nodes[j].vy += dy * force;
+        }
       }
     }
-    // Attraction along edges
+    // Weak attraction along edges only
     for (const e of edges) {
       const a = nodes.find(n => n.domain === e.source);
       const b = nodes.find(n => n.domain === e.target);
       if (!a || !b) continue;
       const dx = b.x - a.x, dy = b.y - a.y;
       const d = Math.sqrt(dx*dx+dy*dy) || 1;
-      const target = (a.r + b.r) * 3;
-      const f = (d - target) / d * 0.05 * alpha * e.weight;
-      a.vx += dx*f; a.vy += dy*f;
-      b.vx -= dx*f; b.vy -= dy*f;
+      const target = (a.r + b.r) * 4;
+      if (d > target) {
+        const f = (d - target) / d * 0.02 * alpha;
+        a.vx += dx*f; a.vy += dy*f;
+        b.vx -= dx*f; b.vy -= dy*f;
+      }
     }
     // Center gravity
     for (const n of nodes) {
-      n.vx += (W/2 - n.x) * 0.005 * alpha;
-      n.vy += (H/2 - n.y) * 0.005 * alpha;
-      n.vx *= 0.85; n.vy *= 0.85;
-      n.x += n.vx; n.y += n.vy;
-      n.x = Math.max(n.r+10, Math.min(W-n.r-10, n.x));
-      n.y = Math.max(n.r+10, Math.min(H-n.r-10, n.y));
+      n.vx += (W/2 - n.x) * 0.003 * alpha;
+      n.vy += (H/2 - n.y) * 0.003 * alpha;
+      n.vx *= 0.82; n.vy *= 0.82;
+      n.x = Math.max(n.r+20, Math.min(W-n.r-20, n.x + n.vx));
+      n.y = Math.max(n.r+20, Math.min(H-n.r-20, n.y + n.vy));
     }
     draw();
     if (alpha > 0.001) requestAnimationFrame(step);
@@ -350,28 +398,40 @@ function draw() {
   }
   // Nodes
   for (const n of nodes) {
-    // Glow
-    const glow = ctx.createRadialGradient(n.x, n.y, n.r*0.3, n.x, n.y, n.r*1.8);
-    glow.addColorStop(0, n.color + '33');
+    // Outer glow
+    ctx.globalAlpha = 0.25;
+    const glow = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r * 2.2);
+    glow.addColorStop(0, n.color);
     glow.addColorStop(1, 'transparent');
-    ctx.beginPath(); ctx.arc(n.x, n.y, n.r*1.8, 0, Math.PI*2);
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r * 2.2, 0, Math.PI * 2);
     ctx.fillStyle = glow; ctx.fill();
-    // Node
-    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI*2);
-    ctx.fillStyle = n.color + '22';
+    // Node fill
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    ctx.fillStyle = n.color;
+    ctx.fill();
+    // Node border
+    ctx.globalAlpha = 1;
     ctx.strokeStyle = n.color;
-    ctx.lineWidth = 1.5;
-    ctx.fill(); ctx.stroke();
+    ctx.lineWidth = 2;
+    ctx.stroke();
     // Label
-    ctx.fillStyle = '#e2e8f0';
-    ctx.font = \`\${Math.max(9, Math.min(12, n.r * 0.55))}px -apple-system, sans-serif\`;
+    ctx.fillStyle = '#f1f5f9';
+    ctx.font = \`bold \${Math.max(9, Math.min(11, n.r * 0.45))}px -apple-system, sans-serif\`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const label = n.domain.replace(/-/g,' ');
-    ctx.fillText(label, n.x, n.y);
+    const words = n.domain.replace(/-/g,' ').split(' ');
+    if (words.length > 2) {
+      ctx.fillText(words.slice(0,2).join(' '), n.x, n.y - 6);
+      ctx.fillText(words.slice(2).join(' '), n.x, n.y + 6);
+    } else {
+      ctx.fillText(words.join(' '), n.x, n.y);
+    }
     // Count badge
-    ctx.fillStyle = n.color + 'aa';
-    ctx.font = '9px sans-serif';
-    ctx.fillText(n.count, n.x, n.y + n.r + 9);
+    ctx.globalAlpha = 0.8;
+    ctx.fillStyle = n.color;
+    ctx.font = '10px sans-serif';
+    ctx.fillText(n.count + ' mem', n.x, n.y + n.r + 13);
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -392,6 +452,14 @@ canvas.addEventListener('mousemove', e => {
   }
 });
 canvas.addEventListener('mouseleave', () => { tooltip.style.opacity = '0'; });
+
+function showError(msg) {
+  ctx.fillStyle = '#475569';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(msg, W/2, H/2);
+}
 
 load();
 </script>

@@ -58,7 +58,7 @@ export async function processPendingEntityQueue(env: Env): Promise<void> {
     await env.KV.put('pending_entity_queue', JSON.stringify(queue));
     const now = Math.floor(Date.now() / 1000);
     for (const item of batch) {
-      const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+      const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
         messages: [
           { role: 'system', content: `Extract named entities. Return ONLY a JSON array of "type:name" strings. Max 4. Types: tool, project, concept, parameter, person. Return [] if none. Example: ["tool:GLM-4.7-flash","concept:spreading activation"]` },
           { role: 'user', content: item.text },

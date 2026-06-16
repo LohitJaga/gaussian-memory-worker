@@ -321,7 +321,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       if (args.context) {
         try {
           const enrichResult = await Promise.race([
-            env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+            env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
               messages: [
                 {
                   role: 'system',
@@ -446,7 +446,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
       // Ask Llama to describe the change semantically in one sentence
       // Llama 3.1 8B for diff description — GLM fails on short/minimal diffs (returns {})
-      const descResult = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+      const descResult = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
         messages: [
           {
             role: 'system',
@@ -504,7 +504,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           && results[0].score > 0.85
           && (results[0].score - results[1].score) < 0.04) {
         const blendInput = results.slice(0, 3).map(r => r.text).join('\n');
-        const blend = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+        const blend = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
           messages: [
             { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
             { role: 'user', content: blendInput },
@@ -1299,7 +1299,7 @@ Return ONLY valid JSON array:
       }
 
       const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 150)}`).join('\n');
-      const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+      const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
         messages: [
           {
             role: 'system',
@@ -1377,7 +1377,7 @@ Example: [["tool:GLM-4.7-flash","concept:spreading activation"],["project:Gaussi
 
       const projectList = PROJECTS.map(p => `- ${p}`).join('\n');
       const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 120)}`).join('\n');
-      const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct' as any, {
+      const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
         messages: [
           {
             role: 'system',
