@@ -95,8 +95,12 @@ export async function classifyDomainWithLlama(text: string, env: Env, precompute
 RULES (follow strictly):
 1. ALWAYS pick from the existing domain list if ANY of them reasonably fits — even loosely.
 2. Only create a new domain if the memory is completely unrelated to ALL existing domains.
-3. New domain names must be 2-4 lowercase hyphenated words. NO single words. NO verbs. NO leading hyphens. NO punctuation. Examples: "gaussian-memory-dev", "loreal-internship", "career-goals".
-4. Never output a domain that starts with "-" or contains uppercase letters or spaces.
+3. Domain names must name a PROJECT, TOOL, or PERSON — not a generic activity.
+   GOOD: "gaussian-memory-dev", "loreal-internship", "color-wow-agents", "career-goals", "purdue-coursework", "cloudflare-workers"
+   BAD: "data-preprocessing", "homework-submission", "exam-preparation", "data-manipulation", "file-management"
+   If the memory is about a specific project or tool, name the domain after THAT project/tool.
+   If it's about a course or subject, name it after the subject: "probability-theory", "stat-416", not "exam-preparation".
+4. New domain names: 2-4 lowercase hyphenated words. NO uppercase, NO spaces, NO leading hyphens.
 5. When in doubt, pick the closest existing domain.
 
 Existing domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}
