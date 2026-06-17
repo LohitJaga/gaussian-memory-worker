@@ -51,7 +51,12 @@ cross-session + cross-LLM ground truth, edge-native BYOC.
 ### Browser extension — memory in consumer web LLMs (eve does NOT touch this — wide open)
 - [x] Claude.ai — working (fetch intercept: inject memories + GM tools, capture/store, UI scrub)
 - [ ] ChatGPT (chatgpt.com/backend-api/conversation — JSON, doable: context inject + capture; tools not feasible on their web)
-- [ ] Gemini (gemini.google.com — batchexecute/protobuf payloads, hard; later)
+- [ ] Gemini (gemini.google.com) — HARDER THAN EXPECTED (probed 2026-06-17):
+      (1) Gemini uses **XMLHttpRequest, not fetch** — our window.fetch hook never fires;
+          need to also wrap XMLHttpRequest.prototype.open/send.
+      (2) prompt is in a URL-encoded **nested-array f.req** blob (protobuf-ish), not JSON —
+          parse by position, splice memory block, re-encode. Brittle.
+      Real build, not a quick port. Keep as "coming soon" for launch.
 - [ ] Ship as the headline demo: "memory that follows you across Claude, ChatGPT, your coding agents"
 
 ### Be the memory layer for frameworks
