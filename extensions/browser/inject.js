@@ -10,6 +10,7 @@
     claude: /\/api\/organizations\/[^/]+\/chat_conversations\/[^/]+\/completion/,
     claudeConv: /\/api\/organizations\/[^/]+\/chat_conversations\/[^/]+/,
     chatgpt: /\/backend-api\/(f\/)?conversation$/,   // ChatGPT send-message endpoint (POST, SSE)
+    gemini: /(StreamGenerate|GenerateContent|batchexecute|assistant\.lamda)/,  // Gemini web RPC (nested-array f.req payload)
   };
 
   // ── GM tool definitions injected into every completion request ─────────────
@@ -463,6 +464,37 @@
     if (method === 'GET' && PATTERNS.claudeConv.test(url) && !PATTERNS.claude.test(url)) {
       const response = await originalFetch(input, init);
       return scrubConversationResponse(response);
+    }
+
+    // ── Gemini: PROBE ONLY — log the payload shape so we can design injection ──
+    // Gemini's web RPC sends the prompt buried in a URL-encoded nested-array
+    // `f.req` blob, not JSON. Step 1 is just understanding it. Pass-through.
+    if (method === 'POST' && PATTERNS.gemini.test(url)) {
+      try {
+        const req = input instanceof Request ? input.clone() : new Request(input, init);
+        const ct = req.headers.get('content-type') || '';
+        const raw = await req.text();
+        console.log('[GM][gemini] URL:', url);
+        console.log('[GM][gemini] content-type:', ct, '| body length:', raw.length);
+        // Most Gemini calls are form-encoded with an f.req param holding the array
+        let freq = null;
+        try {
+          const params = new URLSearchParams(raw);
+          freq = params.get('f.req');
+        } catch {}
+        if (freq) {
+          console.log('[GM][gemini] f.req (first 1500):', freq.slice(0, 1500));
+          try {
+            const outer = JSON.parse(freq);
+            console.log('[GM][gemini] parsed f.req structure:', outer);
+          } catch (e) { console.log('[GM][gemini] f.req not directly JSON:', e.message); }
+        } else {
+          console.log('[GM][gemini] no f.req param. raw (first 1500):', raw.slice(0, 1500));
+        }
+      } catch (e) {
+        console.log('[GM][gemini] probe error:', e.message);
+      }
+      return originalFetch(input, init);   // never modify yet — probe only
     }
 
     // ── ChatGPT: context-injection + capture (no tools on their web) ──
