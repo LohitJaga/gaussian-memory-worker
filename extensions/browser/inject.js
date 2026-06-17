@@ -288,13 +288,17 @@
 
   function tapClaudeStream(response) {
     if (!response.body) return response;
-    const [streamForCaller, streamForCapture] = response.body.tee();
-    captureClaudeSSE(streamForCapture);
-    return new Response(streamForCaller, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
+    try {
+      const [streamForCaller, streamForCapture] = response.body.tee();
+      captureClaudeSSE(streamForCapture);
+      return new Response(streamForCaller, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch {
+      return response;   // tee/capture failed — never re-fetch (would duplicate the POST)
+    }
   }
 
   function captureClaudeSSE(stream) {
@@ -418,14 +422,17 @@
     const decoder = new TextDecoder();
     let buffer = '';
     let assistant = '';
+    let stored = false;
+    function flush() {
+      if (stored) return;            // store the turn exactly once ([DONE] or stream end)
+      stored = true;
+      storeTurn('chatgpt', lastUserQuery.chatgpt, assistant);
+      assistant = '';
+    }
     function handle(line) {
       if (!line.startsWith('data: ')) return;
       const payload = line.slice(6).trim();
-      if (payload === '[DONE]') {
-        storeTurn('chatgpt', lastUserQuery.chatgpt, assistant);
-        assistant = '';
-        return;
-      }
+      if (payload === '[DONE]') { flush(); return; }
       let json; try { json = JSON.parse(payload); } catch { return; }
       // Full-message format: message.content.parts (assistant)
       const role = json?.message?.author?.role;
@@ -441,7 +448,7 @@
     }
     function read() {
       reader.read().then(({ done, value }) => {
-        if (done) { storeTurn('chatgpt', lastUserQuery.chatgpt, assistant); return; }
+        if (done) { flush(); return; }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
@@ -558,6 +565,7 @@
         return tapClaudeStream(response);
       } catch(e) {
         console.log('[GM] error:', e.message);
+        return originalFetch(input, init);   // pre-dispatch failure — send original unmodified
       }
     }
 
