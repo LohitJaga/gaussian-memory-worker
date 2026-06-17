@@ -61,6 +61,16 @@ Don't blind-build aggressive deletion — verify first, prefer non-destructive.
 ### Blog
 - [ ] Blog post (outline at Downloads/blog_post_outline.md)
 
+### Quality / Testing
+- [ ] E2E coverage for remaining tools: `memory_auto_store`, `memory_extract_and_store`, `memory_store_decision`, `memory_store_diff`, `memory_list`, `memory_timeline`, `memory_belief_drift` / `backfill`, `memory_orphan_check`, `memory_judge`, `memory_capture_passive`, `memory_update`, `memory_delete`, `identity_profile_get/set`, domain rebuild/retag/build_entities
+- [ ] Retrieval edge case tests: empty query, domain filter, `synthesize=true`, temporal queries (`yesterday`, `this week`), entity boost
+- [ ] Unit tests for `src/domain.ts` — classification accuracy + centroid management
+- [ ] Unit tests for `src/storage.ts` — Kalman merge correctness, contradiction detection
+- [ ] Unit tests for `src/retrieval.ts` — RRF fusion, sigma gating, spreading activation
+- [ ] Clean up dead code in `extensions/browser/inject.js`: `GM_TOOLS`, `GM_TOOL_NAMES`, `injectGMTools()`, `injectToolResults()` — unused since Claude tools were dropped; keeping them implies they're active
+- [x] Fixed duplicate-POST bug: guarded `tapClaudeStream` (tee failure returns raw response, never re-fetches) + explicit return in Claude catch for pre-dispatch errors (2026-06-17)
+- [x] Fixed double-store: `captureChatGPTSSE` now stores the turn exactly once via a `stored` flag / `flush()` ([DONE] or stream end) (2026-06-17)
+
 ### Polish
 - [ ] Platform import (`npx gaussian-memory import --from mem0`)
 
