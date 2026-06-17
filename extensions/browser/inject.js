@@ -499,21 +499,10 @@
         const bodyText = await req.text();
         const body = JSON.parse(bodyText);
 
-        // Inject tool results from previous tool_use if any are pending
-        if (pendingToolResults.size > 0 || pendingToolPromises.size > 0) {
-          // Wait for any in-flight tool calls to resolve first
-          if (pendingToolPromises.size > 0) {
-            await Promise.race([
-              Promise.all([...pendingToolPromises.values()]),
-              new Promise(r => setTimeout(r, 8000)),
-            ]);
-          }
-          injectToolResults(body);
-        }
-
-        // Inject GM tool definitions
-        injectGMTools(body);
-        console.log('[GM] tools injected, total:', body.tools.length, '| GM tools:', body.tools.filter(t => GM_TOOL_NAMES.has(t.name)).length);
+        // NOTE: GM tool injection removed. Claude.ai is a chat UI, not an API
+        // client — when the model emits a tool_use we can't return a tool_result
+        // in-band, so it hangs ("Working…") until the next message. We rely purely
+        // on context-injection + turn capture, identical to the ChatGPT path.
 
         // Retrieve and inject memory context for substantive queries
         const query = extractClaudeQuery(body);
