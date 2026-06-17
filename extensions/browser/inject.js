@@ -9,6 +9,7 @@
   const PATTERNS = {
     claude: /\/api\/organizations\/[^/]+\/chat_conversations\/[^/]+\/completion/,
     claudeConv: /\/api\/organizations\/[^/]+\/chat_conversations\/[^/]+/,
+    chatgpt: /\/backend-api\/(f\/)?conversation$/,   // ChatGPT send-message endpoint (POST, SSE)
   };
 
   // ── GM tool definitions injected into every completion request ─────────────
@@ -351,6 +352,95 @@
     read();
   }
 
+  // ── ChatGPT helpers ────────────────────────────────────────────────────────
+  // ChatGPT web has no injectable tools array, so we do context-injection +
+  // capture only: prepend retrieved memories to the outgoing user message, and
+  // store the user message. Body is JSON: { messages: [{author:{role}, content:{parts:[...]}}] }
+
+  function lastUserChatGPTMessage(body) {
+    if (!Array.isArray(body.messages)) return null;
+    for (let i = body.messages.length - 1; i >= 0; i--) {
+      const m = body.messages[i];
+      const role = m?.author?.role || m?.role;
+      if (role === 'user') return m;
+    }
+    return null;
+  }
+
+  function extractChatGPTQuery(body) {
+    try {
+      const m = lastUserChatGPTMessage(body);
+      const parts = m?.content?.parts;
+      if (Array.isArray(parts)) {
+        return parts.filter(p => typeof p === 'string').join(' ').slice(-500);
+      }
+    } catch {}
+    return '';
+  }
+
+  function injectChatGPTMemories(body, memories) {
+    if (!memories) return body;
+    const block = `[Gaussian Memory — context from past sessions]\n${memories}\n[End Memory Context]\n\n`;
+    const m = lastUserChatGPTMessage(body);
+    if (m && m.content && Array.isArray(m.content.parts) && m.content.parts.length) {
+      const i = m.content.parts.findIndex(p => typeof p === 'string');
+      if (i !== -1) m.content.parts[i] = block + m.content.parts[i];
+      else m.content.parts.unshift(block);
+    }
+    return body;
+  }
+
+  // Best-effort assistant capture from ChatGPT SSE (delta format varies; never throw)
+  function tapChatGPTStream(response) {
+    if (!response.body) return response;
+    try {
+      const [forCaller, forCapture] = response.body.tee();
+      captureChatGPTSSE(forCapture);
+      return new Response(forCaller, {
+        status: response.status, statusText: response.statusText, headers: response.headers,
+      });
+    } catch { return response; }
+  }
+
+  function captureChatGPTSSE(stream) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let assistant = '';
+    function handle(line) {
+      if (!line.startsWith('data: ')) return;
+      const payload = line.slice(6).trim();
+      if (payload === '[DONE]') {
+        if (assistant.length > 120) storeMemory(assistant.slice(0, 1200), 'chatgpt');
+        assistant = '';
+        return;
+      }
+      let json; try { json = JSON.parse(payload); } catch { return; }
+      // Full-message format: message.content.parts (assistant)
+      const role = json?.message?.author?.role;
+      const parts = json?.message?.content?.parts;
+      if (role === 'assistant' && Array.isArray(parts)) {
+        const txt = parts.filter(p => typeof p === 'string').join('');
+        if (txt.length > assistant.length) assistant = txt;  // ChatGPT resends growing full text
+      }
+      // Delta format: { v: "...", p: "/message/content/parts/0", o: "append" }
+      else if (typeof json?.v === 'string' && (!json.p || json.p.includes('parts'))) {
+        assistant += json.v;
+      }
+    }
+    function read() {
+      reader.read().then(({ done, value }) => {
+        if (done) { if (assistant.length > 120) storeMemory(assistant.slice(0, 1200), 'chatgpt'); return; }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const l of lines) handle(l.trim());
+        read();
+      }).catch(() => {});
+    }
+    read();
+  }
+
   // ── Fetch interceptor ──────────────────────────────────────────────────────
 
   const originalFetch = window.fetch.bind(window);
@@ -363,6 +453,34 @@
     if (method === 'GET' && PATTERNS.claudeConv.test(url) && !PATTERNS.claude.test(url)) {
       const response = await originalFetch(input, init);
       return scrubConversationResponse(response);
+    }
+
+    // ── ChatGPT: context-injection + capture (no tools on their web) ──
+    if (method === 'POST' && PATTERNS.chatgpt.test(url)) {
+      try {
+        const req = input instanceof Request ? input.clone() : new Request(input, init);
+        const bodyText = await req.text();
+        const body = JSON.parse(bodyText);
+
+        const query = extractChatGPTQuery(body);
+        if (query && query.trim().length >= 60) {
+          storeMemory(query);
+          const memories = await retrieveMemories(query);
+          if (memories) injectChatGPTMemories(body, memories);
+        }
+
+        const headers = new Headers(req.headers);
+        headers.delete('content-length');
+        const response = await originalFetch(url, {
+          method: req.method, headers, body: JSON.stringify(body),
+          credentials: req.credentials, mode: req.mode, cache: req.cache,
+        });
+        startScrubWindow();
+        return tapChatGPTStream(response);
+      } catch (e) {
+        console.log('[GM] chatgpt error:', e.message);
+        return originalFetch(input, init);
+      }
     }
 
     if (PATTERNS.claude.test(url)) {

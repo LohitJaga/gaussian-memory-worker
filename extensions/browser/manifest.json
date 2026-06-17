@@ -2,23 +2,25 @@
   "manifest_version": 3,
   "name": "Gaussian Memory",
   "version": "0.1.0",
-  "description": "Persistent Bayesian memory layer — works across Claude.ai, Gemini, and your coding agents",
+  "description": "Persistent Bayesian memory layer — works across Claude.ai, ChatGPT, and your coding agents",
   "permissions": ["storage"],
   "host_permissions": [
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://claude.ai/*"],
+      "matches": ["https://claude.ai/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["inject.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://claude.ai/*"],
+      "matches": ["https://claude.ai/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["content.js"],
       "run_at": "document_start"
     }
