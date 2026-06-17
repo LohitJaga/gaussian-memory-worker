@@ -39,8 +39,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'STORE') {
     getConfig().then(cfg => {
       if (!cfg.workerUrl || cfg.enabled === false) return;
-      // No project — lands in 'default', same pool as RETRIEVE and Claude Code
-      callWorker(cfg.workerUrl, cfg.authToken || '', 'memory_auto_store', { text: msg.text }).catch(() => {});
+      // Unified with the Claude Code path: send the whole turn through the LLM
+      // extraction/distillation step (memory_extract_and_store), NOT raw auto_store.
+      // This filters filler and stores clean facts instead of verbatim messages.
+      // No project — lands in 'default', same pool as RETRIEVE and Claude Code.
+      callWorker(cfg.workerUrl, cfg.authToken || '', 'memory_extract_and_store', { log_text: msg.text }).catch(() => {});
     });
     return false;
   }

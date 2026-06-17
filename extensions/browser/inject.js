@@ -111,6 +111,18 @@
     window.postMessage({ type: 'GM_STORE', text }, '*');
   }
 
+  // Unified capture: store a whole user+assistant TURN, scrubbed of the injected
+  // memory block, routed (via background.js) through memory_extract_and_store —
+  // the same LLM-distillation path Claude Code uses. Avoids raw verbatim noise.
+  const lastUserQuery = { claude: '', chatgpt: '' };
+  function storeTurn(platform, userText, assistantText) {
+    const u = (userText || '').replace(GM_HIDE_RE, '').trim();
+    const a = (assistantText || '').replace(GM_HIDE_RE, '').trim();
+    const log = `[User]: ${u.slice(0, 800)}\n[Assistant]: ${a.slice(0, 1500)}`;
+    if (log.length < 150) return;   // not enough signal to bother extracting
+    storeMemory(log);               // → GM_STORE → memory_extract_and_store
+  }
+
   // ── Pending tool results (tool_use_id → result string) ─────────────────────
 
   const pendingToolResults = new Map(); // tool_use_id → result string (resolved async)
@@ -332,9 +344,7 @@
       }
 
       if (type === 'message_stop') {
-        if (assistantText.length > 120) {
-          storeMemory(assistantText.slice(0, 1200), 'claude-ai');
-        }
+        storeTurn('claude', lastUserQuery.claude, assistantText);
         assistantText = '';
       }
     }
@@ -411,7 +421,7 @@
       if (!line.startsWith('data: ')) return;
       const payload = line.slice(6).trim();
       if (payload === '[DONE]') {
-        if (assistant.length > 120) storeMemory(assistant.slice(0, 1200), 'chatgpt');
+        storeTurn('chatgpt', lastUserQuery.chatgpt, assistant);
         assistant = '';
         return;
       }
@@ -430,7 +440,7 @@
     }
     function read() {
       reader.read().then(({ done, value }) => {
-        if (done) { if (assistant.length > 120) storeMemory(assistant.slice(0, 1200), 'chatgpt'); return; }
+        if (done) { storeTurn('chatgpt', lastUserQuery.chatgpt, assistant); return; }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
@@ -464,7 +474,7 @@
 
         const query = extractChatGPTQuery(body);
         if (query && query.trim().length >= 60) {
-          storeMemory(query);
+          lastUserQuery.chatgpt = query;   // captured as a turn after the response (extract path)
           const memories = await retrieveMemories(query);
           if (memories) injectChatGPTMemories(body, memories);
         }
@@ -508,7 +518,7 @@
         // Retrieve and inject memory context for substantive queries
         const query = extractClaudeQuery(body);
         if (query && query.trim().length >= 60) {
-          storeMemory(query);
+          lastUserQuery.claude = query;   // captured as a turn after the response (extract path)
           const memories = await retrieveMemories(query);
           if (memories) injectClaudeMemories(body, memories);
         }
