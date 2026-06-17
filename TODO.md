@@ -4,13 +4,32 @@
 BYOC model: users deploy to their own Cloudflare account, pay their own $5/month, own their data.
 Open source + blog post + one-command setup. Not commercial, not hosted.
 
-## Thesis (sharpened after Vercel eve, 2026-06-17)
+## Thesis
 **The memory layer for any agent or any LLM — including eve.**
 eve (and every agent framework) ships execution, sandbox, orchestration, tracing — but
 *no persistent semantic memory*. That gap is the whole product. Don't compete on agent
-infrastructure (eve owns it); be the portable, vendor-neutral memory layer that plugs into
-all of them. Differentiators: Bayesian/Gaussian uncertainty (memories sharpen/decay),
-cross-session + cross-LLM ground truth, edge-native BYOC.
+infrastructure; be the portable, vendor-neutral memory layer that plugs into all of them.
+Differentiators: Bayesian/Gaussian uncertainty (memories sharpen/decay), cross-session +
+cross-LLM ground truth, edge-native BYOC.
+
+---
+
+## DO TOMORROW (2026-06-18) — Decay
+Don't blind-build aggressive deletion — verify first, prefer non-destructive.
+- [ ] **Verify the problem exists first:** run ~5 real retrievals against the live pool; do cold/old
+      memories actually surface and pollute, or is recency weighting (0.25) already burying them?
+      If retrieval is already clean → decay is NOT the priority, deprioritize this.
+- [ ] If junk surfaces → **soft-forget (no delete):** replace `decaySigma = s+delta` (flat, not
+      time-aware) with a forgetting-curve model:
+      `S = S0·(1+ln(access+1)); R = exp(−Δt/S); σ_target = floor + (ceil−floor)·(1−R)`
+      using `last_accessed` (NOT creation `timestamp` — current cron bug). Sets σ → retrieval
+      deprioritizes faded memories. Reversible.
+- [ ] Consider whether hard-delete (current prune at σ>2.0) should exist at all — Anki/FSRS never
+      delete. If kept: delete ONLY access_count=0 AND idle>45d AND σ>ceiling (sim: ~636 at S0=10d).
+      **Back up first** (`npx gaussian-memory backup`).
+- [ ] Alternative/simpler lever to consider: just retune retrieval scoring weights (favor recency/
+      sharpness) — directly fixes "recent wins" with zero deletion.
+- Sim done 2026-06-17: S0=5→prune 2422(46%), S0=7→1825(35%), S0=10→636(12%,all cold).
 
 ---
 
@@ -19,26 +38,27 @@ cross-session + cross-LLM ground truth, edge-native BYOC.
 ### Packaging (the real gap — building is mostly done, this isn't)
 - [ ] One-command setup (`npx gaussian-memory init`) — clean deploy to a stranger's own Cloudflare acct
 - [ ] Verify a fresh end-to-end install works (not just dogfooded on my own deployment)
-- [ ] README: thesis above + Bayesian/Gaussian differentiator, neuroscience angle, architecture diagram, competitor table (incl. where it sits vs eve/Mem0)
+- [ ] README: thesis + Bayesian/Gaussian differentiator, neuroscience angle, architecture diagram, competitor table (vs eve/Mem0)
 - [ ] One-line pitch + 1–2 hard numbers (see Benchmarking) so it's not forgettable
 
-### Benchmarking (define before running — need numbers for README/blog)
-- [ ] Latency — p50/p95 retrieve, Cloudflare edge vs Mem0 API roundtrip (quickest real number)
+### Benchmarking (need numbers for README/blog)
+- [ ] Latency — p50/p95 retrieve, edge vs Mem0 API roundtrip (quickest real number)
 - [ ] Token savings per call from caching (the resume-point metric)
 - [ ] Retrieval quality on a labeled query set
-- [ ] Identity coherence — 50 diverse queries, LLM-judge whether injected context forms a coherent self-consistent picture
-- [ ] Association fidelity — annotate 100 memory pairs as related, measure BFS precision/recall
-- [ ] Contradiction surface rate — how often retrieval injects directly conflicting memories (lower = better)
-- [ ] LoCoMo-style accuracy — comparable number vs MemArchitect's benchmark dataset
-- [ ] Reconstruction — given a query, how well injected memories reconstruct original context vs ground truth
+- [ ] Identity coherence — 50 queries, LLM-judge whether injected context is coherent
+- [ ] Association fidelity — 100 annotated pairs, BFS precision/recall
+- [ ] Contradiction surface rate (lower = better)
+- [ ] LoCoMo-style accuracy vs MemArchitect benchmark
+- [ ] Reconstruction — how well injected memories reconstruct original context
 
 ### Client Compatibility
-- [ ] Verify + document: Zed MCP support
-- [ ] Verify + document: OpenAI Codex / CLI MCP support
-- [ ] Verify + document: Windsurf, Continue.dev, other Claude Code alternatives
+- [ ] Verify + document MCP support: Zed, OpenAI Codex/CLI, Windsurf, Continue.dev
 - [ ] "Supported Clients" table in README once confirmed
 
-### Blog (after features stable)
+### Cleanup
+- [ ] One-time prune of old verbatim noise in the pool (pre-distillation junk: "Yeah, I do." etc.) — for clean demo retrievals
+
+### Blog
 - [ ] Blog post (outline at Downloads/blog_post_outline.md)
 
 ### Polish
@@ -46,21 +66,19 @@ cross-session + cross-LLM ground truth, edge-native BYOC.
 
 ---
 
-## Priority 2 — Reach (post-July, where the project actually grows now)
+## Priority 2 — Reach (post-July)
 
-### Browser extension — memory in consumer web LLMs (eve does NOT touch this — wide open)
-- [x] Claude.ai — working (fetch intercept: inject memories + GM tools, capture/store, UI scrub)
-- [ ] ChatGPT (chatgpt.com/backend-api/conversation — JSON, doable: context inject + capture; tools not feasible on their web)
-- [ ] Gemini (gemini.google.com) — HARDER THAN EXPECTED (probed 2026-06-17):
-      (1) Gemini uses **XMLHttpRequest, not fetch** — our window.fetch hook never fires;
-          need to also wrap XMLHttpRequest.prototype.open/send.
-      (2) prompt is in a URL-encoded **nested-array f.req** blob (protobuf-ish), not JSON —
-          parse by position, splice memory block, re-encode. Brittle.
-      Real build, not a quick port. Keep as "coming soon" for launch.
-- [ ] Ship as the headline demo: "memory that follows you across Claude, ChatGPT, your coding agents"
+### Browser extension — memory in consumer web LLMs
+- [x] Claude.ai — working (context-inject + turn capture via extract_and_store; tools dropped, they hung the chat UI)
+- [x] ChatGPT — working (context-inject + both-direction capture; verified live 2026-06-17)
+- [x] Unified both platforms on the extract/distill path (clean facts, not verbatim) — verified
+- [ ] Gemini — HARDER (probed 2026-06-17): (1) uses **XHR not fetch** → must also wrap
+      XMLHttpRequest.open/send; (2) prompt in URL-encoded **nested-array f.req** (protobuf-ish),
+      parse-by-position + re-encode. Real build, not a quick port. "Coming soon" for launch.
+- [ ] Chrome Web Store submission (or document "load unpacked" for dev-audience launch)
 
 ### Be the memory layer for frameworks
-- [ ] Vendor-neutral integration story / adapter so any agent framework (incl. eve) can use GM as its memory
+- [ ] Vendor-neutral adapter so any agent framework (incl. eve) can use GM as its memory
 - [ ] Universal hooks: normalize agent events to a common schema (portable, not Vercel-locked)
 
 ### Hosted (optional, later)
@@ -69,11 +87,13 @@ cross-session + cross-LLM ground truth, edge-native BYOC.
 
 ---
 
-## Dropped (2026-06-17) — eve owns this space, not worth building as a solo dev
-- ~~State checkpointing / durable execution~~ (Vercel Workflow)
-- ~~Inter-agent messaging / routing / session bus~~ (eve channels + subagents)
-- ~~Orchestration via Durable Objects (one DO per agent, spawn sub-agents)~~ (eve runtime)
-- ~~Model routing across agents~~ (eve agent.ts config)
-- ~~Sandboxed compute~~ (eve microVMs)
-Reason: this was the over-scoped, feasibility-risky part of the plan and never the
-differentiator. The moat is memory, which eve lacks. Refocus there.
+## Done (2026-06-17)
+- Domain rebuild — 5,244 memories cleanly classified into 17 real domains (no garbage)
+- D3 `/viz` galaxy — every memory as a point, Gaussian clouds per domain; Twitter-demo-ready
+- Browser extension: ChatGPT support + unified distillation path + dropped hanging Claude tools
+- Killed P2 "Agent OS" roadmap (eve owns it); refocused thesis on the memory layer
+- Diagnosed decay: fires but too gentle to prune (flat additive, not time-aware) → see DO TOMORROW
+
+## Dropped (eve owns this — not worth building solo)
+- ~~Agent OS: state checkpointing, inter-agent messaging, DO orchestration, model routing, sandboxed compute~~
+  (Vercel eve does all of it; the moat is memory, which eve lacks.)

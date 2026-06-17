@@ -236,11 +236,11 @@ function handleViz(env: Env): Response {
 <body>
 <div id="header">
   <h1>Gaussian Memory</h1>
-  <p>Domain activation graph — live from D1</p>
+  <p>Every memory, as a point — clustered into Gaussian domains · live from D1</p>
 </div>
 <div id="tooltip"><div class="domain"></div><div class="stat"></div></div>
 <div id="legend">
-  Node size = memory count &nbsp;·&nbsp; Edge weight = cross-domain relation confidence
+  Each point = one memory &nbsp;·&nbsp; Each cloud = a domain (2D Gaussian, spread ∝ √memories)
 </div>
 <canvas id="canvas"></canvas>
 <script>
@@ -248,16 +248,13 @@ const WORKER = ${JSON.stringify(workerUrl)};
 const KEY = new URLSearchParams(location.search).get('key') ?? '';
 
 const DOMAIN_COLORS = {
-  'data-preprocessing': '#818cf8',
-  'data-debugging': '#f472b6',
-  'data-analysis': '#34d399',
-  'career-goals': '#fbbf24',
-  'gaussian-memory-dev': '#a78bfa',
-  'sprint-presentation': '#f87171',
-  'loreal-internship': '#60a5fa',
-  'data-security': '#fb923c',
-  'data-visualization': '#2dd4bf',
-  'data-manipulation': '#c084fc',
+  // grouped by theme so related domains share a hue family
+  'gaussian-memory-dev': '#a78bfa', 'cloudflare-infra': '#c4b5fd', 'git-workflow': '#8b5cf6',
+  'loreal-internship': '#60a5fa', 'color-wow-agents': '#38bdf8', 'gchat-bot-dev': '#22d3ee', 'sql-analytics': '#2dd4bf',
+  'career-job-search': '#fbbf24', 'sprint-planning': '#f59e0b', 'pico-trading': '#fb923c',
+  'purdue-coursework': '#f472b6', 'stat-416': '#ec4899', 'leetcode-practice': '#e879f9',
+  'ml-pytorch': '#34d399', 'python-data-work': '#4ade80', 'bayer-datamine': '#f87171',
+  'personal-life': '#94a3b8',
 };
 function colorFor(domain) {
   if (DOMAIN_COLORS[domain]) return DOMAIN_COLORS[domain];
@@ -269,7 +266,7 @@ function colorFor(domain) {
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const tooltip = document.getElementById('tooltip');
-let nodes = [], edges = [], sim = null;
+let nodes = [], points = [];
 let W, H, dpr;
 
 function resize() {
@@ -311,135 +308,83 @@ async function load() {
     d.types.add(r.memory_type);
     domainMap.set(r.domain, d);
   }
-  const nodeList = Array.from(domainMap.values());
-  // Spread initial positions evenly around a circle so sim has room to work
-  nodes = nodeList.map((d, i) => {
-    const angle = (i / nodeList.length) * Math.PI * 2;
-    const radius = Math.min(W, H) * 0.32;
-    return {
-      ...d,
-      activation: d.activation / d.count,
-      x: W/2 + Math.cos(angle) * radius,
-      y: H/2 + Math.sin(angle) * radius,
-      vx: 0, vy: 0,
-      r: Math.max(18, Math.min(48, 12 + d.count * 3)),
-      color: colorFor(d.domain),
-    };
+  nodes = Array.from(domainMap.values())
+    .sort((a, b) => b.count - a.count)
+    .map(d => ({ ...d, activation: d.activation / Math.max(1, d.count),
+                 spread: 10 + Math.sqrt(d.count) * 2.2, color: colorFor(d.domain) }));
+
+  // Place cluster centers: biggest first, phyllotaxis spiral, then relax so
+  // clouds don't overlap (spacing ∝ each cloud's spread).
+  const GA = Math.PI * (3 - Math.sqrt(5));
+  const scale = Math.min(W, H) * 0.085;
+  nodes.forEach((n, i) => {
+    const rad = scale * Math.sqrt(i);
+    n.x = W/2 + Math.cos(i * GA) * rad;
+    n.y = H/2 + Math.sin(i * GA) * rad;
   });
-
-  // Only keep top edges to avoid everything collapsing to center
-  edges = data.edges
-    .filter(e => e.source !== e.target)
-    .sort((a, b) => b.weight - a.weight)
-    .slice(0, 30)
-    .map(e => ({ ...e, opacity: Math.min(0.5, 0.08 + e.weight * 0.3) }));
-
-  simulate();
-}
-
-function simulate() {
-  let iter = 0;
-  function step() {
-    const alpha = Math.max(0.001, 0.3 * Math.pow(0.97, iter++));
-    // Repulsion — strong enough to keep nodes separated
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i+1; j < nodes.length; j++) {
-        const dx = nodes[j].x - nodes[i].x || 0.1, dy = nodes[j].y - nodes[i].y || 0.1;
-        const d = Math.sqrt(dx*dx + dy*dy) || 1;
-        const minDist = nodes[i].r + nodes[j].r + 80;
-        if (d < minDist) {
-          const force = (minDist - d) / d * 0.6 * alpha;
-          nodes[i].vx -= dx * force; nodes[i].vy -= dy * force;
-          nodes[j].vx += dx * force; nodes[j].vy += dy * force;
-        }
-      }
+  for (let it = 0; it < 140; it++) {
+    for (let i = 0; i < nodes.length; i++) for (let j = i+1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j];
+      let dx = b.x-a.x, dy = b.y-a.y; const d = Math.hypot(dx,dy) || 1;
+      const want = (a.spread + b.spread) * 1.25 + 40;   // gap between cloud edges
+      if (d < want) { const f = (want-d)/d*0.5; dx*=f; dy*=f; a.x-=dx; a.y-=dy; b.x+=dx; b.y+=dy; }
     }
-    // Weak attraction along edges only
-    for (const e of edges) {
-      const a = nodes.find(n => n.domain === e.source);
-      const b = nodes.find(n => n.domain === e.target);
-      if (!a || !b) continue;
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const d = Math.sqrt(dx*dx+dy*dy) || 1;
-      const target = (a.r + b.r) * 4;
-      if (d > target) {
-        const f = (d - target) / d * 0.02 * alpha;
-        a.vx += dx*f; a.vy += dy*f;
-        b.vx -= dx*f; b.vy -= dy*f;
-      }
-    }
-    // Center gravity
     for (const n of nodes) {
-      n.vx += (W/2 - n.x) * 0.003 * alpha;
-      n.vy += (H/2 - n.y) * 0.003 * alpha;
-      n.vx *= 0.82; n.vy *= 0.82;
-      n.x = Math.max(n.r+20, Math.min(W-n.r-20, n.x + n.vx));
-      n.y = Math.max(n.r+20, Math.min(H-n.r-20, n.y + n.vy));
+      n.x = Math.max(n.spread+30, Math.min(W-n.spread-30, n.x));
+      n.y = Math.max(n.spread+60, Math.min(H-n.spread-30, n.y));
     }
-    draw();
-    if (alpha > 0.001) requestAnimationFrame(step);
-    else setInterval(() => draw(), 2000);
   }
-  requestAnimationFrame(step);
+
+  // Sample each domain's real memory_count as points from a 2D Gaussian
+  function gauss() { let u=0,v=0; while(!u)u=Math.random(); while(!v)v=Math.random();
+    return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+  points = [];
+  for (const n of nodes) {
+    const m = Math.min(n.count, 1500);
+    for (let k = 0; k < m; k++)
+      points.push({ x: n.x + gauss()*n.spread, y: n.y + gauss()*n.spread, color: n.color });
+  }
+
+  draw();
 }
 
 function draw() {
   ctx.clearRect(0, 0, W, H);
-  // Edges
-  for (const e of edges) {
-    const a = nodes.find(n => n.domain === e.source);
-    const b = nodes.find(n => n.domain === e.target);
-    if (!a || !b) continue;
+
+  // the galaxy — every memory as a glowing point, additive blending so dense
+  // cluster cores bloom bright. (no cross-domain lines — they read as clutter)
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of points) {
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = \`rgba(148,163,184,\${e.opacity})\`;
-    ctx.lineWidth = Math.max(0.5, e.count * 0.3);
-    ctx.stroke();
-  }
-  // Nodes
-  for (const n of nodes) {
-    // Outer glow
-    ctx.globalAlpha = 0.25;
-    const glow = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r * 2.2);
-    glow.addColorStop(0, n.color);
-    glow.addColorStop(1, 'transparent');
-    ctx.beginPath(); ctx.arc(n.x, n.y, n.r * 2.2, 0, Math.PI * 2);
-    ctx.fillStyle = glow; ctx.fill();
-    // Node fill
-    ctx.globalAlpha = 0.35;
-    ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-    ctx.fillStyle = n.color;
+    ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = 0.7;
     ctx.fill();
-    // Node border
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = n.color;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    // Label
-    ctx.fillStyle = '#f1f5f9';
-    ctx.font = \`bold \${Math.max(9, Math.min(11, n.r * 0.45))}px -apple-system, sans-serif\`;
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+
+  // 3. domain labels floating over each cloud
+  for (const n of nodes) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const words = n.domain.replace(/-/g,' ').split(' ');
-    if (words.length > 2) {
-      ctx.fillText(words.slice(0,2).join(' '), n.x, n.y - 6);
-      ctx.fillText(words.slice(2).join(' '), n.x, n.y + 6);
-    } else {
-      ctx.fillText(words.join(' '), n.x, n.y);
-    }
-    // Count badge
-    ctx.globalAlpha = 0.8;
-    ctx.fillStyle = n.color;
+    const label = n.domain.replace(/-/g, ' ');
+    const ly = n.y - n.spread - 12;
+    ctx.font = 'bold 12px -apple-system, sans-serif';
+    ctx.fillStyle = 'rgba(241,245,249,0.92)';
+    ctx.fillText(label, n.x, ly);
     ctx.font = '10px sans-serif';
-    ctx.fillText(n.count + ' mem', n.x, n.y + n.r + 13);
+    ctx.fillStyle = n.color;
+    ctx.globalAlpha = 0.8;
+    ctx.fillText(n.count.toLocaleString() + ' memories', n.x, ly + 14);
     ctx.globalAlpha = 1;
   }
 }
 
-// Tooltip
+// Tooltip — hit by distance to a cloud center
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  const hit = nodes.find(n => Math.hypot(n.x-mx, n.y-my) < n.r);
+  const hit = nodes.find(n => Math.hypot(n.x-mx, n.y-my) < n.spread + 12);
   if (hit) {
     tooltip.style.opacity = '1';
     tooltip.style.left = (e.clientX + 14) + 'px';
