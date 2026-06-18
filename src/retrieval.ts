@@ -208,7 +208,10 @@ export async function retrieve(
         clusterSize += (members.size - 1) * weight;
       }
       if (clusterSize > 0) {
-        clusterCohesionMap.set(id, Math.min(0.18, 0.04 * clusterSize));
+        // Capped lower (was 0.18 / 0.04·size): a tight cluster of near-duplicate session
+        // summaries shares all entities and was being *rewarded* for it — the opposite of
+        // what we want. MMR suppression handles the dups; cohesion stays a mild signal.
+        clusterCohesionMap.set(id, Math.min(0.10, 0.03 * clusterSize));
       }
     }
   }
@@ -284,11 +287,13 @@ export async function retrieve(
       type: row.memory_type,
       sigma: memSigma,
       primaryScore,
+      normCosine: normCosine[i],
       vector: vectorMap.get(row.id) ?? [],
       contradiction: row.contradiction_flag === 1,
-      // Decaying freshness: max boost (+0.20) at store time, fades to 0 over 48h.
-      // Binary 30-min window meant yesterday's session summary got zero lift.
-      freshnessBoost: Math.min(0.20, Math.max(0, 0.20 * (1 - ageSeconds / (48 * 3600)))),
+      // Decaying freshness: max boost (+0.10) at store time, fades to 0 over 48h.
+      // Halved from +0.20 — recency is already counted in baseScore (0.22) and via the
+      // hot tier, so the old value triple-counted recency and let fresh sessions run away.
+      freshnessBoost: Math.min(0.10, Math.max(0, 0.10 * (1 - ageSeconds / (48 * 3600)))),
       isFileEdit: /^(Edited:|Worked on .+edited|Ran:)/i.test(row.text),
     };
   });
@@ -317,9 +322,14 @@ export async function retrieve(
     // Domain alignment boost
     const domainBoost = (domain && c.domain === domain) ? 0.05 : 0;
 
-    // Session memory boost: session summaries are the highest-value retrieval target
-    // for "what were we working on" queries — give them a strong lift over atomic facts
-    const sessionBoost = c.type === 'session' ? 0.20 : 0;
+    // Session boost — relevance-scaled. Was a flat +0.20 on every session, which structurally
+    // buried procedural/preference facts under recent session summaries on every query. Now
+    // scaled by cosine (off-topic sessions get ~0) and only meaningfully lifted for temporal
+    // or vague ("what were we working on") queries where sessions are the right target.
+    const sessionRelevant = temporalWindowDays >= 0 || querySigmaVal > 0.6;
+    const sessionBoost = c.type === 'session'
+      ? (sessionRelevant ? 0.10 : 0.04) * c.normCosine
+      : 0;
 
     const recencyBoost = c.freshnessBoost;
 
@@ -418,16 +428,46 @@ export async function retrieve(
   }
   activatedExtras.sort((a, b) => b.score - a.score);
 
+  // Near-duplicate suppression (MMR-style). The corpus stores the same session summary
+  // once per domain; without this they self-reinforce (mutual neighbours + shared entities)
+  // and flood injection 8-10x. Keep the highest-scored instance, drop later near-identical
+  // ones — embedding cosine when both have vectors, token-Jaccard fallback otherwise.
+  const DEDUP_COS = 0.92, DEDUP_TEXT = 0.82;
+  const tok = (s: string) => new Set(
+    s.toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z0-9 ]/g, ' ')
+      .split(/\s+/).filter(w => w.length > 3)
+  );
+  const jac = (a: Set<string>, b: Set<string>) => {
+    if (!a.size || !b.size) return 0;
+    let inter = 0; for (const w of a) if (b.has(w)) inter++;
+    return inter / (a.size + b.size - inter);
+  };
+  const dedupBySimilarity = <T extends { text: string; vector: number[] }>(list: T[]): T[] => {
+    const out: T[] = []; const outTok: Set<string>[] = [];
+    for (const c of list) {
+      const ct = tok(c.text); let dup = false;
+      for (let k = 0; k < out.length; k++) {
+        const same = (c.vector.length && out[k].vector.length)
+          ? dotProduct(c.vector, out[k].vector) > DEDUP_COS
+          : jac(ct, outTok[k]) > DEDUP_TEXT;
+        if (same) { dup = true; break; }
+      }
+      if (!dup) { out.push(c); outTok.push(ct); }
+    }
+    return out;
+  };
+  const kept = dedupBySimilarity(scored); // scored is already sorted desc by score
+
   // Threshold-based retrieval: return ALL above score floor, not a hard topK.
   // Context window is 200k — injecting 15 relevant memories costs nothing vs 5.
-  // Floor = median of top-topK scores * 0.75, so we always get at least topK
+  // Floor = median of top-topK scores * 0.88, so we always get at least topK
   // but surface more when the corpus has genuinely relevant content.
-  const topKSlice = scored.slice(0, topK);
+  const topKSlice = kept.slice(0, topK);
   const floor = topKSlice.length > 0
     ? topKSlice[Math.floor(topKSlice.length / 2)].score * 0.88
     : 0;
   const injectCap = querySigmaVal < 0.4 ? topK * 3 : querySigmaVal > 0.7 ? topK : topK * 2;
-  const top = scored.filter(c => c.score >= floor).slice(0, injectCap); // adaptive cap: precise→3×topK, vague→topK
+  const top = kept.filter(c => c.score >= floor).slice(0, injectCap); // adaptive cap: precise→3×topK, vague→topK
 
   // Append activated associations not already in results
   const topIdSet = new Set(top.map(c => c.id));
@@ -437,25 +477,29 @@ export async function retrieve(
   // De-biasing: surface one high-value contradiction that got penalty-suppressed.
   // Skip if it already made the cut — top can extend past index topK, so without
   // this check the same memory could be injected twice.
-  const suppressed = scored.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7 && !topIdSet.has(c.id));
+  const suppressed = kept.slice(topK).find(c => c.contradiction && (c as any).primaryScore > 0.7 && !topIdSet.has(c.id));
   if (suppressed) top.push(suppressed);
 
   // Temporal de-biasing: activation clusters can drown temporal hits even with a score boost.
   // Guarantee up to 2 session summaries from the temporal window make it into results.
   if (temporalWindowDays >= 0 && allTemporalIds.size > 0) {
     const topIdSetTemp = new Set(top.map(c => c.id));
-    const missedTemporalSessions = scored
+    const missedTemporalSessions = kept
       .filter(c => allTemporalIds.has(c.id) && c.type === 'session' && !topIdSetTemp.has(c.id))
       .slice(0, 2);
     top.push(...missedTemporalSessions);
   }
 
+  // Final near-dup sweep: the BFS/temporal/contradiction de-biasing above can re-introduce
+  // near-duplicates the main pass already dropped — collapse them once more before gating.
+  const topDeduped = dedupBySimilarity(top);
+
   // σ hard gate: specific queries only surface memories whose confidence meets the
   // query's specificity requirement. sigmaCeiling scales with querySigmaVal so vague
   // queries stay permissive. Always keep at least 2 results to prevent empty injection.
   const sigmaCeiling = Math.max(0.65, querySigmaVal * 1.8);
-  const gated = top.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
-  const finalTop = gated.length >= 2 ? gated : top.slice(0, Math.max(2, Math.ceil(top.length / 2)));
+  const gated = topDeduped.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
+  const finalTop = gated.length >= 2 ? gated : topDeduped.slice(0, Math.max(2, Math.ceil(topDeduped.length / 2)));
 
   // Sharpen accessed memories + record history if σ changed meaningfully.
   // Batched: previously one UPDATE (+ optional INSERT) + one KV read-modify-write
