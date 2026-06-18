@@ -61,9 +61,12 @@ if [ "$PROJECT" = "default" ]; then
   Q2="${PROMPT_WORDS}recent context decisions"
   Q3="${PROMPT_WORDS}outcomes preferences"
 else
-  # In a git project — anchor all queries to the project
+  # In a git project — anchor queries to the project, but diversify the channels:
+  # Q2 pulls recent decisions/outcomes, Q3 deliberately targets durable procedural/
+  # preference facts so they get their own retrieval lane instead of losing every slot
+  # to recent session summaries (which Q2 already surfaces).
   Q2="$PROJECT recent decisions outcomes"
-  Q3="$PROJECT architecture work completed"
+  Q3="$PROJECT conventions preferences procedural how to work"
 fi
 
 TMP=$(mktemp -d)
@@ -113,12 +116,20 @@ LATENCY_MS=$(( END - START ))
 # high-to-low, cap at 12. The old 0.90 gate selected on score (which rewards recent
 # high-sigma memories) and let low-relevance items flood the context; 0.70 + top-12
 # keeps relevant mid-score hits while bounding injection size.
+# Pipeline: filter identity → keep scored lines → score gate → sort high→low → exact-line
+# dedup → near-dup dedup on the memory text (first 80 chars, so the same memory pulled by
+# two queries at different scores collapses to its best instance) → cap session-type lines
+# at 3 so they can't monopolise the budget → top 12. The worker now does semantic MMR, but
+# the 3 overlapping queries can still return the same memory text with different score
+# prefixes, which only this text-level dedup catches.
 MERGED=$(cat "$TMP"/q1 "$TMP"/q2 "$TMP"/q3 2>/dev/null \
   | grep -v '(identity/' \
   | grep -E '^\[[0-9]' \
   | awk -F'[][]' '$2+0 >= 0.70' \
   | sort -t'[' -k2 -rn \
   | awk '!seen[$0]++' \
+  | awk -F'● ' '{k=substr($2,1,80); if(!(k in s2)){s2[k]=1; print}}' \
+  | awk '/\/session\)/{c++; if(c>3) next} {print}' \
   | head -12)
 
 rm -rf "$TMP"

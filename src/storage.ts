@@ -165,8 +165,12 @@ export async function storeMemory(
 
   for (const match of results.matches) {
     const matchDomain = (match.metadata as any)?.domain as string | undefined;
-    // Cross-domain dedup: if cosine similarity is very high (>0.97), merge regardless of domain
-    if (matchDomain && matchDomain !== domain && match.score < 0.97) continue;
+    // Cross-domain dedup: merge near-identical memories regardless of domain. Session
+    // summaries are the same content tagged per-domain, so use a looser ceiling (0.90)
+    // for them to collapse the per-domain duplicates at the source instead of spawning
+    // 6-10 rows that later flood retrieval.
+    const crossDomainCeil = memoryType === 'session' ? 0.90 : 0.97;
+    if (matchDomain && matchDomain !== domain && match.score < crossDomainCeil) continue;
 
     const row = rowMap.get(match.id);
     if (!row) continue;
