@@ -195,6 +195,14 @@ export const TOOLS = [
     },
   },
   {
+    name: 'memory_dedupe',
+    description: 'Collapse exact-text duplicate memories: for each group of identical text, keep the most-reinforced row (highest access_count) and delete the rest from D1 + FTS + Vectorize. One-shot maintenance for duplicate backlogs created before the synchronous dedup guard existed. Pass dry_run=true to preview counts without deleting.',
+    inputSchema: {
+      type: 'object',
+      properties: { dry_run: { type: 'boolean', description: 'Preview duplicate groups and deletable count without deleting. Default false.' } },
+    },
+  },
+  {
     name: 'memory_cleanup_singletons',
     description: 'Reclassify all memories in domains with fewer than N memories (default 3) into the nearest anchored domain. Does not create new domains. Call once — completes in one shot.',
     inputSchema: {
@@ -268,10 +276,28 @@ function inferTypeAndIntensity(text: string): { memory_type: string; emotional_i
   return { memory_type, emotional_intensity };
 }
 
+// Ingestion quality gate: blocks conversational chat-speak addressed to the assistant —
+// raw user/assistant turns that slip into the store paths (the historical source of junk
+// like "hm what do u thnk", "yea idk", "nah i ddint see it"). Distilled facts read in third
+// person ("Prefers X", "Chose Y", "Lohit wants Z") and survive. Conservative by design:
+// only clear chat filler is blocked, so real short preferences still get through.
+export function isLowSignalText(text: string): boolean {
+  const t = (text ?? '').trim();
+  if (t.length < 15) return true;                          // fragments ("Yeah, I do.")
+  if ((t.match(/\s/g) ?? []).length < 2) return true;      // fewer than 3 words
+  const lc = t.toLowerCase();
+  // Texting second-person to the assistant — distilled facts use "you/your" or third person.
+  const startsLower = /[a-z]/.test(t[0] ?? '');
+  if (startsLower && /\b(u|ur|tryna|wanna|gonna|idk|imma|dunno|lemme)\b/.test(lc)) return true;
+  // Casual conversational openers.
+  if (/^(hm+|yea+h?|nah|yo|lol|haha|hmm+|huh|ok so|so yea)\b/i.test(t)) return true;
+  return false;
+}
+
 export async function handleToolCall(name: string, args: any, env: Env, ctx?: ExecutionContext): Promise<string> {
   switch (name) {
     case 'memory_store': {
-      if (!args.text || (args.text as string).trim().length < 10) return 'SKIP: text too short (min 10 chars)';
+      if (!args.text || isLowSignalText(args.text as string)) return 'SKIP: low-signal or chat-filler text';
       const topicKey = args.topic_key as string | undefined;
       const project = (args.project as string) ?? 'default';
       const now = Math.floor(Date.now() / 1000);
@@ -341,6 +367,9 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           if (enriched && enriched.length > 20 && enriched.length < 300) storedText = enriched;
         } catch {}
       }
+      // Quality gate AFTER enrichment: enriched text is a clean sentence and passes; raw
+      // chat-filler that wasn't enriched (no context passed) gets dropped here.
+      if (isLowSignalText(storedText)) return `SKIP: low-signal or chat-filler text`;
       const mu = await embed(storedText, env);
       const domain = await classifyDomainWithLlama(storedText, env, mu);
       const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(storedText);
@@ -1273,6 +1302,54 @@ Return ONLY valid JSON array:
         await env.VECTORIZE.deleteByIds(chunk);
       }
       return `Deleted ${ids.length} memories matching "${args.pattern}".`;
+    }
+
+    case 'memory_dedupe': {
+      // Collapse exact-text duplicate groups. For each text with >1 row, keep the most-
+      // reinforced copy (max access_count, then sharpest sigma, then oldest) and delete the
+      // rest from D1 + FTS + Vectorize. This is a backlog artifact from before the
+      // synchronous D1 exact-text guard existed (Vectorize indexing lag let rapid re-ingests
+      // of the same text spawn instead of merge). Going-forward dedup is handled at write time.
+      const dryRun = args.dry_run === true;
+      // Pull id + access_count + sigma for every row in a duplicated text group.
+      const dupRows = await env.DB.prepare(
+        `SELECT m.id, m.text, m.access_count, m.sigma_diagonal, m.timestamp
+         FROM memories m
+         JOIN (SELECT text FROM memories GROUP BY text HAVING COUNT(*) > 1) d ON m.text = d.text`
+      ).all<{ id: string; text: string; access_count: number; sigma_diagonal: string; timestamp: number }>();
+
+      // Group by text, choose a keeper per group, mark the rest for deletion.
+      const groups = new Map<string, typeof dupRows.results>();
+      for (const r of dupRows.results ?? []) {
+        if (!groups.has(r.text)) groups.set(r.text, []);
+        groups.get(r.text)!.push(r);
+      }
+      const meanSig = (s: string) => {
+        try { const a = deserializeSigma(s); return meanSigma(a); } catch { return 1; }
+      };
+      const deleteIds: string[] = [];
+      for (const rows of groups.values()) {
+        // Keeper = highest access_count, tie-break sharpest sigma (lowest), then oldest row.
+        const keeper = rows.slice().sort((a, b) =>
+          (b.access_count - a.access_count)
+          || (meanSig(a.sigma_diagonal) - meanSig(b.sigma_diagonal))
+          || (a.timestamp - b.timestamp)
+        )[0];
+        for (const r of rows) if (r.id !== keeper.id) deleteIds.push(r.id);
+      }
+
+      if (dryRun) {
+        return `DRY RUN: ${groups.size} duplicate groups, ${deleteIds.length} rows would be deleted (keeping ${groups.size} most-reinforced copies). No changes made.`;
+      }
+      for (let i = 0; i < deleteIds.length; i += 100) {
+        const chunk = deleteIds.slice(i, i + 100);
+        await env.DB.batch([
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+        ]);
+        await env.VECTORIZE.deleteByIds(chunk);
+      }
+      return `Deduped ${groups.size} groups — deleted ${deleteIds.length} duplicate rows, kept ${groups.size} most-reinforced copies.`;
     }
 
     case 'memory_cleanup_singletons': {
