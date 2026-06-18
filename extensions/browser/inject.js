@@ -13,76 +13,18 @@
     gemini: /(StreamGenerate|GenerateContent|batchexecute|assistant\.lamda)/,  // Gemini web RPC (nested-array f.req payload)
   };
 
-  // ── GM tool definitions injected into every completion request ─────────────
-
-  const GM_TOOLS = [
-    {
-      name: 'memory_auto_store',
-      description: 'Store a memory — domain and type auto-inferred. Call proactively when detecting preferences, decisions, project context, or emotional signals. Never announce it.',
-      input_schema: { type: 'object', properties: { text: { type: 'string' }, context: { type: 'string' }, emotional_intensity: { type: 'number' } }, required: ['text'] }
-    },
-    {
-      name: 'memory_retrieve',
-      description: 'Retrieve top-k relevant memories by semantic similarity. Use when you need to recall past context, preferences, or decisions.',
-      input_schema: { type: 'object', properties: { query: { type: 'string' }, domain: { type: 'string' }, top_k: { type: 'number' }, synthesize: { type: 'boolean' } }, required: ['query'] }
-    },
-    {
-      name: 'memory_list',
-      description: 'List stored memories. Filter by domain, sort by timestamp/access_count/sigma.',
-      input_schema: { type: 'object', properties: { domain: { type: 'string' }, limit: { type: 'number' }, sort: { type: 'string', enum: ['timestamp', 'access_count', 'sigma'] }, since: { type: 'string' } } }
-    },
-    {
-      name: 'memory_timeline',
-      description: 'Show recent memory activity as a timeline. Use to understand what has been happening across sessions.',
-      input_schema: { type: 'object', properties: { limit: { type: 'number' }, domain: { type: 'string' } } }
-    },
-    {
-      name: 'memory_stats',
-      description: 'System health: total memories, domain breakdown, sigma distribution, access heat.',
-      input_schema: { type: 'object', properties: {} }
-    },
-    {
-      name: 'memory_judge',
-      description: 'Evaluate a memory for accuracy or resolve contradictions between memories.',
-      input_schema: { type: 'object', properties: { memory_id: { type: 'number' }, question: { type: 'string' } } }
-    },
-    {
-      name: 'memory_update',
-      description: 'Update an existing memory by id.',
-      input_schema: { type: 'object', properties: { id: { type: 'number' }, text: { type: 'string' }, domain: { type: 'string' } }, required: ['id', 'text'] }
-    },
-    {
-      name: 'memory_delete',
-      description: 'Delete a memory by id.',
-      input_schema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] }
-    },
-    {
-      name: 'memory_store',
-      description: 'Store a memory with explicit domain and type.',
-      input_schema: { type: 'object', properties: { text: { type: 'string' }, domain: { type: 'string' }, memory_type: { type: 'string' }, topic_key: { type: 'string' } }, required: ['text'] }
-    },
-    {
-      name: 'identity_profile_get',
-      description: 'Get the user identity profile.',
-      input_schema: { type: 'object', properties: {} }
-    },
-    {
-      name: 'identity_profile_set',
-      description: 'Set or update the user identity profile.',
-      input_schema: { type: 'object', properties: { profile: { type: 'object' } }, required: ['profile'] }
-    },
-  ];
-
-  const GM_TOOL_NAMES = new Set(GM_TOOLS.map(t => t.name));
+  // NOTE: GM tool injection was removed (chat UIs can't return tool_results
+  // in-band, which hung Claude). Both platforms now use context-injection +
+  // turn capture only. No tool definitions / tool-call plumbing needed.
 
   // ── Message-passing infrastructure ─────────────────────────────────────────
 
-  const pending = new Map(); // id → resolve (for retrieve + tool calls)
+  const pending = new Map(); // id → resolve (retrieve responses)
 
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const { type, id } = event.data || {};
-    if ((type === 'GM_RETRIEVE_RESULT' || type === 'GM_TOOL_RESULT') && id) {
+    if (type === 'GM_RETRIEVE_RESULT' && id) {
       const resolve = pending.get(id);
       if (resolve) {
         pending.delete(id);
@@ -104,10 +46,6 @@
     return callBridge('GM_RETRIEVE', { query, top_k: 5 }, 3000);
   }
 
-  function callTool(tool, args) {
-    return callBridge('GM_TOOL_CALL', { tool, args }, 8000);
-  }
-
   function storeMemory(text) {
     window.postMessage({ type: 'GM_STORE', text }, '*');
   }
@@ -123,11 +61,6 @@
     if (log.length < 150) return;   // not enough signal to bother extracting
     storeMemory(log);               // → GM_STORE → memory_extract_and_store
   }
-
-  // ── Pending tool results (tool_use_id → result string) ─────────────────────
-
-  const pendingToolResults = new Map(); // tool_use_id → result string (resolved async)
-  const pendingToolPromises = new Map(); // tool_use_id → Promise<string>
 
   // ── DOM collapser — hides injected memory block from chat UI ───────────────
 
@@ -241,50 +174,7 @@
     return body;
   }
 
-  function injectGMTools(body) {
-    if (!Array.isArray(body.tools)) body.tools = [];
-    // Remove any stale GM tools then re-add current set
-    body.tools = body.tools.filter(t => !GM_TOOL_NAMES.has(t.name));
-    body.tools.push(...GM_TOOLS);
-    return body;
-  }
-
-  function injectToolResults(body) {
-    if (!pendingToolResults.size) return body;
-
-    // Messages format
-    if (Array.isArray(body.messages)) {
-      const toolResultBlock = [...pendingToolResults.entries()].map(([id, result]) => ({
-        type: 'tool_result',
-        tool_use_id: id,
-        content: result,
-      }));
-      // Find the last user message and append tool results to it
-      for (let i = body.messages.length - 1; i >= 0; i--) {
-        const msg = body.messages[i];
-        if (msg.role === 'user' || msg.role === 'human') {
-          if (!Array.isArray(msg.content)) msg.content = [{ type: 'text', text: msg.content || '' }];
-          msg.content.push(...toolResultBlock);
-          break;
-        }
-      }
-      pendingToolResults.clear();
-      return body;
-    }
-
-    // Legacy prompt format — append tool results as text
-    if (typeof body.prompt === 'string') {
-      const resultsText = [...pendingToolResults.entries()]
-        .map(([id, result]) => `[Tool Result for ${id}]\n${result}`)
-        .join('\n');
-      body.prompt = body.prompt + `\n\n[Memory Tool Results]\n${resultsText}`;
-      pendingToolResults.clear();
-    }
-
-    return body;
-  }
-
-  // ── SSE parser — detects tool_use blocks and text deltas ───────────────────
+  // ── SSE parser — accumulates assistant text deltas for turn capture ────────
 
   function tapClaudeStream(response) {
     if (!response.body) return response;
@@ -305,9 +195,6 @@
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-
-    // Track in-progress tool_use blocks
-    const activeToolBlocks = new Map(); // index → {id, name, inputJson}
     let assistantText = '';
 
     function processSSELine(line) {
@@ -315,39 +202,10 @@
       let json;
       try { json = JSON.parse(line.slice(6)); } catch { return; }
 
-      const { type, index, delta, content_block } = json;
-
-      if (type === 'content_block_start' && content_block?.type === 'tool_use') {
-        if (GM_TOOL_NAMES.has(content_block.name)) {
-          activeToolBlocks.set(index, { id: content_block.id, name: content_block.name, inputJson: '' });
-        }
+      const { type, delta } = json;
+      if (type === 'content_block_delta' && delta?.type === 'text_delta') {
+        assistantText += delta.text || '';
       }
-
-      if (type === 'content_block_delta') {
-        if (delta?.type === 'input_json_delta' && activeToolBlocks.has(index)) {
-          activeToolBlocks.get(index).inputJson += delta.partial_json || '';
-        }
-        if (delta?.type === 'text_delta') {
-          assistantText += delta.text || '';
-        }
-      }
-
-      if (type === 'content_block_stop' && activeToolBlocks.has(index)) {
-        const block = activeToolBlocks.get(index);
-        activeToolBlocks.delete(index);
-        let args = {};
-        try { args = JSON.parse(block.inputJson); } catch {}
-        console.log('[GM] tool_use detected:', block.name, args);
-        // Call the worker and store result for next request
-        const promise = callTool(block.name, args).then(result => {
-          console.log('[GM] tool result for', block.name, ':', result.slice(0, 80));
-          pendingToolResults.set(block.id, result);
-          pendingToolPromises.delete(block.id);
-          return result;
-        });
-        pendingToolPromises.set(block.id, promise);
-      }
-
       if (type === 'message_stop') {
         storeTurn('claude', lastUserQuery.claude, assistantText);
         assistantText = '';
