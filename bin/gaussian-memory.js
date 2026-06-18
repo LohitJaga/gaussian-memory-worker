@@ -560,7 +560,13 @@ async function backup() {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const outFile = path.resolve(process.cwd(), `gaussian-backup-${ts}.sql`);
   process.stdout.write(`Exporting D1 database to ${path.basename(outFile)}... `);
-  const result = spawnSync('npx', ['wrangler', 'd1', 'export', 'gaussian-memory', '--remote', '--output', outFile], {
+  // Export only real tables. `wrangler d1 export` cannot serialize FTS5 virtual tables
+  // ("cannot export databases with Virtual Tables (fts5)") — without listing tables it
+  // aborts and writes nothing. memories_fts is derived from memories and is rebuilt on
+  // restore, so excluding it is lossless.
+  const REAL_TABLES = ['memories', 'domain_anchors', 'memory_relations', 'memory_sigma_history', 'entity_nodes', 'memory_entities'];
+  const tableArgs = REAL_TABLES.flatMap(t => ['--table', t]);
+  const result = spawnSync('npx', ['wrangler', 'd1', 'export', 'gaussian-memory', '--remote', ...tableArgs, '--output', outFile], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (result.status !== 0) {
