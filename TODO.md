@@ -14,22 +14,35 @@ cross-LLM ground truth, edge-native BYOC.
 
 ---
 
-## DO TOMORROW (2026-06-18) — Decay
-Don't blind-build aggressive deletion — verify first, prefer non-destructive.
-- [ ] **Verify the problem exists first:** run ~5 real retrievals against the live pool; do cold/old
-      memories actually surface and pollute, or is recency weighting (0.25) already burying them?
-      If retrieval is already clean → decay is NOT the priority, deprioritize this.
-- [ ] If junk surfaces → **soft-forget (no delete):** replace `decaySigma = s+delta` (flat, not
-      time-aware) with a forgetting-curve model:
-      `S = S0·(1+ln(access+1)); R = exp(−Δt/S); σ_target = floor + (ceil−floor)·(1−R)`
-      using `last_accessed` (NOT creation `timestamp` — current cron bug). Sets σ → retrieval
-      deprioritizes faded memories. Reversible.
-- [ ] Consider whether hard-delete (current prune at σ>2.0) should exist at all — Anki/FSRS never
-      delete. If kept: delete ONLY access_count=0 AND idle>45d AND σ>ceiling (sim: ~636 at S0=10d).
-      **Back up first** (`npx gaussian-memory backup`).
-- [ ] Alternative/simpler lever to consider: just retune retrieval scoring weights (favor recency/
-      sharpness) — directly fixes "recent wins" with zero deletion.
+## Decay / Cron — ROOT CAUSE FOUND (2026-06-18)
+**The nightly cron is silently broken — this is why decay "doesn't work" and cold/old junk piles up.**
+Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events ever; 645 prunable
+(σ>1.8) rows and 358 cold-archive-eligible rows are still sitting in D1 un-touched.
+- **Root cause:** `scheduled()` (index.ts:146-154) calls `consolidateColdMemories` and `updateDecay`,
+  each wrapped in `.catch(() => {})`. Both do **unbounded full-table scans** (`SELECT ... FROM memories`
+  with no LIMIT over ~4.6k rows) → time out / `D1_ERROR: overloaded` → error swallowed → 0 work done,
+  no log. The e2e `decay` test reproduces the timeout.
+- [ ] **Fix the cron failure (highest priority):** bound the scans with `WHERE`+`LIMIT` (process
+      candidates in batches, not the whole table), and STOP swallowing errors silently (log them so
+      nightly failures are visible). Applies to both `updateDecay` and `consolidateColdMemories`.
+- [ ] **R2 cold-archive undo path exists but isn't running:** `consolidateColdMemories` (cron.ts:365)
+      archives cold memories to R2 (`R2.put('memories/{id}.json')`) THEN deletes from D1 — the designed
+      undo path. But it never executes (358 eligible rows still in D1 → R2 is ~empty). Fixing the cron
+      above makes the archive/undo path actually work.
+- [ ] **No deletion audit log:** `memory_delete`/`memory_bulk_delete`/prune all hard-delete with no
+      record of what/when. Can't reconstruct past counts or undo manual deletes. Add a `memories_archive`
+      table (or reuse R2) on ALL delete paths, not just cold-archival, for a real undo + audit trail.
+- [x] **Verified the retrieval problem exists + fixed it (2026-06-18):** ran real retrievals — cold
+      verbatim junk WAS surfacing (chat-speak at 1.5+). Fixed via MMR dedup + session/recency rebalance
+      (retrieval) + a one-time cleanup of the junk (see Done 2026-06-18). Retrieval is now clean.
+- [ ] **Still want soft-forget decay** (separate from the cron fix): replace `decaySigma = s+delta`
+      (flat) with forgetting-curve `S = S0·(1+ln(access+1)); R = exp(−Δt/S); σ_target = floor +
+      (ceil−floor)·(1−R)` using `last_accessed` (NOT creation `timestamp` — current cron bug).
+      Reversible (sets σ, doesn't delete). Prefer this over hard-delete (Anki/FSRS never delete).
 - Sim done 2026-06-17: S0=5→prune 2422(46%), S0=7→1825(35%), S0=10→636(12%,all cold).
+- Corpus size note: domain rebuild logged 5,244 on 2026-06-17; 5,170 at session start 2026-06-18
+  (backup-proven); 4,608 after today's cleanup. No bulk deletion found yesterday (git Jun 17 = extension
+  work only; decay never ran). The ~74 Jun17→Jun18 drift is merges/small deletes — unverifiable (no audit log).
 
 ---
 
