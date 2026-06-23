@@ -100,9 +100,38 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
       parse-by-position + re-encode. Real build, not a quick port. "Coming soon" for launch.
 - [ ] Chrome Web Store submission (or document "load unpacked" for dev-audience launch)
 
+### Agent affordances — tool descriptions as skill docs (2026-06-23)
+MCP tools have mechanical descriptions (what, not when). For an MCP server consumed by agents, tool descriptions
+ARE the skill docs — the only non-optional surface the agent reads every turn. Fix descriptions to teach agent behavior:
+- `memory_timeline` → frame as temporal/"what did I do this week," fix recency sort (currently ranks by access freq)
+- `memory_list` → frame as recency/audit tool ("use with since= for 'what did I save today'")
+- `memory_retrieve` → frame as topical default, add cross-ref to list/timeline for temporal needs
+- `memory_store` → prefer over auto_store, always pass explicit domain (mis-domained memories don't surface)
+- `memory_auto_store` → convenience path; note domain inference defaults generic causing mis-tags
+- Also ship optional paste-in CLAUDE.md in npm docs for clients that ignore MCP instructions field
+See session 2026-06-23 with lohit for full draft copy + rationale.
+
 ### Be the memory layer for frameworks
 - [ ] Vendor-neutral adapter so any agent framework (incl. eve) can use GM as its memory
 - [ ] Universal hooks: normalize agent events to a common schema (portable, not Vercel-locked)
+
+### Self-improvement loop — outcome→behavior (Brain parity, added 2026-06-20)
+Perplexity Brain (launched 2026-06-18) closes a record→reflect-overnight→improve-execution loop
+(+25% on repeated tasks). GM today is record→retrieve. We already store agent activity (episodic
+session summaries, `memory_store_decision` {decision,context,alternatives,outcome}) — the missing
+wire is outcome→retrieval-priority. Mechanism (reuses existing Bayesian machinery):
+- [ ] **Log retrievals:** new D1 table `retrieval_log {session_id, query, retrieved_ids[], scores[], ts}`
+      — without this there's no way to attribute outcomes back to memories.
+- [ ] **Harvest reward (sparse, strong signals only):** explicit = `store_decision.outcome` + in-session
+      corrections; implicit = reuse `belief_drift` — contradicted memory = negative, reinforced = positive.
+- [ ] **Nightly reflect pass (Cron Trigger — same job as the decay/cleanup cron):** give each memory a
+      Beta(α,β) utility belief; helped-in-good-session → α++, present-in-corrected → β++. Existing
+      sigma/sharpness encodes confidence in utility. Pass also does dedup/supersede/decay (one job).
+- [ ] **Feed back into scorer:** `baseScore = 0.6·cos + 0.25·recency + 0.15·freq + w_u·utility[m]`
+      → misleading memories suppressed even when cosine-similar, reliable ones boosted. Closed loop.
+- Gotchas: weak credit assignment (update on strong signals only, not every session); rich-get-richer
+  (keep ε exploration floor + recency/cosine for cold start); reward sparsity (converges slowly).
+- ~2–3 focused sessions; reuses log + belief_drift + cron + Bayesian scorer already built.
 
 ### Hosted (optional, later)
 - [ ] DO-hosted version (per-user isolation, free beta → $1–2/month) — only if BYOC demand justifies it
