@@ -3,3 +3,5 @@ node_modules/
 dist/
 wrangler.toml
 .claude/
+memories/
+__probe__.json
