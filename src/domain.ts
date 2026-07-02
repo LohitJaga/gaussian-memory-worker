@@ -95,6 +95,13 @@ export async function classifyDomainWithLlama(text: string, env: Env, precompute
 RULES (follow strictly):
 1. ALWAYS pick from the existing domain list if ANY of them reasonably fits — even loosely.
 2. Only create a new domain if the memory is completely unrelated to ALL existing domains.
+2a. Prefer BROAD, STABLE domains over narrow ones. A specific tool, library, API, or sub-feature used
+    *within* a project belongs under that project's existing domain — do not spin up a separate domain
+    for every tool the project happens to use (e.g. a Gmail integration inside a larger app belongs in
+    the app's domain, not a new "gmail" domain).
+2b. Before creating any new domain name, check the existing list for a near-match (same concept, different
+    spelling/pluralization/capitalization/synonym). If one exists, reuse it EXACTLY as spelled — never
+    create a near-duplicate of an existing domain.
 3. Domain names must name a PROJECT, TOOL, PERSON, or SUBJECT — not a generic activity.
    GOOD: "acme-web-app", "cs101-coursework", "job-search", "react-portfolio-site"
    BAD: "data-preprocessing", "homework-submission", "exam-preparation", "data-manipulation", "file-management"
@@ -246,7 +253,7 @@ export async function classifyBatchDomains(
       messages: [
         {
           role: 'system',
-          content: `Classify each memory into a semantic domain. ALWAYS pick from the existing domain list if any fits — even loosely. Only create a new domain if completely unrelated to all existing ones.\nDomain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, PERSON, or SUBJECT — never a generic activity.\nGOOD: "acme-web-app", "cs101-coursework", "job-search"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\nPersonal/non-work content (hobbies, health, relationships, daily life) belongs in a personal-life-style domain rather than mixed into project domains.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+          content: `Classify each memory into a semantic domain. ALWAYS pick from the existing domain list if any fits — even loosely. Only create a new domain if completely unrelated to all existing ones.\nPrefer BROAD, STABLE domains over narrow ones — a tool/library/API used within a project belongs under that project's domain, not a new domain of its own. Before creating a new domain, check for a near-match in spelling/pluralization/synonym among existing domains and reuse it exactly if found — never create a near-duplicate.\nDomain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, PERSON, or SUBJECT — never a generic activity.\nGOOD: "acme-web-app", "cs101-coursework", "job-search"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\nPersonal/non-work content (hobbies, health, relationships, daily life) belongs in a personal-life-style domain rather than mixed into project domains.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
         },
         { role: 'user', content: numbered },
       ],
