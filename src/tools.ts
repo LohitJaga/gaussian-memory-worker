@@ -1535,9 +1535,12 @@ Return: ["project-name", "project-name", ...]`,
       const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
         .all<{ name: string }>()).results?.map(r => r.name) ?? [];
       const rawAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env);
-      // In full rebuild mode, skip remapping — let Llama create new domains freely.
-      // In targeted mode, remap unanchored assignments to nearest existing anchor.
-      const domainAssignments = useFullPath ? rawAssignments : await remapToAnchoredDomains(rawAssignments, mus, env);
+      // Full rebuild mode: let Llama create new domains freely, but still catch true
+      // near-duplicates (e.g. "gaussian-memory-mcp" vs "gaussian-memory-dev") with a high
+      // similarity bar — prompt-only "check for a near-match" instructions proved unreliable
+      // in practice (went from 15 -> 31 -> 49 domains across successive rebuild attempts).
+      // Targeted mode uses the lower bar to catch stray/loosely-related unanchored content.
+      const domainAssignments = await remapToAnchoredDomains(rawAssignments, mus, env, useFullPath ? 0.6 : 0.3);
 
       // Batch D1 updates + centroid accumulation
       const d1Updates: D1PreparedStatement[] = [];

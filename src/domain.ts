@@ -285,6 +285,7 @@ export async function remapToAnchoredDomains(
   assignments: string[],
   mus: Float32Array[],
   env: Env,
+  minSimilarity = 0.3,
 ): Promise<string[]> {
   const anchorRows = await env.DB.prepare('SELECT name, embedding FROM domain_anchors')
     .all<{ name: string; embedding: string }>();
@@ -294,7 +295,6 @@ export async function remapToAnchoredDomains(
   }));
   if (!anchors.length) return assignments;
 
-  const MIN_REMAP_SIMILARITY = 0.3;
   const anchoredNames = new Set(anchors.map(a => a.name));
   for (let i = 0; i < assignments.length; i++) {
     if (anchoredNames.has(assignments[i])) continue;
@@ -308,7 +308,7 @@ export async function remapToAnchoredDomains(
     // Only force-anchor when the match is actually good — otherwise keep the
     // LLM's own domain guess rather than gluing unrelated content onto an
     // existing domain just because it's the least-dissimilar option.
-    if (bestSim >= MIN_REMAP_SIMILARITY) assignments[i] = best;
+    if (bestSim >= minSimilarity) assignments[i] = best;
   }
   return assignments;
 }
