@@ -363,9 +363,3 @@ scripts/
 schema.sql                D1 schema
 wrangler.example.toml     Template for manual resource setup
 ```
-
-## Status
-
-Single-user BYOC, working end-to-end. Ship target: July 1 2026.
-
-Multi-user (Durable Objects per-user isolation) is post-ship.
