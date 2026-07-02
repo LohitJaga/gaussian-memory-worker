@@ -95,22 +95,14 @@ export async function classifyDomainWithLlama(text: string, env: Env, precompute
 RULES (follow strictly):
 1. ALWAYS pick from the existing domain list if ANY of them reasonably fits — even loosely.
 2. Only create a new domain if the memory is completely unrelated to ALL existing domains.
-3. Domain names must name a PROJECT, TOOL, or PERSON — not a generic activity.
-   GOOD: "gaussian-memory-dev", "loreal-internship", "color-wow-agents", "career-goals", "purdue-coursework", "cloudflare-workers"
+3. Domain names must name a PROJECT, TOOL, PERSON, or SUBJECT — not a generic activity.
+   GOOD: "acme-web-app", "cs101-coursework", "job-search", "react-portfolio-site"
    BAD: "data-preprocessing", "homework-submission", "exam-preparation", "data-manipulation", "file-management"
    If the memory is about a specific project or tool, name the domain after THAT project/tool.
-   If it's about a course or subject, name it after the subject: "probability-theory", "stat-416", not "exam-preparation".
+   If it's about a course or subject, name it after the subject, not the activity (e.g. "linear-algebra" not "homework-help").
 4. New domain names: 2-4 lowercase hyphenated words. NO uppercase, NO spaces, NO leading hyphens.
 5. When in doubt, pick the closest existing domain.
-
-KEY DOMAIN SEMANTICS (use these when text mentions these topics):
-- loreal-internship / color-wow-agents / gchat-bot-dev / power-bi-dev: L'Oreal internship, Color Wow hair care brand, GChat bot, Power BI, BigQuery analytics, L'Oreal NYC work tasks
-- gaussian-memory-dev / cloudflare-infra: Gaussian Memory MCP project, Cloudflare Workers, D1 database, Vectorize, memory system
-- stat-416 / purdue-coursework / probability-theory: Purdue courses, STAT 416, combinatorics, probability, exam prep
-- ml-pytorch: machine learning theory, PyTorch model training, HuggingFace, NOT L'Oreal ML tasks (use loreal-internship)
-- leetcode-practice: LeetCode, coding interview prep, algorithms, data structures
-- bayer-datamine: Bayer Crop Science, The Data Mine, G2F (Genomes to Fields), maize yield, UAV imagery, G2F pipeline, field trials, orthomosaic — ALL g2f-* content belongs here
-- personal-life: personal life, hobbies, daily life, non-work activities, feelings, relationships, health, food, gaming, travel — anything NOT work or study
+6. Content that's personal/non-work (hobbies, health, relationships, daily life) belongs in a personal-life-style domain rather than mixed into project domains.
 
 Existing domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}
 
@@ -246,15 +238,6 @@ export async function classifyBatchDomains(
   const canCreate = existingDomains.length < 50;
   const assignments: string[] = new Array(texts.length).fill('general');
 
-  const domainHints = `KEY DOMAIN SEMANTICS:
-- loreal-internship / color-wow-agents / gchat-bot-dev / power-bi-dev / sales-performance: L'Oreal internship, Color Wow hair brand, GChat bot, Power BI, BigQuery analytics, NYC work tasks
-- gaussian-memory-dev / cloudflare-infra: Gaussian Memory MCP project, Cloudflare Workers, D1, Vectorize, memory system
-- stat-416 / purdue-coursework / probability-theory: Purdue courses, STAT 416, combinatorics, probability, statistics exams
-- ml-pytorch: ML theory, PyTorch model training, HuggingFace — NOT L'Oreal ML tasks (use loreal-internship)
-- leetcode-practice: LeetCode, algorithms, coding interview prep
-- bayer-datamine: Bayer Crop Science, The Data Mine, G2F (Genomes to Fields), maize yield, UAV imagery, field trials, orthomosaic — ALL g2f-* content belongs here
-- personal-life: personal life, hobbies, daily life, non-work activities, feelings, relationships, health, gaming, travel — anything NOT work or study`;
-
   for (let g = 0; g < texts.length; g += GROUP) {
     if (Date.now() - startTime > timeBudgetMs) break;
     const group = texts.slice(g, g + GROUP);
@@ -263,7 +246,7 @@ export async function classifyBatchDomains(
       messages: [
         {
           role: 'system',
-          content: `Classify each memory into a semantic domain. ALWAYS pick from the existing domain list if any fits — even loosely. Only create a new domain if completely unrelated to all existing ones.\nDomain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, or PERSON — never a generic activity.\nGOOD: "gaussian-memory-dev", "loreal-internship", "color-wow-agents", "career-job-search", "stat-416"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\n${domainHints}\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+          content: `Classify each memory into a semantic domain. ALWAYS pick from the existing domain list if any fits — even loosely. Only create a new domain if completely unrelated to all existing ones.\nDomain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, PERSON, or SUBJECT — never a generic activity.\nGOOD: "acme-web-app", "cs101-coursework", "job-search"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\nPersonal/non-work content (hobbies, health, relationships, daily life) belongs in a personal-life-style domain rather than mixed into project domains.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
         },
         { role: 'user', content: numbered },
       ],
