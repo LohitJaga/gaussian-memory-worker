@@ -5,3 +5,4 @@ wrangler.toml
 .claude/
 memories/
 __probe__.json
+gaussian-backup-*.sql

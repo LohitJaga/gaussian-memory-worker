@@ -73,6 +73,46 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
 - [ ] **g2f-* micro-domain explosion** — full rebuild fragmented bayer-datamine into 8 g2f-* sub-domains. Fixed via SQL merge on 2026-07-01. bayer-datamine hint added to classifier. If rebuild is run again, confirm g2f content stays consolidated.
 - [ ] **targeted=false param was silently ignored** (fixed 2026-07-01 by OpenCode: string-aware parse + schema declaration). Confirm the fix is in src/tools.ts before any future full rebuild.
 
+### Domain Classifier Instability — ROOT CAUSE FOUND, FIX DESIGNED, NOT YET IMPLEMENTED (2026-07-02)
+Ran 5 full rebuilds (~4700-4800 memories each) in one session trying to land on a stable domain count.
+Same underlying code produced wildly different results run to run: **15 → 31 → 49 (hit the 50 cap) → 6
+(catastrophic over-merge, 2 domains absorbed 2000+ memories each) → reverted to the known-good 31-domain
+code and reran → landed on 50 (the cap) again.** Confirmed via retrieval.ts:323 that domain is only a
++0.05 soft score boost, not a hard retrieval filter — so this is a correctness/cleanliness bug, not a
+functional retrieval regression, but it's a bad look for a public repo and worth fixing properly.
+
+**Root cause**: `classifyBatchDomains` (domain.ts) makes an independent LLM call per batch of ~10 memories
+during a full rebuild, and `useFullPath` mode skips `remapToAnchoredDomains` entirely for the whole rebuild
+after batch 1 (tools.ts ~1514-1515) — meaning there is zero error-correction on the LLM's domain-name
+choices. Since later batches see a domain list shaped by earlier (non-deterministic, temperature-unset)
+LLM sampling, small early divergences cascade into wildly different total fragmentation by the end. Two
+prior fix attempts both failed: a generic "avoid near-duplicate domain names" prompt instruction (made it
+worse: 31→49) and a code-level embedding-similarity remap at threshold 0.6 applied during full rebuilds
+(over-corrected badly: 49→6, merged genuinely distinct projects into mega-domains).
+
+**Fix, designed but not yet built — hybrid deterministic-gate + LLM approach:**
+The codebase already has a fully deterministic nearest-centroid classifier, `classifyDomain` (domain.ts:47-78,
+threshold 0.82 — already tuned from real usage history, see git log `214f929`), but it's currently only used
+as a fallback (JSON-parse failure or 50-cap hit), never as the primary path. Git history shows this project
+already tried pure-embedding-only classification early on (thresholds 0.75→0.88→reverted to 0.82) and moved
+*toward* LLM classification for a reason — likely because pure-embedding-only produces worse, less
+semantically meaningful groupings and its fallback naming (`deriveAnchorName`, domain.ts:24-45) just grabs a
+crude capitalized keyword instead of a clean name. So: don't replace the LLM, gate it.
+1. Add a shared `findBestAnchor(muArr, env)` helper (refactor out of `classifyDomain`'s existing anchor-fetch
+   loop) that returns `{name, sim}` for the best-matching existing anchor.
+2. In both `classifyDomainWithLlama` and `classifyBatchDomains`, check `findBestAnchor` FIRST. If similarity
+   ≥ 0.82, assign directly — no LLM call, fully deterministic, no sampling variance. Only call the LLM for
+   memories that *don't* clearly match an existing anchor — the genuinely ambiguous cases where semantic
+   judgment actually earns its keep. All 6 call sites of `classifyDomainWithLlama` in tools.ts already pass
+   `precomputedMu`, so this fast-path costs zero extra embed() calls.
+3. Set `temperature: 0` on the remaining LLM calls (currently unset anywhere in domain.ts, Workers AI default
+   is 0.6) to reduce variance on the genuinely-ambiguous cases that still need the LLM.
+4. Do NOT re-attempt the code-level "always remap in full-path mode" approach (commit 9d7e128, reverted) —
+   confirmed empirically to over-merge distinct domains at threshold 0.6.
+Should implement and test against a fresh full rebuild before trusting it — prior "looks fixed" impressions
+this session (31 domains) turned out to be one lucky run, not a stable fixed point, so verify by re-running
+the rebuild 2x and confirming domain count converges to roughly the same number both times, not just once.
+
 ### Cleanup
 - [ ] One-time prune of old verbatim noise in the pool (pre-distillation junk: "Yeah, I do." etc.) — for clean demo retrievals
 
