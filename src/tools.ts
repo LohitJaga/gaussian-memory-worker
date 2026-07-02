@@ -212,8 +212,8 @@ export const TOOLS = [
   },
   {
     name: 'memory_rebuild_domains',
-    description: 'Re-classify all existing memories with the current domain threshold. Processes in batches of 100; call repeatedly until it returns "done". Clears domain_anchors on first call and lets them re-emerge.',
-    inputSchema: { type: 'object', properties: {} },
+    description: 'Re-classify all existing memories with the current domain classifier. Processes in batches of 30; call repeatedly until it returns "Done." Pass targeted=false for a full wipe-and-rebuild (clears domain_anchors); default targeted=true only fixes unanchored/general memories.',
+    inputSchema: { type: 'object', properties: { targeted: { type: 'boolean', description: 'true (default) = only fix unanchored memories; false = wipe domain_anchors and reclassify everything' } } },
   },
   {
     name: 'memory_retag_projects',
@@ -1501,23 +1501,26 @@ Return: ["project-name", "project-name", ...]`,
       const offsetRaw = await env.KV.get('REBUILD_OFFSET');
 
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
-      // targeted=true (default): only reclassify unanchored/general memories, keep existing anchors
-      // targeted=false: full wipe-and-rebuild (pass targeted=false explicitly)
-      const targeted = args.targeted !== false;
+      // targeted=false only matters on the FIRST call: wipe all domain_anchors and start a fresh rebuild.
+      // Once REBUILD_OFFSET is set, we always use sequential pagination (full SQL path).
+      const targeted = args.targeted === false || args.targeted === 'false' ? false : true;
 
       // Only wipe anchors on full rebuild, not targeted pass
       if (offsetRaw === null && !targeted) {
         await env.DB.prepare('DELETE FROM domain_anchors').run();
       }
-      // Targeted mode uses no OFFSET — rows disappear from result set as they're fixed,
-      // so OFFSET-based pagination skips rows. Just LIMIT without offset, keep calling until empty.
+      // On continuation calls (offsetRaw set), always use sequential pagination regardless of targeted param.
+      // Also skip remapToAnchoredDomains in full-path mode — let Llama create new domains freely.
+      const isContinuation = offsetRaw !== null;
+      const useFullPath = !targeted || isContinuation;
+
       const rows = await env.DB.prepare(
-        targeted
-          ? `SELECT id, text, memory_type FROM memories
+        useFullPath
+          ? 'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
+          : `SELECT id, text, memory_type FROM memories
              WHERE domain = 'general' OR domain NOT IN (SELECT name FROM domain_anchors)
              ORDER BY rowid LIMIT ?`
-          : 'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
-      ).bind(...(targeted ? [BATCH] : [BATCH, offset])).all<{ id: string; text: string; memory_type: string }>();
+      ).bind(...(useFullPath ? [BATCH, offset] : [BATCH])).all<{ id: string; text: string; memory_type: string }>();
 
       const batch = rows.results ?? [];
       if (!batch.length) {
@@ -1532,7 +1535,9 @@ Return: ["project-name", "project-name", ...]`,
       const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
         .all<{ name: string }>()).results?.map(r => r.name) ?? [];
       const rawAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env);
-      const domainAssignments = await remapToAnchoredDomains(rawAssignments, mus, env);
+      // In full rebuild mode, skip remapping — let Llama create new domains freely.
+      // In targeted mode, remap unanchored assignments to nearest existing anchor.
+      const domainAssignments = useFullPath ? rawAssignments : await remapToAnchoredDomains(rawAssignments, mus, env);
 
       // Batch D1 updates + centroid accumulation
       const d1Updates: D1PreparedStatement[] = [];

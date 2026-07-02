@@ -68,6 +68,11 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
 - [ ] Verify + document MCP support: Zed, OpenAI Codex/CLI, Windsurf, Continue.dev
 - [ ] "Supported Clients" table in README once confirmed
 
+### Domain Rebuild — KNOWN ISSUE (2026-07-01)
+- [ ] **personal-life domain (180 memories) was lost in full rebuild** — Llama scattered them into career-job-search and gaussian-memory-dev (both now suspiciously large: 1238 and 537). personal-life is now in the domain hints for both classifiers so it re-emerges for new memories, but the 180 old ones need a targeted=false rebuild to recover. Not urgent — retrieval still works, just personal content surfaces in wrong domain. Do when there's time to babysit another 156-batch rebuild in OpenCode.
+- [ ] **g2f-* micro-domain explosion** — full rebuild fragmented bayer-datamine into 8 g2f-* sub-domains. Fixed via SQL merge on 2026-07-01. bayer-datamine hint added to classifier. If rebuild is run again, confirm g2f content stays consolidated.
+- [ ] **targeted=false param was silently ignored** (fixed 2026-07-01 by OpenCode: string-aware parse + schema declaration). Confirm the fix is in src/tools.ts before any future full rebuild.
+
 ### Cleanup
 - [ ] One-time prune of old verbatim noise in the pool (pre-distillation junk: "Yeah, I do." etc.) — for clean demo retrievals
 
@@ -104,6 +109,7 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
 MCP tools have mechanical descriptions (what, not when). For an MCP server consumed by agents, tool descriptions
 ARE the skill docs — the only non-optional surface the agent reads every turn. Fix descriptions to teach agent behavior:
 - `memory_timeline` → frame as temporal/"what did I do this week," fix recency sort (currently ranks by access freq)
+  - **REPRO 2026-06-29 (tested live w/ Claude):** `memory_timeline(personal-life)` returns ALL rows stamped the same `2026-05-26` (a backfill/import date), so chronological view is collapsed — cannot surface "yesterday" no matter what. Tried passing `order=date_desc`: the MCP layer accepted the extra param (schema permissive) but output was **byte-identical** → handler either ignores `order` OR every row shares one date so re-sort is a no-op. **Root cause = data layer: ingestion flattened event timestamps onto import date.** Two fixes: (1) preserve real `created_at`/event date on ingest (don't overwrite with import time); (2) have timeline parse `order`/`since` and sort by `last_accessed`/event date, not access-freq. Until (1), recency is fundamentally unqueryable (also breaks the `yesterday`/`this week` retrieval edge-case tests above). NOTE: `order`/`since` should be declared in the tool's inputSchema, not just silently accepted.
 - `memory_list` → frame as recency/audit tool ("use with since= for 'what did I save today'")
 - `memory_retrieve` → frame as topical default, add cross-ref to list/timeline for temporal needs
 - `memory_store` → prefer over auto_store, always pass explicit domain (mis-domained memories don't surface)

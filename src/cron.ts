@@ -9,8 +9,13 @@ export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: 
   const nowSec = Math.floor(Date.now() / 1000);
   const SEVEN_DAYS = 7 * 86400;
 
+  // Batch 500 at a time to avoid D1 full-table-scan timeouts.
+  // Prioritise candidates that are cold (no access) or old — process worst-sigma rows first.
   const rows = await env.DB.prepare(
-    'SELECT id, sigma_diagonal, access_count, timestamp FROM memories'
+    `SELECT id, sigma_diagonal, access_count, timestamp FROM memories
+     WHERE sigma_diagonal IS NOT NULL
+     ORDER BY access_count ASC, timestamp ASC
+     LIMIT 500`
   ).all<{ id: string; sigma_diagonal: string; access_count: number; timestamp: number }>();
 
   let decayed = 0, pruned = 0;
