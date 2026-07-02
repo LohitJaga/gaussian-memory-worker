@@ -432,7 +432,7 @@ export async function retrieve(
   // once per domain; without this they self-reinforce (mutual neighbours + shared entities)
   // and flood injection 8-10x. Keep the highest-scored instance, drop later near-identical
   // ones — embedding cosine when both have vectors, token-Jaccard fallback otherwise.
-  const DEDUP_COS = 0.92, DEDUP_TEXT = 0.82;
+  const DEDUP_COS = 0.85, DEDUP_TEXT = 0.72;
   const tok = (s: string) => new Set(
     s.toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z0-9 ]/g, ' ')
       .split(/\s+/).filter(w => w.length > 3)
@@ -501,12 +501,29 @@ export async function retrieve(
   const gated = topDeduped.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
   const finalTop = gated.length >= 2 ? gated : topDeduped.slice(0, Math.max(2, Math.ceil(topDeduped.length / 2)));
 
+  // Diversity cap: prevent same type/domain from flooding results.
+  // Max 2 session summaries, max 3 from any single domain.
+  const diversityCapped: typeof finalTop = [];
+  const typeCounts = new Map<string, number>();
+  const domainCounts = new Map<string, number>();
+  for (const m of finalTop) {
+    const tc = typeCounts.get(m.type) ?? 0;
+    const dc = domainCounts.get(m.domain) ?? 0;
+    const typeLimit = m.type === 'session' ? 2 : 4;
+    if (tc >= typeLimit || dc >= 3) continue;
+    diversityCapped.push(m);
+    typeCounts.set(m.type, tc + 1);
+    domainCounts.set(m.domain, dc + 1);
+  }
+  // If diversity cap is too aggressive (< 2 results), fall back to finalTop
+  const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
+
   // Sharpen accessed memories + record history if σ changed meaningfully.
   // Batched: previously one UPDATE (+ optional INSERT) + one KV read-modify-write
   // per memory — N+1 D1 round-trips and racy KV writes on every retrieve.
   const now = Math.floor(Date.now() / 1000);
   const writeStmts: D1PreparedStatement[] = [];
-  for (const mem of finalTop) {
+  for (const mem of postDiversity) {
     const domSize = domainSizeMap.get(mem.domain) ?? 10;
     const newSigma = sharpenSigma(mem.sigma, 0.85, 0.15, mem.contradiction, domSize);
     writeStmts.push(env.DB.prepare(
@@ -522,10 +539,10 @@ export async function retrieve(
     }
   }
   if (writeStmts.length) await env.DB.batch(writeStmts).catch(() => {});
-  await hotTierAddMany(finalTop.map(m => m.id), env); // hot tier = recently accessed, not recently stored
+  await hotTierAddMany(postDiversity.map(m => m.id), env); // hot tier = recently accessed, not recently stored
 
   // Check memory_relations: mark superseded memories so caller knows they've been replaced
-  const topIds = top.map(m => m.id);
+  const topIds = postDiversity.map(m => m.id);
   const supersededSet = new Set<string>();
   if (topIds.length > 0) {
     const relRows = await env.DB.prepare(
@@ -534,7 +551,7 @@ export async function retrieve(
     for (const r of relRows.results ?? []) supersededSet.add(r.to_id);
   }
 
-  return finalTop.map(m => {
+  return postDiversity.map(m => {
     const sig = meanSigma(m.sigma);
     const drift = sig < 0.35 ? '↑' : sig > 0.6 ? '↓' : '→';
     const cohesion = clusterCohesionMap.get(m.id) ?? 0;

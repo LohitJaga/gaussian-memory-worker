@@ -144,17 +144,20 @@ export default {
 
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await pruneJunkMemories(env).catch(() => {});
-    await consolidateColdMemories(env).catch(() => {});
-    await updateDecay(env).catch(() => {});
-    await deduplicateRecentMemories(env).catch(() => {});
-    await deduplicateColdMemories(env).catch(() => {});
-    await cleanupSingletons(env, 3).catch(() => {});
-    await refreshStaleDomainSummaries(env).catch(() => {});
-    await cronRebuildBatch(env, 2000, 10 * 60 * 1000).catch(() => {});
-    await synthesizeIdentityProfile(env).catch(() => {});
-    await handleToolCall('memory_judge', {}, env).catch(() => {});
-    await processPendingEntityQueue(env).catch(() => {});
+    const run = async (name: string, fn: () => Promise<unknown>) => {
+      try { await fn(); } catch (e) { console.error(`[cron] ${name} failed:`, e); }
+    };
+    await run('pruneJunk', () => pruneJunkMemories(env));
+    await run('consolidateCold', () => consolidateColdMemories(env));
+    await run('updateDecay', () => updateDecay(env));
+    await run('dedupeRecent', () => deduplicateRecentMemories(env));
+    await run('dedupeCold', () => deduplicateColdMemories(env));
+    await run('cleanupSingletons', () => cleanupSingletons(env, 3));
+    await run('refreshDomains', () => refreshStaleDomainSummaries(env));
+    await run('cronRebuild', () => cronRebuildBatch(env, 2000, 10 * 60 * 1000));
+    await run('synthesizeIdentity', () => synthesizeIdentityProfile(env));
+    await run('memoryJudge', () => handleToolCall('memory_judge', {}, env));
+    await run('entityQueue', () => processPendingEntityQueue(env));
   },
 };
 

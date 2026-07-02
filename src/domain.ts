@@ -103,11 +103,20 @@ RULES (follow strictly):
 4. New domain names: 2-4 lowercase hyphenated words. NO uppercase, NO spaces, NO leading hyphens.
 5. When in doubt, pick the closest existing domain.
 
+KEY DOMAIN SEMANTICS (use these when text mentions these topics):
+- loreal-internship / color-wow-agents / gchat-bot-dev / power-bi-dev: L'Oreal internship, Color Wow hair care brand, GChat bot, Power BI, BigQuery analytics, L'Oreal NYC work tasks
+- gaussian-memory-dev / cloudflare-infra: Gaussian Memory MCP project, Cloudflare Workers, D1 database, Vectorize, memory system
+- stat-416 / purdue-coursework / probability-theory: Purdue courses, STAT 416, combinatorics, probability, exam prep
+- ml-pytorch: machine learning theory, PyTorch model training, HuggingFace, NOT L'Oreal ML tasks (use loreal-internship)
+- leetcode-practice: LeetCode, coding interview prep, algorithms, data structures
+- bayer-datamine: Bayer Crop Science, The Data Mine, G2F (Genomes to Fields), maize yield, UAV imagery, G2F pipeline, field trials, orthomosaic — ALL g2f-* content belongs here
+- personal-life: personal life, hobbies, daily life, non-work activities, feelings, relationships, health, food, gaming, travel — anything NOT work or study
+
 Existing domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}
 
 Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
       },
-      { role: 'user', content: `<memory_text>${text.slice(0, 300)}</memory_text>` },
+      { role: 'user', content: `<memory_text>${text.slice(0, 600)}</memory_text>` },
     ],
     max_tokens: 30,
   }) as any;
@@ -237,15 +246,24 @@ export async function classifyBatchDomains(
   const canCreate = existingDomains.length < 50;
   const assignments: string[] = new Array(texts.length).fill('general');
 
+  const domainHints = `KEY DOMAIN SEMANTICS:
+- loreal-internship / color-wow-agents / gchat-bot-dev / power-bi-dev / sales-performance: L'Oreal internship, Color Wow hair brand, GChat bot, Power BI, BigQuery analytics, NYC work tasks
+- gaussian-memory-dev / cloudflare-infra: Gaussian Memory MCP project, Cloudflare Workers, D1, Vectorize, memory system
+- stat-416 / purdue-coursework / probability-theory: Purdue courses, STAT 416, combinatorics, probability, statistics exams
+- ml-pytorch: ML theory, PyTorch model training, HuggingFace — NOT L'Oreal ML tasks (use loreal-internship)
+- leetcode-practice: LeetCode, algorithms, coding interview prep
+- bayer-datamine: Bayer Crop Science, The Data Mine, G2F (Genomes to Fields), maize yield, UAV imagery, field trials, orthomosaic — ALL g2f-* content belongs here
+- personal-life: personal life, hobbies, daily life, non-work activities, feelings, relationships, health, gaming, travel — anything NOT work or study`;
+
   for (let g = 0; g < texts.length; g += GROUP) {
     if (Date.now() - startTime > timeBudgetMs) break;
     const group = texts.slice(g, g + GROUP);
-    const numbered = group.map((t, j) => `${j + 1}. ${t.slice(0, 150)}`).join('\n');
-    const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+    const numbered = group.map((t, j) => `${j + 1}. ${t.slice(0, 400)}`).join('\n');
+    const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
       messages: [
         {
           role: 'system',
-          content: `Classify each memory into a semantic domain. Domain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, or PERSON — never a generic activity.\nGOOD: "gaussian-memory-dev", "loreal-internship", "color-wow-agents", "career-job-search", "stat-416"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+          content: `Classify each memory into a semantic domain. ALWAYS pick from the existing domain list if any fits — even loosely. Only create a new domain if completely unrelated to all existing ones.\nDomain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, or PERSON — never a generic activity.\nGOOD: "gaussian-memory-dev", "loreal-internship", "color-wow-agents", "career-job-search", "stat-416"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\n${domainHints}\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
         },
         { role: 'user', content: numbered },
       ],
@@ -286,6 +304,7 @@ export async function remapToAnchoredDomains(
   }));
   if (!anchors.length) return assignments;
 
+  const MIN_REMAP_SIMILARITY = 0.3;
   const anchoredNames = new Set(anchors.map(a => a.name));
   for (let i = 0; i < assignments.length; i++) {
     if (anchoredNames.has(assignments[i])) continue;
@@ -296,7 +315,10 @@ export async function remapToAnchoredDomains(
       const sim = dotProduct(muArr, anchor.emb);
       if (sim > bestSim) { bestSim = sim; best = anchor.name; }
     }
-    assignments[i] = best;
+    // Only force-anchor when the match is actually good — otherwise keep the
+    // LLM's own domain guess rather than gluing unrelated content onto an
+    // existing domain just because it's the least-dissimilar option.
+    if (bestSim >= MIN_REMAP_SIMILARITY) assignments[i] = best;
   }
   return assignments;
 }
