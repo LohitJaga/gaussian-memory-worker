@@ -95,6 +95,13 @@ function parseJsonName(result: any, key: string): string | null {
 export async function ensureDomainColumns(env: Env): Promise<void> {
   try { await env.DB.prepare('ALTER TABLE domain_anchors ADD COLUMN memory_count INTEGER DEFAULT 0').run(); } catch {}
   try { await env.DB.prepare('ALTER TABLE domain_anchors ADD COLUMN last_summarized_count INTEGER DEFAULT 0').run(); } catch {}
+  try { await env.DB.prepare('ALTER TABLE memories ADD COLUMN cluster_id TEXT').run(); } catch {}
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_memories_cluster_id ON memories(cluster_id)').run(); } catch {}
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS micro_clusters (id TEXT PRIMARY KEY, sum TEXT NOT NULL, count INTEGER NOT NULL, updated_at INTEGER NOT NULL)'
+    ).run();
+  } catch {}
 }
 
 // Primary real-time classifier. Deterministic nearest-anchor assignment first

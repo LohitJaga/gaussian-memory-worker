@@ -1,6 +1,7 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
 import { classifyDomainForStore, updateDomainCentroid } from './domain';
+import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
 import { storeMemory, processPendingEntityQueue } from './storage';
 import { retrieve } from './retrieval';
@@ -379,13 +380,15 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       if (isLowSignalText(storedText)) return `SKIP: low-signal or chat-filler text`;
       const mu = await embed(storedText, env);
       const domain = await classifyDomainForStore(storedText, env, mu);
+      const { clusterId, isNew: isNewCluster } = await assignMicroCluster(mu, env);
       const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(storedText);
       const emotional_intensity = Math.max(args.emotional_intensity ?? 0.0, inferred);
       const { action, id, conflict_candidates } = await storeMemory(
-        storedText, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default'
+        storedText, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default', clusterId
       );
       if (action === 'spawned') {
         await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
+        await commitMicroClusterAssignment(clusterId, isNewCluster, mu, env).catch(() => {});
       }
       let out = `${action.toUpperCase()}: '${storedText.slice(0, 60)}' -> (${domain}/${memory_type}, id=${id.slice(0, 8)})`;
       if (conflict_candidates?.length) {
@@ -414,12 +417,15 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const domain = (typeof args.domain === 'string' && args.domain.trim())
         ? args.domain.trim()
         : await classifyDomainForStore(text, env, mu).catch(() => 'general');
+      // cluster_id is independent of any caller-supplied domain override — always assign.
+      const { clusterId, isNew: isNewCluster } = await assignMicroCluster(mu, env);
       // Fix #7: nudge centroid when auto-classifying (matches memory_auto_store pattern)
       const { action, id, conflict_candidates } = await storeMemory(
-        text, 'decision', domain, 0.6, env, mu, args.project ?? 'default'
+        text, 'decision', domain, 0.6, env, mu, args.project ?? 'default', clusterId
       );
-      if (action === 'spawned' && !args.domain) {
-        await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
+      if (action === 'spawned') {
+        if (!args.domain) await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
+        await commitMicroClusterAssignment(clusterId, isNewCluster, mu, env).catch(() => {});
       }
       // Fix #4: surface conflict_candidates like sibling store handlers
       let out = `${action.toUpperCase()}: '${text.slice(0, 80)}' -> (${domain}/decision, id=${id.slice(0, 8)})`;
@@ -498,8 +504,12 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
       const mu = await embed(description, env);
       const domain = await classifyDomainForStore(description, env, mu);
-      const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu, args.project ?? 'default');
-      if (action === 'spawned') await updateDomainCentroid(domain, mu, env, ctx);
+      const { clusterId, isNew: isNewCluster } = await assignMicroCluster(mu, env);
+      const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu, args.project ?? 'default', clusterId);
+      if (action === 'spawned') {
+        await updateDomainCentroid(domain, mu, env, ctx);
+        await commitMicroClusterAssignment(clusterId, isNewCluster, mu, env).catch(() => {});
+      }
       return `${action.toUpperCase()}: '${description.slice(0, 60)}' -> (${domain}/episodic, id=${id.slice(0, 8)})`;
     }
 
@@ -698,11 +708,13 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         if (tooSimilar) { skipped++; continue; }
 
         const domain = await classifyDomainForStore(item.text, env, mu);
+        const { clusterId, isNew: isNewCluster } = await assignMicroCluster(mu, env);
         const { memory_type: inferred, emotional_intensity } = inferTypeAndIntensity(item.text);
         const memType = item.type !== 'episodic' ? item.type : inferred;
-        const { action } = await storeMemory(item.text, memType, domain, emotional_intensity, env, mu, project);
+        const { action } = await storeMemory(item.text, memType, domain, emotional_intensity, env, mu, project, clusterId);
         if (action === 'spawned') {
           await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
+          await commitMicroClusterAssignment(clusterId, isNewCluster, mu, env).catch(() => {});
           storedMus.push(mu);
           stored++;
         } else {
@@ -1279,13 +1291,15 @@ Return ONLY valid JSON array:
         if (tooSimilar) continue;
 
         const domain = await classifyDomainForStore(text, env, mu);
+        const { clusterId, isNew: isNewCluster } = await assignMicroCluster(mu, env);
         const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
           ? fact.type : null;
         const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
         const memory_type = llmType ?? inferredType;
-        const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default');
+        const { action } = await storeMemory(text, memory_type, domain, emotional_intensity, env, mu, args.project ?? 'default', clusterId);
         if (action === 'spawned') {
           await updateDomainCentroid(domain, mu, env, ctx).catch(() => {});
+          await commitMicroClusterAssignment(clusterId, isNewCluster, mu, env).catch(() => {});
           storedMus.push(mu);
           stored++;
         }
@@ -1300,11 +1314,13 @@ Return ONLY valid JSON array:
           const summaryText = `Session ${date}: ${cleanFacts.slice(0, 5).map(f => f.text).join(' | ')}`;
           const summaryMu = await embed(summaryText, env);
           const summaryDomain = await classifyDomainForStore(summaryText, env, summaryMu);
+          const { clusterId: summaryClusterId, isNew: isNewSummaryCluster } = await assignMicroCluster(summaryMu, env);
           const { action: sAction } = await storeMemory(
-            summaryText, 'session', summaryDomain, 0.9, env, summaryMu, args.project ?? 'default'
+            summaryText, 'session', summaryDomain, 0.9, env, summaryMu, args.project ?? 'default', summaryClusterId
           );
           if (sAction === 'spawned') {
             await updateDomainCentroid(summaryDomain, summaryMu, env).catch(() => {});
+            await commitMicroClusterAssignment(summaryClusterId, isNewSummaryCluster, summaryMu, env).catch(() => {});
             stored++;
           }
         } catch {}

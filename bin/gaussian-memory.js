@@ -156,6 +156,14 @@ async function init() {
     console.log('done');
   } catch { console.log('exists or failed — continuing'); }
 
+  // Vectorize — microcluster centroids (internal retrieval signal, separate from the
+  // named/capped domain index above)
+  process.stdout.write('  Creating microcluster Vectorize index... ');
+  try {
+    execSync('npx wrangler vectorize create gaussian-memory-microclusters --dimensions=768 --metric=cosine 2>&1', { stdio: 'pipe' });
+    console.log('done');
+  } catch { console.log('exists or failed — continuing'); }
+
   // KV
   process.stdout.write('  Creating KV namespace... ');
   let kvId;
@@ -209,6 +217,9 @@ async function init() {
   for (const col of [
     "ALTER TABLE memories ADD COLUMN valid_from INTEGER",
     "ALTER TABLE memories ADD COLUMN valid_to INTEGER",
+    "ALTER TABLE memories ADD COLUMN cluster_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_memories_cluster_id ON memories(cluster_id)",
+    "CREATE TABLE IF NOT EXISTS micro_clusters (id TEXT PRIMARY KEY, sum TEXT NOT NULL, count INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
   ]) {
     try { execSync(`npx wrangler d1 execute gaussian-memory --remote --command "${col}" 2>&1`, { stdio: 'pipe' }); }
     catch { /* column already exists — ignore */ }
