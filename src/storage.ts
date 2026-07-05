@@ -1,5 +1,5 @@
 import type { Env } from './types';
-import { embed } from './embed';
+import { embed, dotProduct } from './embed';
 import {
   initialSigma, deserializeSigma, serializeSigma,
   kalmanMerge, shouldMerge, meanSigma,
@@ -8,6 +8,35 @@ import {
 const HOT_KEY = 'hot:recent_ids';
 const HOT_TTL = 86400; // 24h
 const HOT_MAX = 100;
+
+// Closes the Vectorize propagation-lag gap (2-5 min, per the D1 exact-text
+// check above) for near-duplicate merge detection specifically. A memory
+// stored moments ago and reworded slightly by the LLM extractor won't be an
+// exact-text match and won't be in the Vectorize index yet either, so it was
+// invisible to storeMemory's merge check entirely — this cache makes it
+// visible immediately by keeping embeddings in KV (read-after-write
+// consistent) instead of waiting on Vectorize.
+const RECENT_EMBEDDINGS_KEY = 'recent:store_embeddings';
+const RECENT_EMBEDDINGS_TTL = 600; // 10 min — comfortably past the documented lag
+const RECENT_EMBEDDINGS_MAX = 50;
+
+interface RecentEmbedding { id: string; mu: number[]; domain: string; ts: number }
+
+async function recentEmbeddingsGet(env: Env): Promise<RecentEmbedding[]> {
+  try {
+    const raw = await env.KV.get(RECENT_EMBEDDINGS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+async function recentEmbeddingsAdd(id: string, mu: Float32Array, domain: string, env: Env): Promise<void> {
+  try {
+    const existing = await recentEmbeddingsGet(env);
+    const updated = [{ id, mu: Array.from(mu), domain, ts: Math.floor(Date.now() / 1000) }, ...existing]
+      .slice(0, RECENT_EMBEDDINGS_MAX);
+    await env.KV.put(RECENT_EMBEDDINGS_KEY, JSON.stringify(updated), { expirationTtl: RECENT_EMBEDDINGS_TTL });
+  } catch {}
+}
 
 export async function hotTierAdd(id: string, env: Env): Promise<void> {
   try {
@@ -128,6 +157,25 @@ export async function storeMemory(
     returnMetadata: 'indexed',
   });
 
+  // Recent-cache candidates: memories stored in the last ~10 min may not be in
+  // Vectorize yet (2-5 min propagation lag), so a same-minute paraphrase would
+  // otherwise never become a merge candidate at all. Compute cosine locally
+  // against the KV cache (immediately consistent) and fold matches above a
+  // low floor into the same candidate list the rest of this function already
+  // scores — real merge/contradiction decisions still go through the existing
+  // Bhattacharyya/shouldMerge logic below, this only fixes candidate recall.
+  const recentMuArr = Array.from(mu);
+  const recentCandidates = (await recentEmbeddingsGet(env))
+    .filter(r => r.ts > now - RECENT_EMBEDDINGS_TTL)
+    .map(r => ({ id: r.id, score: dotProduct(recentMuArr, r.mu), metadata: { domain: r.domain } }))
+    .filter(r => r.score > 0.5);
+
+  const seenIds = new Set(results.matches.map(m => m.id));
+  const matches = [
+    ...results.matches,
+    ...recentCandidates.filter(r => !seenIds.has(r.id)),
+  ];
+
   let bestId: string | null = null;
   let bestDist = Infinity;
   let bestSigma: Float32Array | null = null;
@@ -135,7 +183,7 @@ export async function storeMemory(
   let bestScore = 0;
 
   // Batch fetch all candidate rows in one D1 query instead of N sequential selects
-  const candidateIds = results.matches.map(m => m.id);
+  const candidateIds = matches.map(m => m.id);
   const placeholders = candidateIds.map(() => '?').join(',');
   const rows = candidateIds.length > 0
     ? await env.DB.prepare(
@@ -163,7 +211,7 @@ export async function storeMemory(
     }
   }
 
-  for (const match of results.matches) {
+  for (const match of matches) {
     const matchDomain = (match.metadata as any)?.domain as string | undefined;
     // Cross-domain dedup: merge near-identical memories regardless of domain. Session
     // summaries are the same content tagged per-domain, so use a looser ceiling (0.90)
@@ -206,7 +254,7 @@ export async function storeMemory(
   }
 
   // Use tighter threshold for cross-domain merges (0.08) vs same-domain (0.20)
-  const mergeThreshold = (bestId && results.matches.find(m => m.id === bestId && (m.metadata as any)?.domain === domain)) ? 0.20 : 0.08;
+  const mergeThreshold = (bestId && matches.find(m => m.id === bestId && (m.metadata as any)?.domain === domain)) ? 0.20 : 0.08;
   if (bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold)) {
     const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
 
@@ -252,6 +300,7 @@ export async function storeMemory(
     values: Array.from(mu),
     metadata: { domain, memory_type: memoryType, project },
   }]);
+  await recentEmbeddingsAdd(id, mu, domain, env); // visible to merge-check immediately, unlike Vectorize
   await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
   // Record initial σ — baseline for belief drift tracking
   await env.DB.prepare(
@@ -259,7 +308,7 @@ export async function storeMemory(
   ).bind(crypto.randomUUID(), id, meanSigma(sigma), 'store', now).run().catch(() => {});
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
-  const nearMissIds = results.matches
+  const nearMissIds = matches
     .filter(m => m.score > 0.85 && m.id !== id)
     .map(m => m.id);
 
@@ -269,7 +318,7 @@ export async function storeMemory(
     const nearRows = await env.DB.prepare(
       `SELECT id, text FROM memories WHERE id IN (${nearPlaceholders})`
     ).bind(...nearMissIds).all<{ id: string; text: string }>();
-    const scoreMap = new Map(results.matches.map(m => [m.id, m.score]));
+    const scoreMap = new Map(matches.map(m => [m.id, m.score]));
     conflict_candidates = nearRows.results.map(r => ({
       id: r.id,
       text: r.text.slice(0, 100),
