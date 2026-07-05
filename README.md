@@ -47,7 +47,7 @@ On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as S
 
 Workers AI has a 10,000 neuron/day limit on the free plan. Two sessions/day with the nightly cron runs around 2,000–2,500 neurons. The 10,000/day free limit is not a concern for normal use.
 
-The one exception is `memory_rebuild_domains`, which re-classifies every memory in your corpus via Llama 3.3 70B. At ~15 neurons per memory, a 500-memory corpus costs ~7,500 neurons in a single run. Run it off-peak or upgrade to paid ($5/month) before triggering it on a large corpus.
+The one exception is `memory_rebuild_domains(targeted=false)` — a full rebuild. Grouping itself is pure embedding math (no LLM cost at all); Llama 3.3 70B is only called once per resulting group to generate a name, so cost scales with how many distinct topics you have, not how many memories. Still resumable and safe to run incrementally; no need to run it often since day-to-day tagging doesn't depend on it.
 
 ## Seed your memory (recommended)
 
@@ -266,7 +266,7 @@ After scoring:
 
 ### Merging
 
-When two memories are semantically similar (cosine > 0.82), they merge via **Kalman update** rather than duplicating. The merged uncertainty is the optimal combination of both. This is why the system doesn't accumulate dozens of near-identical facts over time.
+When two memories are close enough — measured via **Bhattacharyya distance** between their confidence distributions, not raw cosine similarity — they merge via **Kalman update** rather than duplicating. The threshold is tighter for memories the system considers the same topic (same `cluster_id`) than for memories it considers unrelated, so genuine cross-topic duplicates still collapse without accidentally merging distinct facts that happen to share wording. The merged uncertainty is the optimal combination of both. This is why the system doesn't accumulate dozens of near-identical facts over time.
 
 ### Nightly cron (6am UTC)
 
@@ -285,10 +285,10 @@ When two memories are semantically similar (cosine > 0.82), they merge via **Kal
 | Component | Role |
 |---|---|
 | Cloudflare Workers | MCP server (HTTP/JSON-RPC 2.0), all logic runs at edge |
-| D1 (SQLite) | Memory store: text, σ diagonal, domain, type, access metadata, σ history |
-| Vectorize | Dense vector search (768D BGE-base-en-v1.5) |
+| D1 (SQLite) | Memory store: text, σ diagonal, domain, `cluster_id`, type, access metadata, σ history, micro-cluster centroids |
+| Vectorize | Two indexes — dense vector search over memories (768D BGE-base-en-v1.5), and a second index of micro-cluster centroids for the internal dedup/diversity signal |
 | FTS5 virtual table | Full-text keyword search, fused with Vectorize via RRF (k=60) |
-| Workers AI | BGE embeddings, Llama 3.1 8B for extraction/synthesis, Llama 3.3 70B for contradiction judgment |
+| Workers AI | BGE embeddings; Llama 3.2 3B for lightweight synthesis/summarization; Llama 3.3 70B for fact extraction, contradiction judgment, and domain/cluster naming |
 | KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
 | R2 | Cold storage for consolidated memories (σ > 1.5, age > 90 days) |
 | Cron | Nightly maintenance: consolidation, decay, dedup, entity processing, identity synthesis |
@@ -312,7 +312,7 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 | `memory_decay` | Manual decay pass |
 | `memory_stats` | Total count, σ distribution, domain breakdown, access heat |
 | `memory_orphan_check` | Detect D1 memories missing Vectorize vectors. `repair=true` re-embeds. |
-| `memory_rebuild_domains` | Re-classify all memory domains (batched, resumable, 2000/run) |
+| `memory_rebuild_domains` | Default fixes only unanchored memories against existing domains. `targeted=false` does a full deterministic rebuild: clusters embeddings first (order-independent, no LLM), then names each resulting cluster once. Resumable; pass `dry_run=true` to preview domain counts before committing |
 | `memory_cleanup_singletons` | Merge domains with fewer than N memories into nearest anchor |
 | `memory_retag_projects` | LLM-based project re-tagging for the default memory pool |
 | `memory_build_entities` | Retroactive entity extraction for entity graph traversal |
@@ -345,13 +345,17 @@ Trajectory (5 snapshots):
 ## File structure
 
 ```
-src/index.ts              MCP server, routing, cron handler
+src/index.ts              MCP server, routing, cron handler, /viz galaxy visualization
 src/tools.ts              All 23 tool handlers
 src/retrieval.ts          Hybrid retrieval scoring, spreading activation, entity graph, temporal pipeline
 src/storage.ts            Store, merge, dedup, entity extraction queue
 src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
 src/cron.ts               Nightly maintenance jobs
-bin/gaussian-memory.js    CLI: init, ingest, and backup commands
+src/domain.ts             Named/capped domain taxonomy: real-time classification, batch fixups
+src/cluster.ts            Deterministic embedding clustering (leader pass + average-linkage merge)
+src/rebuild.ts            Full-corpus rebuild pipeline: scan → seed_clusters → cluster → name → commit
+src/microcluster.ts       Live per-memory cluster_id assignment (internal dedup/diversity signal)
+bin/gaussian-memory.js    CLI: init, ingest, backup, and show commands
 hooks/
   gaussian-retrieve.sh         UserPromptSubmit hook: retrieves context before each prompt
   gaussian-posttool.sh         PostToolUse hook: stores semantic meaning of code changes
