@@ -139,7 +139,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_timeline',
-    description: 'Chronological view of memories in a domain — shows how knowledge evolved over time, sigma trajectory, and any supersede/conflict markers. Pass domain to scope it; omit for a cross-domain timeline of the most-accessed memories.',
+    description: 'Chronological view of memories in a domain — shows how knowledge evolved over time, sigma trajectory, and any supersede/conflict markers. Pass domain to scope it; omit for a cross-domain timeline of the most recent memories.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -710,22 +710,26 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const limit = Math.min((args.limit as number) ?? 20, 50);
       const domain = args.domain as string | undefined;
 
+      // Pull the most recent `limit` rows (DESC), then reverse in JS so the
+      // displayed timeline still reads oldest→newest — previously this sorted
+      // ASC directly, which returned the OLDEST N rows in a domain and could
+      // never surface anything recent once a domain passed `limit` in size.
       const rows = await env.DB.prepare(
         domain
           ? `SELECT id, text, domain, memory_type, sigma_diagonal, access_count,
                     contradiction_flag, timestamp
              FROM memories WHERE domain = ?
-             ORDER BY timestamp ASC LIMIT ?`
+             ORDER BY timestamp DESC LIMIT ?`
           : `SELECT id, text, domain, memory_type, sigma_diagonal, access_count,
                     contradiction_flag, timestamp
              FROM memories
-             ORDER BY access_count DESC, timestamp ASC LIMIT ?`
+             ORDER BY timestamp DESC LIMIT ?`
       ).bind(...(domain ? [domain, limit] : [limit]))
        .all<{ id: string; text: string; domain: string; memory_type: string;
               sigma_diagonal: string; access_count: number;
               contradiction_flag: number; timestamp: number }>();
 
-      const memories = rows.results ?? [];
+      const memories = (rows.results ?? []).reverse();
       if (!memories.length) return domain ? `No memories in domain "${domain}".` : 'No memories found.';
 
       // Fetch supersede relations for these IDs in one query
@@ -758,7 +762,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       }
 
       const lines: string[] = [
-        domain ? `TIMELINE: ${domain} (${memories.length} memories)` : `TIMELINE: top ${memories.length} most-accessed memories`,
+        domain ? `TIMELINE: ${domain} (${memories.length} memories)` : `TIMELINE: ${memories.length} most recent memories`,
         '',
       ];
 
@@ -1107,9 +1111,30 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
     }
 
     case 'memory_delete': {
-      const row = await env.DB.prepare('SELECT text FROM memories WHERE id = ?')
-        .bind(args.id).first<{ text: string }>();
+      const row = await env.DB.prepare(
+        'SELECT text, domain, memory_type, timestamp FROM memories WHERE id = ?'
+      ).bind(args.id).first<{ text: string; domain: string; memory_type: string; timestamp: number }>();
       if (!row) return `Not found: ${args.id}`;
+
+      // Archive to R2 before hard-delete, same shape/convention as cron.ts consolidateColdMemories,
+      // so all deletion paths leave a consistent undo/audit trail. Never block the delete on this.
+      try {
+        const payload = JSON.stringify({
+          id: args.id,
+          original_text: row.text,
+          compressed_text: row.text,
+          domain: row.domain,
+          memory_type: row.memory_type,
+          archived_at: Math.floor(Date.now() / 1000),
+          original_timestamp: row.timestamp,
+        });
+        await env.R2.put(`memories/${args.id}.json`, payload, {
+          httpMetadata: { contentType: 'application/json' },
+        });
+      } catch (err) {
+        console.error(`memory_delete: R2 archive failed for ${args.id}`, err);
+      }
+
       await env.DB.batch([
         env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(args.id),
         env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(args.id),
@@ -1289,10 +1314,33 @@ Return ONLY valid JSON array:
       if (parts.length === 0) return 'Invalid pattern.';
       const conditions = parts.map(() => 'INSTR(LOWER(text), LOWER(?)) > 0').join(' AND ');
       const rows = await env.DB.prepare(
-        `SELECT id FROM memories WHERE ${conditions}`
-      ).bind(...parts).all<{ id: string }>();
-      const ids = (rows.results ?? []).map(r => r.id);
+        `SELECT id, text, domain, memory_type, timestamp FROM memories WHERE ${conditions}`
+      ).bind(...parts).all<{ id: string; text: string; domain: string; memory_type: string; timestamp: number }>();
+      const matched = rows.results ?? [];
+      const ids = matched.map(r => r.id);
       if (!ids.length) return 'No memories matched pattern.';
+
+      // Archive each matched memory to R2 before hard-delete, same shape/convention as
+      // cron.ts consolidateColdMemories. Archival failures never block the delete.
+      await Promise.all(matched.map(async row => {
+        try {
+          const payload = JSON.stringify({
+            id: row.id,
+            original_text: row.text,
+            compressed_text: row.text,
+            domain: row.domain,
+            memory_type: row.memory_type,
+            archived_at: Math.floor(Date.now() / 1000),
+            original_timestamp: row.timestamp,
+          });
+          await env.R2.put(`memories/${row.id}.json`, payload, {
+            httpMetadata: { contentType: 'application/json' },
+          });
+        } catch (err) {
+          console.error(`memory_bulk_delete: R2 archive failed for ${row.id}`, err);
+        }
+      }));
+
       for (let i = 0; i < ids.length; i += 100) {
         const chunk = ids.slice(i, i + 100);
         await env.DB.batch([
