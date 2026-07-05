@@ -1,8 +1,9 @@
 import type { Env } from './types';
 import { batchEmbed, dotProduct } from './embed';
 import {
-  ensureDomainColumns, classifyBatchDomains, remapToAnchoredDomains, refreshDomainSummary,
+  ensureDomainColumns, classifyBatchDomains, refreshDomainSummary,
 } from './domain';
+import { applyBatchAssignments } from './rebuild';
 import { decaySigma, deserializeSigma, serializeSigma, meanSigma } from './gaussian';
 
 export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
@@ -69,62 +70,15 @@ export async function cronRebuildBatch(env: Env, rowLimit: number, timeBudgetMs:
   // No wipe-and-rebuild: domain anchors stay intact, no multi-night inconsistency window.
   // No KV offset needed: general bucket stays small (~100-200 rows), runs in one cron tick.
   const rows = await env.DB.prepare(
-    "SELECT id, text, memory_type FROM memories WHERE domain = 'general' ORDER BY rowid LIMIT ?"
-  ).bind(rowLimit).all<{ id: string; text: string; memory_type: string }>();
+    "SELECT id, text, domain, memory_type, project FROM memories WHERE domain = 'general' ORDER BY rowid LIMIT ?"
+  ).bind(rowLimit).all<{ id: string; text: string; domain: string; memory_type: string; project: string | null }>();
 
   const batch = rows.results ?? [];
   if (!batch.length) return;
 
   const mus = await batchEmbed(batch.map(r => r.text), env);
-
-  const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
-    .all<{ name: string }>()).results?.map(r => r.name) ?? [];
-
-  const rawAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env, timeBudgetMs, start);
-  const domainAssignments = await remapToAnchoredDomains(rawAssignments, mus, env);
-
-  // Batch D1 updates + Vectorize upserts + centroid accumulation
-  const d1Updates = batch.map((row, i) =>
-    env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(domainAssignments[i], row.id)
-  );
-  for (let i = 0; i < d1Updates.length; i += 500) {
-    await env.DB.batch(d1Updates.slice(i, i + 500));
-  }
-  await env.VECTORIZE.upsert(batch.map((row, i) => ({
-    id: row.id, values: Array.from(mus[i]),
-    metadata: { domain: domainAssignments[i], memory_type: row.memory_type },
-  })));
-
-  const centroidAccum = new Map<string, { sum: number[]; count: number }>();
-  for (let i = 0; i < batch.length; i++) {
-    const domain = domainAssignments[i];
-    const acc = centroidAccum.get(domain) ?? { sum: new Array(mus[i].length).fill(0), count: 0 };
-    mus[i].forEach((v, j) => { acc.sum[j] = (acc.sum[j] ?? 0) + v; });
-    acc.count++;
-    centroidAccum.set(domain, acc);
-  }
-  for (const [domain, { sum, count }] of centroidAccum) {
-    const existing = await env.DB.prepare(
-      'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
-    ).bind(domain).first<{ embedding: string; memory_count: number }>();
-    if (!existing) {
-      const total = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-      if ((total?.n ?? 0) < 50) {
-        const norm = Math.sqrt(sum.reduce((s, v) => s + v * v, 0));
-        await env.DB.prepare(
-          'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, ?, 0)'
-        ).bind(domain, JSON.stringify(sum.map(v => v / (norm || 1))), count).run();
-      }
-    } else {
-      const n = existing.memory_count ?? 0;
-      const old: number[] = JSON.parse(existing.embedding);
-      const updated = old.map((v, j) => (v * n + (sum[j] ?? 0)) / (n + count));
-      const norm = Math.sqrt(updated.reduce((s, v) => s + v * v, 0));
-      await env.DB.prepare(
-        'UPDATE domain_anchors SET embedding = ?, memory_count = ? WHERE name = ?'
-      ).bind(JSON.stringify(updated.map(v => v / (norm || 1))), n + count, domain).run();
-    }
-  }
+  const assignments = await classifyBatchDomains(batch.map(r => r.text), mus, env, timeBudgetMs, start);
+  await applyBatchAssignments(batch, mus, assignments, env);
 }
 
 // Prune low-signal junk: cold episodic memories that are short, old, and never accessed.

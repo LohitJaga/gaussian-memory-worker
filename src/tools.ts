@@ -1,9 +1,7 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
-import {
-  classifyDomainWithLlama, updateDomainCentroid,
-  ensureDomainColumns, classifyBatchDomains, remapToAnchoredDomains,
-} from './domain';
+import { classifyDomainForStore, updateDomainCentroid } from './domain';
+import { rebuildDomainsStep } from './rebuild';
 import { storeMemory, processPendingEntityQueue } from './storage';
 import { retrieve } from './retrieval';
 import { updateDecay, cleanupSingletons } from './cron';
@@ -212,8 +210,17 @@ export const TOOLS = [
   },
   {
     name: 'memory_rebuild_domains',
-    description: 'Re-classify all existing memories with the current domain classifier. Processes in batches of 30; call repeatedly until it returns "Done." Pass targeted=false for a full wipe-and-rebuild (clears domain_anchors); default targeted=true only fixes unanchored/general memories.',
-    inputSchema: { type: 'object', properties: { targeted: { type: 'boolean', description: 'true (default) = only fix unanchored memories; false = wipe domain_anchors and reclassify everything' } } },
+    description: 'Re-classify memories. Default targeted=true fixes only general/unanchored memories against existing anchors. targeted=false starts a full deterministic rebuild: clusters all memory embeddings (order-independent average-linkage), then one LLM call per cluster for naming only — rerunning on the same corpus reproduces the same domains. Incremental; call repeatedly until "Done." During a full rebuild, pass dry_run=true at the clustering step to preview domain counts across merge_threshold values before applying.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targeted: { type: 'boolean', description: 'true (default) = only fix general/unanchored memories; false = full clustering rebuild (wipes domain_anchors at commit)' },
+        merge_threshold: { type: 'number', description: 'Full rebuild only: average-linkage similarity cut between clusters (default 0.75). Sweep with dry_run=true first.' },
+        micro_threshold: { type: 'number', description: 'Full rebuild only: leader-pass admission similarity (default 0.85). Lower it if the merge phase reports too many micro-clusters.' },
+        dry_run: { type: 'boolean', description: 'Full rebuild, clustering step only: report cluster counts per merge_threshold without applying.' },
+        restart: { type: 'boolean', description: 'Abandon an in-progress full rebuild and start over.' },
+      },
+    },
   },
   {
     name: 'memory_retag_projects',
@@ -371,7 +378,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       // chat-filler that wasn't enriched (no context passed) gets dropped here.
       if (isLowSignalText(storedText)) return `SKIP: low-signal or chat-filler text`;
       const mu = await embed(storedText, env);
-      const domain = await classifyDomainWithLlama(storedText, env, mu);
+      const domain = await classifyDomainForStore(storedText, env, mu);
       const { memory_type, emotional_intensity: inferred } = inferTypeAndIntensity(storedText);
       const emotional_intensity = Math.max(args.emotional_intensity ?? 0.0, inferred);
       const { action, id, conflict_candidates } = await storeMemory(
@@ -406,7 +413,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       // Fix #5: fallback to 'general' if classification fails
       const domain = (typeof args.domain === 'string' && args.domain.trim())
         ? args.domain.trim()
-        : await classifyDomainWithLlama(text, env, mu).catch(() => 'general');
+        : await classifyDomainForStore(text, env, mu).catch(() => 'general');
       // Fix #7: nudge centroid when auto-classifying (matches memory_auto_store pattern)
       const { action, id, conflict_candidates } = await storeMemory(
         text, 'decision', domain, 0.6, env, mu, args.project ?? 'default'
@@ -490,7 +497,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       if (!description || description.length < 10) return 'SKIP: model returned empty description';
 
       const mu = await embed(description, env);
-      const domain = await classifyDomainWithLlama(description, env, mu);
+      const domain = await classifyDomainForStore(description, env, mu);
       const { action, id } = await storeMemory(description, 'episodic', domain, 0, env, mu, args.project ?? 'default');
       if (action === 'spawned') await updateDomainCentroid(domain, mu, env, ctx);
       return `${action.toUpperCase()}: '${description.slice(0, 60)}' -> (${domain}/episodic, id=${id.slice(0, 8)})`;
@@ -690,7 +697,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         const tooSimilar = storedMus.some(prev => dotProduct(Array.from(mu), Array.from(prev)) > 0.92);
         if (tooSimilar) { skipped++; continue; }
 
-        const domain = await classifyDomainWithLlama(item.text, env, mu);
+        const domain = await classifyDomainForStore(item.text, env, mu);
         const { memory_type: inferred, emotional_intensity } = inferTypeAndIntensity(item.text);
         const memType = item.type !== 'episodic' ? item.type : inferred;
         const { action } = await storeMemory(item.text, memType, domain, emotional_intensity, env, mu, project);
@@ -1271,7 +1278,7 @@ Return ONLY valid JSON array:
         });
         if (tooSimilar) continue;
 
-        const domain = await classifyDomainWithLlama(text, env, mu);
+        const domain = await classifyDomainForStore(text, env, mu);
         const llmType = fact.type && ['episodic','semantic','procedural'].includes(fact.type)
           ? fact.type : null;
         const { memory_type: inferredType, emotional_intensity } = inferTypeAndIntensity(text);
@@ -1292,7 +1299,7 @@ Return ONLY valid JSON array:
           const date = new Date().toISOString().slice(0, 10);
           const summaryText = `Session ${date}: ${cleanFacts.slice(0, 5).map(f => f.text).join(' | ')}`;
           const summaryMu = await embed(summaryText, env);
-          const summaryDomain = await classifyDomainWithLlama(summaryText, env, summaryMu);
+          const summaryDomain = await classifyDomainForStore(summaryText, env, summaryMu);
           const { action: sAction } = await storeMemory(
             summaryText, 'session', summaryDomain, 0.9, env, summaryMu, args.project ?? 'default'
           );
@@ -1544,102 +1551,7 @@ Return: ["project-name", "project-name", ...]`,
     }
 
     case 'memory_rebuild_domains': {
-      await ensureDomainColumns(env);
-      const BATCH = 30;  // Smaller batch — 3 Llama calls per invocation (10 texts each)
-      const offsetRaw = await env.KV.get('REBUILD_OFFSET');
-
-      const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
-      // targeted=false only matters on the FIRST call: wipe all domain_anchors and start a fresh rebuild.
-      // Once REBUILD_OFFSET is set, we always use sequential pagination (full SQL path).
-      const targeted = args.targeted === false || args.targeted === 'false' ? false : true;
-
-      // Only wipe anchors on full rebuild, not targeted pass
-      if (offsetRaw === null && !targeted) {
-        await env.DB.prepare('DELETE FROM domain_anchors').run();
-      }
-      // On continuation calls (offsetRaw set), always use sequential pagination regardless of targeted param.
-      // Also skip remapToAnchoredDomains in full-path mode — let Llama create new domains freely.
-      const isContinuation = offsetRaw !== null;
-      const useFullPath = !targeted || isContinuation;
-
-      const rows = await env.DB.prepare(
-        useFullPath
-          ? 'SELECT id, text, memory_type FROM memories ORDER BY rowid LIMIT ? OFFSET ?'
-          : `SELECT id, text, memory_type FROM memories
-             WHERE domain = 'general' OR domain NOT IN (SELECT name FROM domain_anchors)
-             ORDER BY rowid LIMIT ?`
-      ).bind(...(useFullPath ? [BATCH, offset] : [BATCH])).all<{ id: string; text: string; memory_type: string }>();
-
-      const batch = rows.results ?? [];
-      if (!batch.length) {
-        await env.KV.delete('REBUILD_OFFSET');
-        const total = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
-        const anchors = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-        return `Done. ${total?.n ?? 0} memories reclassified into ${anchors?.n ?? 0} domains.`;
-      }
-
-      // Batch embed + classify using shared helper
-      const mus = await batchEmbed(batch.map(r => r.text), env);
-      const existingDomains = (await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid')
-        .all<{ name: string }>()).results?.map(r => r.name) ?? [];
-      const rawAssignments = await classifyBatchDomains(batch.map(r => r.text), existingDomains, env);
-      // In full rebuild mode, skip remapping — let Llama create new domains freely.
-      // In targeted mode, remap unanchored assignments to nearest existing anchor.
-      const domainAssignments = useFullPath ? rawAssignments : await remapToAnchoredDomains(rawAssignments, mus, env);
-
-      // Batch D1 updates + centroid accumulation
-      const d1Updates: D1PreparedStatement[] = [];
-      const vectorizeUpdates: any[] = [];
-      const centroidAccum = new Map<string, { sum: number[]; count: number }>();
-
-      for (let i = 0; i < batch.length; i++) {
-        const domain = domainAssignments[i];
-        d1Updates.push(env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(domain, batch[i].id));
-        vectorizeUpdates.push({ id: batch[i].id, values: Array.from(mus[i]), metadata: { domain, memory_type: batch[i].memory_type } });
-
-        const acc = centroidAccum.get(domain) ?? { sum: new Array(mus[i].length).fill(0), count: 0 };
-        mus[i].forEach((v, j) => { acc.sum[j] = (acc.sum[j] ?? 0) + v; });
-        acc.count++;
-        centroidAccum.set(domain, acc);
-      }
-
-      // Write D1 memory updates in one batch
-      for (let i = 0; i < d1Updates.length; i += 500) {
-        await env.DB.batch(d1Updates.slice(i, i + 500));
-      }
-      await env.VECTORIZE.upsert(vectorizeUpdates);
-
-      // Update domain centroids (incremental mean)
-      for (const [domain, { sum, count }] of centroidAccum) {
-        const existing = await env.DB.prepare(
-          'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
-        ).bind(domain).first<{ embedding: string; memory_count: number }>();
-
-        if (!existing) {
-          // Cap guard: don't create new anchors beyond 50
-          const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-          if ((totalDomains?.n ?? 0) < 50) {
-            const norm = Math.sqrt(sum.reduce((s, v) => s + v * v, 0));
-            const centroid = sum.map(v => v / (norm || 1));
-            await env.DB.prepare(
-              'INSERT INTO domain_anchors (name, embedding, memory_count, last_summarized_count) VALUES (?, ?, ?, 0)'
-            ).bind(domain, JSON.stringify(centroid), count).run();
-          }
-        } else {
-          const n = existing.memory_count ?? 0;
-          const old: number[] = JSON.parse(existing.embedding);
-          const updated = old.map((v, j) => (v * n + (sum[j] ?? 0)) / (n + count));
-          const norm = Math.sqrt(updated.reduce((s, v) => s + v * v, 0));
-          await env.DB.prepare(
-            'UPDATE domain_anchors SET embedding = ?, memory_count = ? WHERE name = ?'
-          ).bind(JSON.stringify(updated.map(v => v / (norm || 1))), n + count, domain).run();
-        }
-      }
-
-      await env.KV.put('REBUILD_OFFSET', String(offset + batch.length));
-      const totalCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{ n: number }>();
-      const domainCount = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-      return `Processed ${offset + batch.length}/${totalCount?.n ?? '?'} — ${domainCount?.n ?? 0} domains so far. Call again to continue.`;
+      return rebuildDomainsStep(args, env);
     }
 
     case 'identity_profile_get': {
