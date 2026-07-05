@@ -164,10 +164,10 @@ export async function retrieve(
   const nowSec = Math.floor(Date.now() / 1000);
   const binds = project === 'default' ? [...allIds, nowSec] : [...allIds, project, nowSec];
   const rows = await env.DB.prepare(
-    `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
+    `SELECT id, text, domain, cluster_id, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
      FROM memories WHERE id IN (${placeholders}) ${projectClause} AND (valid_to IS NULL OR valid_to > ?)`
   ).bind(...binds).all<{
-    id: string; text: string; domain: string; memory_type: string;
+    id: string; text: string; domain: string; cluster_id: string | null; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
   }>();
 
@@ -284,6 +284,7 @@ export async function retrieve(
       id: row.id,
       text: row.text,
       domain: row.domain,
+      cluster_id: row.cluster_id,
       type: row.memory_type,
       sigma: memSigma,
       primaryScore,
@@ -398,10 +399,10 @@ export async function retrieve(
     const bfsProjectClause = project === 'default' ? '' : `AND (project = ? OR project = 'default')`;
     const bfsBinds = project === 'default' ? [...newIds, nowSec] : [...newIds, project, nowSec];
     const newRows = await env.DB.prepare(
-      `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
+      `SELECT id, text, domain, cluster_id, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
        FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) ${bfsProjectClause} AND (valid_to IS NULL OR valid_to > ?)`
     ).bind(...bfsBinds).all<{
-      id: string; text: string; domain: string; memory_type: string;
+      id: string; text: string; domain: string; cluster_id: string | null; memory_type: string;
       sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
     }>();
 
@@ -416,7 +417,7 @@ export async function retrieve(
       const memSigma = deserializeSigma(row.sigma_diagonal);
       const match = newMatches.get(row.id)!;
       activatedExtras.push({
-        id: row.id, text: row.text, domain: row.domain, type: row.memory_type,
+        id: row.id, text: row.text, domain: row.domain, cluster_id: row.cluster_id, type: row.memory_type,
         sigma: memSigma, primaryScore: match.score, score: match.score,
         vector: [], contradiction: row.contradiction_flag === 1,
         freshnessBoost: 0, isFileEdit: false, activated: true,
@@ -501,19 +502,23 @@ export async function retrieve(
   const gated = topDeduped.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
   const finalTop = gated.length >= 2 ? gated : topDeduped.slice(0, Math.max(2, Math.ceil(topDeduped.length / 2)));
 
-  // Diversity cap: prevent same type/domain from flooding results.
-  // Max 2 session summaries, max 3 from any single domain.
+  // Diversity cap: prevent same type/micro-cluster from flooding results.
+  // Max 2 session summaries, max 3 from any single cluster_id — the raw, uncapped
+  // internal grouping signal (microcluster.ts), not the human-facing capped/named
+  // `domain` field. Memories without a cluster_id yet (pre-backfill) are exempt
+  // rather than all bucketed under one null key, so old rows aren't penalized as
+  // if they were one giant cluster.
   const diversityCapped: typeof finalTop = [];
   const typeCounts = new Map<string, number>();
-  const domainCounts = new Map<string, number>();
+  const clusterCounts = new Map<string, number>();
   for (const m of finalTop) {
     const tc = typeCounts.get(m.type) ?? 0;
-    const dc = domainCounts.get(m.domain) ?? 0;
+    const cc = m.cluster_id ? (clusterCounts.get(m.cluster_id) ?? 0) : 0;
     const typeLimit = m.type === 'session' ? 2 : 4;
-    if (tc >= typeLimit || dc >= 3) continue;
+    if (tc >= typeLimit || (m.cluster_id && cc >= 3)) continue;
     diversityCapped.push(m);
     typeCounts.set(m.type, tc + 1);
-    domainCounts.set(m.domain, dc + 1);
+    if (m.cluster_id) clusterCounts.set(m.cluster_id, cc + 1);
   }
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
   const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;

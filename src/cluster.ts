@@ -1,6 +1,8 @@
 import { dotProduct } from './embed';
 
-// Deterministic embedding clustering for domain rebuilds — no RNG, no LLM.
+// Deterministic embedding clustering — no RNG, no LLM. Shared by the full-rebuild
+// pipeline (rebuild.ts, phases 1+2 below) and the live per-memory microcluster
+// signal (microcluster.ts, phase 1 only — see addToMicros).
 //
 // Phase 1 (leader pass): stream memories in fixed rowid order into tight
 // micro-clusters. Phase 2 (UPGMA): exact average-linkage agglomerative merging
@@ -10,6 +12,13 @@ import { dotProduct } from './embed';
 // memory vectors — the micro-cluster stage loses no precision in phase 2.
 // Average linkage is monotone (merge similarities never increase), so one merge
 // trace down to a floor yields the clustering at ANY threshold above it.
+
+// Leader-pass admission: micro-clusters are near-identical topics (dedup fires
+// at 0.90-0.93 in this corpus, so 0.85 sits just below the duplicate band).
+// Canonical home for this constant — both the full-rebuild scan phase and the
+// live per-memory assignment (microcluster.ts) must use the same number so a
+// memory's live cluster assignment matches what a full rebuild would give it.
+export const DEFAULT_MICRO_THRESHOLD = 0.85;
 
 export interface MicroCluster {
   sum: number[]; // sum of member unit vectors (not normalized)

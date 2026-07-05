@@ -1,5 +1,5 @@
 import {
-  type MicroCluster, addToMicros, applyMergeTrace, buildMergeTrace,
+  type MicroCluster, DEFAULT_MICRO_THRESHOLD, addToMicros, applyMergeTrace, buildMergeTrace,
   clusterCountAtThreshold, finalizeClusters, newMicroFromRow, normalize,
 } from './cluster';
 import {
@@ -24,9 +24,6 @@ const NAME_BATCH = 5;
 const COMMIT_BATCH = 300;
 const TARGETED_BATCH = 100;
 
-// Leader-pass admission: micro-clusters are near-identical topics (dedup fires
-// at 0.90-0.93 in this corpus, so 0.85 sits just below the duplicate band).
-export const DEFAULT_MICRO_THRESHOLD = 0.85;
 // Average-linkage cut between micro-clusters. A guess until measured on real
 // data — sweep with dry_run=true (reports the count-per-threshold curve) and
 // pass merge_threshold explicitly before trusting the default.
@@ -35,17 +32,31 @@ const TRACE_FLOOR = 0.6; // merges below this avg similarity are never meaningfu
 const MIN_CLUSTER_SIZE = 3; // matches cleanupSingletons minCount
 const REPORT_THRESHOLDS = [0.65, 0.7, 0.725, 0.75, 0.775, 0.8, 0.85];
 
-// Above this many micro-clusters, the O(k²) merge phase risks the Workers CPU
-// budget — restart with a lower micro_threshold to get coarser micros instead.
-const MAX_MICROS = 2500;
+// The O(k²) merge phase (buildMergeTrace) is only run on the largest
+// MAX_MERGE_CANDIDATES micro-clusters — confirmed empirically (2026-07-05) that
+// the full pairwise trace crashes the Workers CPU budget around k~2100, well
+// under the previous MAX_MICROS=2500 guess (never load-tested). Smaller
+// micro-clusters don't meaningfully benefit from the expensive pairwise
+// comparison anyway — there's little to consolidate among a handful of
+// near-duplicate facts — so they pass through and are handled by
+// finalizeClusters' existing fold-into-nearest-kept-cluster-or-general logic,
+// same path any group under MIN_CLUSTER_SIZE already takes. This bounds the
+// computation for any corpus size at the cost of not considering merges among
+// the long tail of small clusters. A full fix (paginated/resumable merge trace
+// covering every micro-cluster) is a bigger project, not attempted here.
+const MAX_MERGE_CANDIDATES = 500;
 
 interface RebuildState {
-  phase: 'scan' | 'cluster' | 'name' | 'commit';
+  phase: 'scan' | 'seed_clusters' | 'cluster' | 'name' | 'commit';
   offset: number;
   mergeThreshold: number;
   microThreshold: number;
   anchorsWritten?: boolean;
+  oldClustersCleared?: boolean; // seed_clusters: stale MICRO_VECTORIZE/micro_clusters wiped
+  microClustersWritten?: boolean; // seed_clusters: new centroids written, now updating memories.cluster_id
 }
+
+const SEED_BATCH = 300; // matches COMMIT_BATCH's chunking scale
 
 async function loadState(env: Env): Promise<RebuildState | null> {
   const raw = await env.KV.get(STATE_KEY);
@@ -58,8 +69,11 @@ async function saveState(env: Env, state: RebuildState): Promise<void> {
 }
 
 async function ensureScratchTables(env: Env): Promise<void> {
+  // cluster_uuid: the permanent micro_clusters/MICRO_VECTORIZE id minted for this
+  // micro-cluster during seed_clusters — persisted here so the later memories.cluster_id
+  // pagination (which only has the integer idx via rebuild_assign) can look it up.
   await env.DB.prepare(
-    'CREATE TABLE IF NOT EXISTS rebuild_micros (idx INTEGER PRIMARY KEY, sum TEXT NOT NULL, count INTEGER NOT NULL, final_idx INTEGER)'
+    'CREATE TABLE IF NOT EXISTS rebuild_micros (idx INTEGER PRIMARY KEY, sum TEXT NOT NULL, count INTEGER NOT NULL, final_idx INTEGER, cluster_uuid TEXT)'
   ).run();
   await env.DB.prepare(
     'CREATE TABLE IF NOT EXISTS rebuild_finals (idx INTEGER PRIMARY KEY, sum TEXT NOT NULL, count INTEGER NOT NULL, name TEXT)'
@@ -79,8 +93,10 @@ async function dropScratchTables(env: Env): Promise<void> {
 // re-embedding the whole corpus; fall back to embed() for D1/Vectorize drift.
 async function fetchVectors(ids: string[], texts: string[], env: Env): Promise<number[][]> {
   const found = new Map<string, number[]>();
-  for (let i = 0; i < ids.length; i += 100) {
-    const vecs = await env.VECTORIZE.getByIds(ids.slice(i, i + 100));
+  // Vectorize.getByIds caps at 20 ids per call (VECTOR_GET_ERROR 40007 above that) —
+  // stricter than upsert/deleteByIds, which allow much larger batches.
+  for (let i = 0; i < ids.length; i += 20) {
+    const vecs = await env.VECTORIZE.getByIds(ids.slice(i, i + 20));
     for (const v of vecs ?? []) found.set(v.id, normalize(Array.from(v.values as number[])));
   }
   const missing = ids.map((id, i) => (found.has(id) ? -1 : i)).filter(i => i >= 0);
@@ -118,6 +134,7 @@ export async function rebuildDomainsStep(args: any, env: Env): Promise<string> {
     }
     switch (state.phase) {
       case 'scan': return scanStep(state, env);
+      case 'seed_clusters': return seedClustersStep(state, env);
       case 'cluster': return clusterStep(state, env, args.dry_run === true || args.dry_run === 'true');
       case 'name': return nameStep(state, env);
       case 'commit': return commitStep(state, env);
@@ -147,10 +164,12 @@ async function scanStep(state: RebuildState, env: Env): Promise<string> {
   const batch = rows.results ?? [];
 
   if (!batch.length) {
-    state.phase = 'cluster';
+    const scanned = state.offset;
+    state.phase = 'seed_clusters';
+    state.offset = 0;
     await saveState(env, state);
     const n = await env.DB.prepare('SELECT COUNT(*) as n FROM rebuild_micros').first<{ n: number }>();
-    return `Scan complete: ${state.offset} memories in ${n?.n ?? 0} micro-clusters. Call again to cluster (pass dry_run=true first to preview domain counts per merge_threshold).`;
+    return `Scan complete: ${scanned} memories in ${n?.n ?? 0} micro-clusters. Call again to seed the permanent cluster_id store.`;
   }
 
   // Crash recovery: the page's D1 writes below are one atomic batch, so if this
@@ -189,6 +208,90 @@ async function scanStep(state: RebuildState, env: Env): Promise<string> {
   return `Scanned ${state.offset} memories — ${micros.length} micro-clusters so far. Call again to continue.`;
 }
 
+// Bootstraps the permanent cluster_id store (micro_clusters + MICRO_VECTORIZE) from
+// this rebuild's scan output, and backfills memories.cluster_id. Reruns on every full
+// rebuild, so it also doubles as periodic compaction for the live/incremental path
+// (assignMicroCluster in microcluster.ts) — closing the natural weakness of an
+// online-only leader pass (no re-merging of clusters that drift close over time).
+// Note: cluster_id values are NOT stable across a rebuild — ids are re-minted each
+// run. Fine for same-cluster-right-now comparisons (the only thing that reads it),
+// but nothing should assume continuity across a rebuild boundary.
+async function seedClustersStep(state: RebuildState, env: Env): Promise<string> {
+  if (!state.oldClustersCleared) {
+    const oldIds = await env.DB.prepare('SELECT id FROM micro_clusters').all<{ id: string }>();
+    const ids = (oldIds.results ?? []).map(r => r.id);
+    for (let i = 0; i < ids.length; i += 1000) {
+      await env.MICRO_VECTORIZE.deleteByIds(ids.slice(i, i + 1000)).catch(() => {});
+    }
+    await env.DB.prepare('DELETE FROM micro_clusters').run();
+    state.oldClustersCleared = true;
+    await saveState(env, state);
+    return `Cleared ${ids.length} stale micro-cluster centroids. Call again to seed new ones.`;
+  }
+
+  if (!state.microClustersWritten) {
+    const rows = await env.DB.prepare(
+      'SELECT idx, sum, count FROM rebuild_micros WHERE cluster_uuid IS NULL ORDER BY idx LIMIT ?'
+    ).bind(SEED_BATCH).all<{ idx: number; sum: string; count: number }>();
+    const batch = rows.results ?? [];
+
+    if (!batch.length) {
+      state.microClustersWritten = true;
+      state.offset = 0;
+      await saveState(env, state);
+      return 'All micro-cluster centroids seeded. Call again to backfill memories.cluster_id.';
+    }
+
+    const minted = batch.map(r => ({ ...r, uuid: crypto.randomUUID() }));
+    const micUpserts: VectorizeVector[] = minted.map(r => ({
+      id: r.uuid,
+      values: normalize(JSON.parse(r.sum) as number[]),
+    }));
+    for (let i = 0; i < micUpserts.length; i += 500) {
+      await env.MICRO_VECTORIZE.upsert(micUpserts.slice(i, i + 500));
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const d1Stmts = minted.flatMap(r => [
+      env.DB.prepare('INSERT INTO micro_clusters (id, sum, count, updated_at) VALUES (?, ?, ?, ?)')
+        .bind(r.uuid, r.sum, r.count, now),
+      env.DB.prepare('UPDATE rebuild_micros SET cluster_uuid = ? WHERE idx = ?').bind(r.uuid, r.idx),
+    ]);
+    for (let i = 0; i < d1Stmts.length; i += 100) {
+      await env.DB.batch(d1Stmts.slice(i, i + 100));
+    }
+
+    return `Seeded ${batch.length} micro-cluster centroids. Call again to continue.`;
+  }
+
+  // Backfill memories.cluster_id from rebuild_assign JOIN rebuild_micros, same
+  // paginated-batch pattern commitStep already uses for the `domain` column.
+  const rows = await env.DB.prepare(
+    `SELECT a.memory_id as id, mc.cluster_uuid as uuid FROM rebuild_assign a
+     JOIN rebuild_micros mc ON mc.idx = a.mc
+     ORDER BY a.memory_id LIMIT ? OFFSET ?`
+  ).bind(SEED_BATCH, state.offset).all<{ id: string; uuid: string | null }>();
+  const batch = rows.results ?? [];
+
+  if (!batch.length) {
+    state.phase = 'cluster';
+    state.offset = 0;
+    await saveState(env, state);
+    return 'cluster_id backfill complete. Call again to cluster (pass dry_run=true first to preview domain counts per merge_threshold).';
+  }
+
+  const updates = batch.map(r =>
+    env.DB.prepare('UPDATE memories SET cluster_id = ? WHERE id = ?').bind(r.uuid, r.id)
+  );
+  for (let i = 0; i < updates.length; i += 100) {
+    await env.DB.batch(updates.slice(i, i + 100));
+  }
+
+  state.offset += batch.length;
+  await saveState(env, state);
+  return `Backfilled cluster_id for ${state.offset} memories. Call again to continue.`;
+}
+
 async function clusterStep(state: RebuildState, env: Env, dryRun: boolean): Promise<string> {
   const micros = await loadMicros(env);
   if (!micros.length) {
@@ -196,21 +299,39 @@ async function clusterStep(state: RebuildState, env: Env, dryRun: boolean): Prom
     await env.KV.delete(STATE_KEY);
     return 'No memories to cluster.';
   }
-  if (micros.length > MAX_MICROS) {
-    return `Too many micro-clusters (${micros.length} > ${MAX_MICROS}) for the merge phase. Restart with a coarser leader pass: memory_rebuild_domains(targeted=false, restart=true, micro_threshold=${(state.microThreshold ?? DEFAULT_MICRO_THRESHOLD) - 0.05}).`;
-  }
 
-  const trace = buildMergeTrace(micros, TRACE_FLOOR);
+  // Bound the expensive comparison to the largest clusters — see
+  // MAX_MERGE_CANDIDATES comment above. Sorting by count descending means the
+  // clusters most likely to represent a real, mergeable topic get the expensive
+  // treatment; the long tail of small/singleton clusters passes through untouched.
+  const withIdx = micros.map((m, i) => ({ m, i }));
+  withIdx.sort((a, b) => b.m.count - a.m.count);
+  const mergeSet = withIdx.slice(0, MAX_MERGE_CANDIDATES);
+  const restSet = withIdx.slice(MAX_MERGE_CANDIDATES);
+  const mergeMicros = mergeSet.map(x => x.m);
+
+  const trace = buildMergeTrace(mergeMicros, TRACE_FLOOR);
+  // Approximate curve: pass-through small clusters count once per threshold since
+  // they never merge in this bounded pass — same level of approximation the
+  // original curve already had (pre-finalizeClusters cap/fold isn't reflected either).
   const curve = REPORT_THRESHOLDS
-    .map(t => `${t}→${clusterCountAtThreshold(micros.length, trace, t)}`)
+    .map(t => `${t}→${clusterCountAtThreshold(mergeMicros.length, trace, t) + restSet.length}`)
     .join(', ');
 
   if (dryRun) {
     await saveState(env, state); // persist a merge_threshold override passed with dry_run
-    return `Dry run — ${micros.length} micro-clusters. Cluster count by merge_threshold: ${curve}. Current merge_threshold=${state.mergeThreshold}. Re-run without dry_run to apply (optionally pass merge_threshold).`;
+    return `Dry run — ${micros.length} micro-clusters (${mergeMicros.length} considered for merging, ${restSet.length} small clusters pass through unmerged). Cluster count by merge_threshold: ${curve}. Current merge_threshold=${state.mergeThreshold}. Re-run without dry_run to apply (optionally pass merge_threshold).`;
   }
 
-  const labels = applyMergeTrace(micros.length, trace, state.mergeThreshold);
+  const mergeLabels = applyMergeTrace(mergeMicros.length, trace, state.mergeThreshold);
+  // Pass-through micros get their own unique labels — never merged with each
+  // other or the merge set, but still eligible for finalizeClusters' existing
+  // fold-into-nearest-kept-cluster-or-general handling below.
+  const maxMergeLabel = mergeLabels.length ? Math.max(...mergeLabels) : -1;
+  const labels = new Array<number>(micros.length);
+  mergeSet.forEach((x, localIdx) => { labels[x.i] = mergeLabels[localIdx]; });
+  restSet.forEach((x, k) => { labels[x.i] = maxMergeLabel + 1 + k; });
+
   const { microToFinal, clusters } = finalizeClusters(
     micros, labels, DOMAIN_CAP, MIN_CLUSTER_SIZE, ANCHOR_FLOOR_SIM
   );
@@ -326,8 +447,8 @@ async function commitStep(state: RebuildState, env: Env): Promise<string> {
   const domainById = new Map(batch.map(r => [r.id, domainFor(r.f)]));
   const upserts: VectorizeVector[] = [];
   const ids = batch.map(r => r.id);
-  for (let i = 0; i < ids.length; i += 100) {
-    const vecs = await env.VECTORIZE.getByIds(ids.slice(i, i + 100));
+  for (let i = 0; i < ids.length; i += 20) { // getByIds caps at 20 ids per call
+    const vecs = await env.VECTORIZE.getByIds(ids.slice(i, i + 20));
     for (const v of vecs ?? []) {
       upserts.push({
         id: v.id,

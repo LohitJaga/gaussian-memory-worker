@@ -21,6 +21,11 @@ binding = "VECTORIZE"
 index_name = "gaussian-memory-index"
 # Create with: wrangler vectorize create gaussian-memory-index --dimensions=768 --metric=cosine
 
+[[vectorize]]
+binding = "MICRO_VECTORIZE"
+index_name = "gaussian-memory-microclusters"
+# Create with: wrangler vectorize create gaussian-memory-microclusters --dimensions=768 --metric=cosine
+
 [[kv_namespaces]]
 binding = "KV"
 id = "YOUR_KV_NAMESPACE_ID"

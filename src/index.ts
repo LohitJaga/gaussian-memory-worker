@@ -162,47 +162,23 @@ export default {
 };
 
 async function handleVizData(env: Env): Promise<Response> {
-  const [nodesRes, edgesRes] = await Promise.all([
-    env.DB.prepare(`
-      SELECT domain,
-             COUNT(*) AS memory_count,
-             AVG(access_count) AS avg_activation,
-             memory_type
-      FROM memories
-      WHERE domain IS NOT NULL AND domain != ''
-      GROUP BY domain, memory_type
-      ORDER BY memory_count DESC
-      LIMIT 60
-    `).all(),
-    env.DB.prepare(`
-      SELECT mr.relation_type, mr.confidence,
-             m1.domain AS from_domain,
-             m2.domain AS to_domain
-      FROM memory_relations mr
-      JOIN memories m1 ON mr.from_id = m1.id
-      JOIN memories m2 ON mr.to_id = m2.id
-      WHERE m1.domain IS NOT NULL AND m2.domain IS NOT NULL
-        AND m1.domain != m2.domain
-      LIMIT 200
-    `).all(),
-  ]);
-
-  // Aggregate edges by domain pair
-  const edgeMap = new Map<string, { source: string; target: string; weight: number; count: number }>();
-  for (const row of (edgesRes.results as any[])) {
-    const key = [row.from_domain, row.to_domain].sort().join('||');
-    const existing = edgeMap.get(key);
-    if (existing) {
-      existing.weight += row.confidence ?? 0.5;
-      existing.count++;
-    } else {
-      edgeMap.set(key, { source: row.from_domain, target: row.to_domain, weight: row.confidence ?? 0.5, count: 1 });
-    }
-  }
+  // Grouped by cluster_id (the raw, unnamed micro-cluster tag), not the capped/
+  // named `domain` field — clusters are the internal, always-consistent signal,
+  // so the galaxy reflects the real shape of the corpus rather than a lossy
+  // 50-name summary of it. No LIMIT: cluster_id has no cap, unlike domain.
+  const nodesRes = await env.DB.prepare(`
+    SELECT cluster_id,
+           COUNT(*) AS memory_count,
+           AVG(access_count) AS avg_activation,
+           memory_type
+    FROM memories
+    WHERE cluster_id IS NOT NULL AND cluster_id != ''
+    GROUP BY cluster_id, memory_type
+    ORDER BY memory_count DESC
+  `).all();
 
   return new Response(JSON.stringify({
     nodes: nodesRes.results,
-    edges: Array.from(edgeMap.values()),
   }), { headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
 }
 
@@ -239,37 +215,36 @@ function handleViz(env: Env): Response {
 <body>
 <div id="header">
   <h1>Gaussian Memory</h1>
-  <p>Every memory, as a point — clustered into Gaussian domains · live from D1</p>
+  <p>Every memory, as a point — clustered by similarity · live from D1</p>
 </div>
-<div id="tooltip"><div class="domain"></div><div class="stat"></div></div>
+<div id="tooltip"><div class="cluster"></div><div class="stat"></div></div>
 <div id="legend">
-  Each point = one memory &nbsp;·&nbsp; Each cloud = a domain (2D Gaussian, spread ∝ √memories)
+  Each point = one memory &nbsp;·&nbsp; Each cloud = a cluster of near-duplicate/related memories (2D Gaussian, spread ∝ √memories)
 </div>
 <canvas id="canvas"></canvas>
 <script>
 const WORKER = ${JSON.stringify(workerUrl)};
 const KEY = new URLSearchParams(location.search).get('key') ?? '';
 
-const DOMAIN_COLORS = {
-  // grouped by theme so related domains share a hue family
-  'gaussian-memory-dev': '#a78bfa', 'cloudflare-infra': '#c4b5fd', 'git-workflow': '#8b5cf6',
-  'loreal-internship': '#60a5fa', 'color-wow-agents': '#38bdf8', 'gchat-bot-dev': '#22d3ee', 'sql-analytics': '#2dd4bf',
-  'career-job-search': '#fbbf24', 'sprint-planning': '#f59e0b', 'pico-trading': '#fb923c',
-  'purdue-coursework': '#f472b6', 'stat-416': '#ec4899', 'leetcode-practice': '#e879f9',
-  'ml-pytorch': '#34d399', 'python-data-work': '#4ade80', 'bayer-datamine': '#f87171',
-  'personal-life': '#94a3b8',
-};
-function colorFor(domain) {
-  if (DOMAIN_COLORS[domain]) return DOMAIN_COLORS[domain];
+// Clusters are unnamed (raw micro-cluster ids, not the human-facing named
+// domains) — color is a deterministic hash of the id, no name-based lookup.
+// Hue restricted to a cosmic band (blues/purples/cyans/pinks/ambers) instead of
+// the full 0-360 wheel — avoids muddy yellow-greens, reads as one coherent
+// nebula palette instead of a random rainbow.
+const HUE_BANDS = [[195, 260], [260, 320], [320, 345], [15, 45]]; // cyan-blue, purple, pink, amber
+function colorFor(clusterId) {
   let h = 0;
-  for (let i = 0; i < domain.length; i++) h = (h * 31 + domain.charCodeAt(i)) >>> 0;
-  return \`hsl(\${h % 360}, 65%, 62%)\`;
+  for (let i = 0; i < clusterId.length; i++) h = (h * 31 + clusterId.charCodeAt(i)) >>> 0;
+  const band = HUE_BANDS[h % HUE_BANDS.length];
+  const hue = band[0] + (h >> 8) % (band[1] - band[0]);
+  const light = 58 + (h >> 16) % 18;
+  return \`hsl(\${hue}, 72%, \${light}%)\`;
 }
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const tooltip = document.getElementById('tooltip');
-let nodes = [], points = [];
+let nodes = [], points = [], dust = [];
 let W, H, dpr;
 
 function resize() {
@@ -305,16 +280,33 @@ async function load() {
   // Aggregate nodes by domain
   const domainMap = new Map();
   for (const r of data.nodes) {
-    const d = domainMap.get(r.domain) ?? { domain: r.domain, count: 0, activation: 0, types: new Set() };
+    const d = domainMap.get(r.cluster_id) ?? { cluster: r.cluster_id, count: 0, activation: 0, types: new Set() };
     d.count += r.memory_count;
     d.activation += r.avg_activation * r.memory_count;
     d.types.add(r.memory_type);
-    domainMap.set(r.domain, d);
+    domainMap.set(r.cluster_id, d);
   }
-  nodes = Array.from(domainMap.values())
+  const allClusters = Array.from(domainMap.values())
     .sort((a, b) => b.count - a.count)
     .map(d => ({ ...d, activation: d.activation / Math.max(1, d.count),
-                 spread: 10 + Math.sqrt(d.count) * 2.2, color: colorFor(d.domain) }));
+                 spread: 10 + Math.sqrt(d.count) * 2.2, color: colorFor(d.cluster) }));
+
+  // Collision-avoidance placement is O(n²) per relax iteration — fine for ~50
+  // named domains, not for ~thousands of raw clusters (most singletons/pairs,
+  // per this corpus's own distribution). Only the biggest clusters get a
+  // placed-and-labeled cloud; the long tail scatters as unlabeled background
+  // points — visually this reads as a bright core of real topic clusters in a
+  // diffuse starfield, which suits a galaxy better than 50 discrete blobs anyway.
+  // Size-based cutoff, not an arbitrary top-N: most clusters in a real corpus are
+  // tiny (near-duplicate pairs/triples) and look identical to background dust at
+  // any placement — only clusters big enough to read as an actual "cloud" earn
+  // the collision-avoided placement + label. Also caps the O(n²) relax cost.
+  // allClusters is sorted descending, so the qualifying set is always a clean
+  // prefix — everything after it (whether too small or just past the cap) scatters.
+  const MIN_CLOUD_SIZE = 15;
+  const placedCount = Math.min(80, allClusters.filter(n => n.count >= MIN_CLOUD_SIZE).length);
+  nodes = allClusters.slice(0, placedCount);
+  const scattered = allClusters.slice(placedCount);
 
   // Place cluster centers: biggest first, phyllotaxis spiral, then relax so
   // clouds don't overlap (spacing ∝ each cloud's spread).
@@ -338,47 +330,76 @@ async function load() {
     }
   }
 
-  // Sample each domain's real memory_count as points from a 2D Gaussian
+  // Sample each placed cluster's real memory_count as points from a 2D Gaussian
   function gauss() { let u=0,v=0; while(!u)u=Math.random(); while(!v)v=Math.random();
     return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
   points = [];
   for (const n of nodes) {
     const m = Math.min(n.count, 1500);
     for (let k = 0; k < m; k++)
-      points.push({ x: n.x + gauss()*n.spread, y: n.y + gauss()*n.spread, color: n.color });
+      points.push({ x: n.x + gauss()*n.spread, y: n.y + gauss()*n.spread, color: n.color, bright: true });
+  }
+  // Scattered long tail: one dim point per small cluster (not per memory) —
+  // rendering every individual memory here (there can be 4000+) drowns the real
+  // clusters in a uniform wall of dots with no contrast. One dot per cluster,
+  // hard-capped total, keeps this a quiet backdrop instead of the main event.
+  dust = [];
+  const MAX_DUST = 900;
+  const dustPool = scattered.length > MAX_DUST
+    ? scattered.slice().sort(() => Math.random() - 0.5).slice(0, MAX_DUST)
+    : scattered;
+  for (const n of dustPool) {
+    dust.push({ x: Math.random() * W, y: Math.random() * H, color: n.color });
   }
 
   draw();
 }
 
 function draw() {
-  ctx.clearRect(0, 0, W, H);
+  // Radial vignette instead of flat black — a little atmosphere/depth instead
+  // of a void, subtle dark-navy-to-black falloff from center.
+  const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.75);
+  bg.addColorStop(0, '#0d0d1c');
+  bg.addColorStop(1, '#050508');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
 
-  // the galaxy — every memory as a glowing point, additive blending so dense
-  // cluster cores bloom bright. (no cross-domain lines — they read as clutter)
+  // Dust first (dim, small, drawn underneath) so it reads as a quiet backdrop;
+  // real cluster points drawn on top, bigger and brighter, with a soft glow
+  // (shadowBlur) so they visually bloom against it — flat solid dots read as
+  // a spreadsheet, glow reads as a nebula.
   ctx.globalCompositeOperation = 'lighter';
-  for (const p of points) {
+  ctx.shadowBlur = 0;
+  for (const p of dust) {
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 1.1, 0, Math.PI * 2);
     ctx.fillStyle = p.color;
-    ctx.globalAlpha = 0.7;
+    ctx.globalAlpha = 0.28;
     ctx.fill();
   }
+  for (const p of points) {
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2.1, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
 
-  // 3. domain labels floating over each cloud
+  // 3. member-count label floating over each placed cloud — clusters are
+  // unnamed (raw ids, not human-facing domain names), so no title text, just size.
+  // Every node here already cleared MIN_CLOUD_SIZE, so no additional skip needed.
   for (const n of nodes) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const label = n.domain.replace(/-/g, ' ');
     const ly = n.y - n.spread - 12;
-    ctx.font = 'bold 12px -apple-system, sans-serif';
-    ctx.fillStyle = 'rgba(241,245,249,0.92)';
-    ctx.fillText(label, n.x, ly);
     ctx.font = '10px sans-serif';
     ctx.fillStyle = n.color;
     ctx.globalAlpha = 0.8;
-    ctx.fillText(n.count.toLocaleString() + ' memories', n.x, ly + 14);
+    ctx.fillText(n.count.toLocaleString() + ' memories', n.x, ly);
     ctx.globalAlpha = 1;
   }
 }
@@ -392,7 +413,7 @@ canvas.addEventListener('mousemove', e => {
     tooltip.style.opacity = '1';
     tooltip.style.left = (e.clientX + 14) + 'px';
     tooltip.style.top = (e.clientY - 10) + 'px';
-    tooltip.querySelector('.domain').textContent = hit.domain;
+    tooltip.querySelector('.cluster').textContent = hit.cluster.slice(0, 8);
     tooltip.querySelector('.stat').textContent =
       \`Memories: \${hit.count}\\nAvg activation: \${hit.activation.toFixed(1)}\\nTypes: \${[...hit.types].join(', ')}\`;
   } else {

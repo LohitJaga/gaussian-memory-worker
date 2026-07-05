@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS memories (
   access_count INTEGER DEFAULT 0,
   memory_type TEXT DEFAULT 'episodic',
   domain TEXT DEFAULT 'general',
+  cluster_id TEXT,
   emotional_intensity REAL DEFAULT 0.0,
   contradiction_flag INTEGER DEFAULT 0,
   project TEXT NOT NULL DEFAULT 'default',
@@ -27,6 +28,19 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project);
 CREATE INDEX IF NOT EXISTS idx_topic_key ON memories(topic_key) WHERE topic_key IS NOT NULL;
+
+-- cluster_id: raw, uncapped, unnamed micro-cluster assignment — the internal
+-- retrieval-mechanics signal, separate from the human-facing capped/named `domain`.
+-- Added via ensureDomainColumns()'s ALTER pattern for existing deployments; declared
+-- here too so fresh installs get it without a migration step.
+CREATE INDEX IF NOT EXISTS idx_memories_cluster_id ON memories(cluster_id);
+
+CREATE TABLE IF NOT EXISTS micro_clusters (
+  id TEXT PRIMARY KEY,        -- same id as the centroid's MICRO_VECTORIZE vector id
+  sum TEXT NOT NULL,          -- JSON number[] — mirrors cluster.ts's MicroCluster.sum
+  count INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS memory_relations (
   id TEXT PRIMARY KEY,

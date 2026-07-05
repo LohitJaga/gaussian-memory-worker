@@ -128,7 +128,8 @@ export async function storeMemory(
   text: string, memoryType: string, domain: string,
   emotionalIntensity: number, env: Env,
   precomputedMu?: Float32Array,
-  project: string = 'default'
+  project: string = 'default',
+  clusterId: string | null = null
 ): Promise<{ action: string; id: string; conflict_candidates?: Array<{ id: string; text: string; score: number }> }> {
   const mu = precomputedMu ?? await embed(text, env);
   const dim = mu.length;
@@ -187,8 +188,8 @@ export async function storeMemory(
   const placeholders = candidateIds.map(() => '?').join(',');
   const rows = candidateIds.length > 0
     ? await env.DB.prepare(
-        `SELECT id, sigma_diagonal, text FROM memories WHERE id IN (${placeholders})`
-      ).bind(...candidateIds).all<{ id: string; sigma_diagonal: string; text: string }>()
+        `SELECT id, sigma_diagonal, text, cluster_id FROM memories WHERE id IN (${placeholders})`
+      ).bind(...candidateIds).all<{ id: string; sigma_diagonal: string; text: string; cluster_id: string | null }>()
     : { results: [] };
   const rowMap = new Map(rows.results.map(r => [r.id, r]));
 
@@ -212,16 +213,17 @@ export async function storeMemory(
   }
 
   for (const match of matches) {
-    const matchDomain = (match.metadata as any)?.domain as string | undefined;
-    // Cross-domain dedup: merge near-identical memories regardless of domain. Session
-    // summaries are the same content tagged per-domain, so use a looser ceiling (0.90)
-    // for them to collapse the per-domain duplicates at the source instead of spawning
-    // 6-10 rows that later flood retrieval.
-    const crossDomainCeil = memoryType === 'session' ? 0.90 : 0.97;
-    if (matchDomain && matchDomain !== domain && match.score < crossDomainCeil) continue;
-
     const row = rowMap.get(match.id);
     if (!row) continue;
+
+    // Cross-cluster dedup: merge near-identical memories regardless of cluster. Session
+    // summaries are the same content tagged per-cluster, so use a looser ceiling (0.90)
+    // for them to collapse the per-cluster duplicates at the source instead of spawning
+    // 6-10 rows that later flood retrieval. Reads cluster_id from D1 (rowMap), not
+    // Vectorize match metadata — cluster_id isn't written to Vectorize metadata at all
+    // (see microcluster.ts), and D1 is read-after-write consistent unlike Vectorize.
+    const crossClusterCeil = memoryType === 'session' ? 0.90 : 0.97;
+    if (row.cluster_id && clusterId && row.cluster_id !== clusterId && match.score < crossClusterCeil) continue;
 
     const existingSigma = deserializeSigma(row.sigma_diagonal);
     const approxDist = 0.5 * (1 - match.score);
@@ -253,8 +255,10 @@ export async function storeMemory(
     return { action: 'contradiction', id };
   }
 
-  // Use tighter threshold for cross-domain merges (0.08) vs same-domain (0.20)
-  const mergeThreshold = (bestId && matches.find(m => m.id === bestId && (m.metadata as any)?.domain === domain)) ? 0.20 : 0.08;
+  // Use tighter threshold for cross-cluster merges (0.08) vs same-cluster (0.20).
+  // Reads cluster_id from rowMap (D1), same reasoning as the ceiling check above.
+  const bestRow = bestId ? rowMap.get(bestId) : undefined;
+  const mergeThreshold = (bestRow && clusterId && bestRow.cluster_id === clusterId) ? 0.20 : 0.08;
   if (bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold)) {
     const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
 
