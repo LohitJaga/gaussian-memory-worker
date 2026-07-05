@@ -63,6 +63,11 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
 - [ ] One-line pitch + 1–2 hard numbers (see Benchmarking) so it's not forgettable
 
 ### Benchmarking (need numbers for README/blog)
+Research already done — see `BENCHMARKING.md` (compiled 2026-06-15): which public benchmarks exist
+(LoCoMo, LongMemEval, BEAM, MemBench, MemoryAgentBench, MemGym), how Mem0/Zep/Letta evaluate themselves
+(with the known credibility disputes between them), a concrete LoCoMo-10 run plan, and a recommended
+benchmarking order. No actual numbers have been produced yet — this section is genuinely unstarted,
+but don't re-research from scratch, the plan already exists.
 - [ ] Latency — p50/p95 retrieve, edge vs Mem0 API roundtrip (quickest real number)
 - [ ] Token savings per call from caching (the resume-point metric)
 - [ ] Retrieval quality on a labeled query set
@@ -131,7 +136,7 @@ threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-
 - [ ] Unit tests for `src/domain.ts` — classification accuracy + centroid management
 - [ ] Unit tests for `src/storage.ts` — Kalman merge correctness, contradiction detection
 - [ ] Unit tests for `src/retrieval.ts` — RRF fusion, sigma gating, spreading activation
-- [ ] Clean up dead code in `extensions/browser/inject.js`: `GM_TOOLS`, `GM_TOOL_NAMES`, `injectGMTools()`, `injectToolResults()` — unused since Claude tools were dropped; keeping them implies they're active
+- [x] Clean up dead code in `extensions/browser/inject.js` — confirmed 2026-07-05: `GM_TOOLS`/`GM_TOOL_NAMES`/`injectGMTools()`/`injectToolResults()` don't exist anywhere in the repo (removed in commit `38f3c7c`, part of the 2026-06-17 session); this item was just never checked off
 - [x] Fixed duplicate-POST bug: guarded `tapClaudeStream` (tee failure returns raw response, never re-fetches) + explicit return in Claude catch for pre-dispatch errors (2026-06-17)
 - [x] Fixed double-store: `captureChatGPTSSE` now stores the turn exactly once via a `stored` flag / `flush()` ([DONE] or stream end) (2026-06-17)
 
