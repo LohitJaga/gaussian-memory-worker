@@ -1,5 +1,12 @@
+import { dotProduct, embed } from './embed';
 import type { Env } from './types';
-import { embed, dotProduct } from './embed';
+
+export const DOMAIN_CAP = 50;
+// Memory→anchor accept threshold — tuned from real usage history (0.75 → 0.88 → 0.82).
+export const ANCHOR_ACCEPT_SIM = 0.82;
+// Below this, content is genuinely unrelated to every anchor — the committed
+// remap floor that fixed "unrelated content glued into wrong domains".
+export const ANCHOR_FLOOR_SIM = 0.3;
 
 const ANCHOR_STOP = new Set([
   // articles / conjunctions / prepositions
@@ -21,7 +28,7 @@ const ANCHOR_STOP = new Set([
   'error','type','list','running','system',
 ]);
 
-function deriveAnchorName(text: string): string {
+export function deriveAnchorName(text: string): string {
   const tokens = text.split(/\s+/);
   // Skip first token (sentence-starter, capitalized by grammar not by being a proper noun)
   for (let i = 1; i < tokens.length; i++) {
@@ -44,37 +51,45 @@ function deriveAnchorName(text: string): string {
   return `cluster_${Date.now().toString(36).slice(-4)}`;
 }
 
-async function classifyDomain(mu: Float32Array, text: string, env: Env): Promise<string> {
-  const muArr = Array.from(mu);
+export interface Anchor { name: string; emb: number[] }
 
-  const rows = await env.DB.prepare(
-    'SELECT name, embedding FROM domain_anchors'
-  ).all<{ name: string; embedding: string }>();
+export async function loadAnchors(env: Env): Promise<Anchor[]> {
+  const rows = await env.DB.prepare('SELECT name, embedding FROM domain_anchors ORDER BY rowid')
+    .all<{ name: string; embedding: string }>();
+  return (rows.results ?? []).map(r => ({ name: r.name, emb: JSON.parse(r.embedding) as number[] }));
+}
 
+export function bestAnchor(mu: number[], anchors: Anchor[]): { name: string; sim: number } | null {
   let bestName = '';
   let bestSim = -1;
-
-  for (const row of rows.results ?? []) {
-    const anchorEmb: number[] = JSON.parse(row.embedding);
-    const sim = dotProduct(muArr, anchorEmb);
-    if (sim > bestSim) { bestSim = sim; bestName = row.name; }
+  for (const a of anchors) {
+    const sim = dotProduct(mu, a.emb);
+    if (sim > bestSim) { bestSim = sim; bestName = a.name; }
   }
+  return bestName ? { name: bestName, sim: bestSim } : null;
+}
 
-  if (bestSim >= 0.82) return bestName;
+const NAMING_RULES = `Domain names must name a PROJECT, TOOL, PERSON, or SUBJECT — not a generic activity.
+GOOD: "acme-web-app", "cs101-coursework", "job-search", "react-portfolio-site"
+BAD: "data-preprocessing", "homework-submission", "exam-preparation", "file-management"
+Format: 2-4 lowercase hyphenated words. NO uppercase, NO spaces, NO leading hyphens.`;
 
-  // At cap: return nearest existing anchor instead of creating a new micro-domain
-  const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-  if ((totalDomains?.n ?? 0) >= 50) {
-    return bestName || 'general';
-  }
+function cleanDomainName(raw: string): string | null {
+  const clean = raw.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
+  return clean.length >= 2 && !clean.startsWith('-') ? clean : null;
+}
 
-  const name = deriveAnchorName(text);
-  // OR IGNORE, not OR REPLACE: on a derived-name collision with an existing anchor,
-  // REPLACE wiped its centroid embedding, memory_count, and last_summarized_count.
-  await env.DB.prepare(
-    'INSERT OR IGNORE INTO domain_anchors (name, embedding) VALUES (?, ?)'
-  ).bind(name, JSON.stringify(muArr)).run();
-  return name;
+function parseJsonName(result: any, key: string): string | null {
+  const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+  const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
+  try {
+    const match = raw.match(/\{[^}]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed[key] && typeof parsed[key] === 'string') return cleanDomainName(parsed[key]);
+    }
+  } catch {}
+  return null;
 }
 
 export async function ensureDomainColumns(env: Env): Promise<void> {
@@ -82,83 +97,170 @@ export async function ensureDomainColumns(env: Env): Promise<void> {
   try { await env.DB.prepare('ALTER TABLE domain_anchors ADD COLUMN last_summarized_count INTEGER DEFAULT 0').run(); } catch {}
 }
 
-export async function classifyDomainWithLlama(text: string, env: Env, precomputedMu?: Float32Array): Promise<string> {
-  const rows = await env.DB.prepare('SELECT name FROM domain_anchors ORDER BY rowid').all<{ name: string }>();
-  const existing = (rows.results ?? []).map(r => r.name);
+// Primary real-time classifier. Deterministic nearest-anchor assignment first
+// (BIRCH-style one-pass), LLM only for the ambiguous band below the accept
+// threshold — so the common case has zero sampling variance and zero LLM cost.
+export async function classifyDomainForStore(text: string, env: Env, precomputedMu?: Float32Array): Promise<string> {
+  const mu = precomputedMu ?? await embed(text, env);
+  const muArr = Array.from(mu);
+  const anchors = await loadAnchors(env);
 
-  const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
-    messages: [
-      {
-        role: 'system',
-        content: `You are a memory classifier. Assign this memory to a semantic domain.
+  const best = bestAnchor(muArr, anchors);
+  if (best && best.sim >= ANCHOR_ACCEPT_SIM) return best.name;
 
-RULES (follow strictly):
-1. ALWAYS pick from the existing domain list if ANY of them reasonably fits — even loosely.
-2. Only create a new domain if the memory is completely unrelated to ALL existing domains.
-3. Domain names must name a PROJECT, TOOL, PERSON, or SUBJECT — not a generic activity.
-   GOOD: "acme-web-app", "cs101-coursework", "job-search", "react-portfolio-site"
-   BAD: "data-preprocessing", "homework-submission", "exam-preparation", "data-manipulation", "file-management"
-   If the memory is about a specific project or tool, name the domain after THAT project/tool.
-   If it's about a course or subject, name it after the subject, not the activity (e.g. "linear-algebra" not "homework-help").
-4. New domain names: 2-4 lowercase hyphenated words. NO uppercase, NO spaces, NO leading hyphens.
-5. When in doubt, pick the closest existing domain.
-6. Content that's personal/non-work (hobbies, health, relationships, daily life) belongs in a personal-life-style domain rather than mixed into project domains.
+  const atCap = anchors.length >= DOMAIN_CAP;
+  const fallback = best && best.sim >= ANCHOR_FLOOR_SIM ? best.name : 'general';
 
-Existing domains (${existing.length}): ${existing.length ? existing.join(', ') : 'none yet'}
+  const candidates = anchors
+    .map(a => ({ name: a.name, sim: dotProduct(muArr, a.emb) }))
+    .filter(c => c.sim >= ANCHOR_FLOOR_SIM)
+    .sort((x, y) => y.sim - x.sim)
+    .slice(0, 5);
 
-Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
-      },
-      { role: 'user', content: `<memory_text>${text.slice(0, 600)}</memory_text>` },
-    ],
-    max_tokens: 30,
-  }) as any;
-
-  const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-  const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
   try {
-    const match = raw.match(/\{[^}]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      if (parsed.domain && typeof parsed.domain === 'string') {
-        const clean = parsed.domain.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40);
-        if (clean.length >= 2 && !clean.startsWith('-')) {
-          // If Llama chose an existing anchor, accept it
-          if (existing.includes(clean)) return clean;
-          // If cap hit and Llama invented a new domain, fall through to cosine fallback
-          if (existing.length >= 50) {
-            const mu2 = precomputedMu ?? await embed(text, env);
-            return classifyDomain(mu2, text, env);
+    const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+      messages: [
+        {
+          role: 'system',
+          content: `You classify one memory into a semantic domain.
+${candidates.length
+  ? `Nearest existing domains: ${candidates.map(c => c.name).join(', ')}\nALWAYS pick one of these if it reasonably fits — even loosely.`
+  : 'No existing domain is close to this memory.'}
+${atCap
+  ? 'Do NOT invent a new domain (cap reached) — pick from the list above, or "general" if nothing fits.'
+  : `Only if none fits, create a new domain name. ${NAMING_RULES}`}
+Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
+        },
+        { role: 'user', content: `<memory_text>${text.slice(0, 600)}</memory_text>` },
+      ],
+      max_tokens: 30,
+      temperature: 0,
+    }) as any;
+
+    const choice = parseJsonName(result, 'domain');
+    if (!choice) return fallback;
+    if (choice === 'general') return 'general';
+    if (anchors.some(a => a.name === choice)) return choice;
+    if (atCap) return fallback;
+    // Genuinely novel content: seed a new anchor at this memory's embedding.
+    // OR IGNORE, not OR REPLACE: on a name collision with an existing anchor,
+    // REPLACE wiped its centroid embedding, memory_count, and last_summarized_count.
+    await env.DB.prepare(
+      'INSERT OR IGNORE INTO domain_anchors (name, embedding) VALUES (?, ?)'
+    ).bind(choice, JSON.stringify(muArr)).run();
+    return choice;
+  } catch {
+    return fallback;
+  }
+}
+
+// Batch classifier for targeted fixups (nightly general-bucket cron + targeted
+// rebuild). Deterministic nearest-anchor gate first; LLM (temperature 0) only
+// for the ambiguous band, choosing from a FIXED anchor list. Never creates
+// domains and never mutates the list mid-run — the order-dependent cascade that
+// made full rebuilds land on 15/31/49/6/50 domains across reruns is gone.
+export async function classifyBatchDomains(
+  texts: string[],
+  mus: Float32Array[],
+  env: Env,
+  timeBudgetMs = Infinity,
+  startTime = Date.now(),
+): Promise<string[]> {
+  const anchors = await loadAnchors(env);
+  const assignments: string[] = new Array(texts.length).fill('general');
+  if (!anchors.length) return assignments;
+
+  const muArrs = mus.map(m => Array.from(m));
+  const pending: number[] = [];
+  for (let i = 0; i < texts.length; i++) {
+    const best = bestAnchor(muArrs[i], anchors);
+    if (!best || best.sim < ANCHOR_FLOOR_SIM) continue; // genuinely unrelated → general
+    if (best.sim >= ANCHOR_ACCEPT_SIM) {
+      assignments[i] = best.name;
+    } else {
+      assignments[i] = best.name; // remap default; LLM may override below
+      pending.push(i);
+    }
+  }
+
+  const names = new Set(anchors.map(a => a.name));
+  const nameList = [...names].join(', ');
+  const GROUP = 10;
+  for (let g = 0; g < pending.length; g += GROUP) {
+    if (Date.now() - startTime > timeBudgetMs) break;
+    const group = pending.slice(g, g + GROUP);
+    const numbered = group.map((idx, j) => `${j + 1}. ${texts[idx].slice(0, 400)}`).join('\n');
+    try {
+      const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+        messages: [
+          {
+            role: 'system',
+            content: `Classify each memory into one of the existing domains. ALWAYS pick an existing domain if any fits — even loosely. Answer "general" only if a memory fits nothing at all. Do not invent new domain names.\nExisting domains: ${nameList}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
+          },
+          { role: 'user', content: numbered },
+        ],
+        max_tokens: 512,
+        temperature: 0,
+      }) as any;
+
+      const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+      const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
+      const match = raw.match(/\[[\s\S]*?\]/);
+      if (match) {
+        const parsed = JSON.parse(match[0]) as string[];
+        for (let j = 0; j < group.length && j < parsed.length; j++) {
+          const choice = cleanDomainName(parsed[j] ?? '');
+          if (choice && (names.has(choice) || choice === 'general')) {
+            assignments[group[j]] = choice;
           }
-          return clean;
+          // unknown output → keep the deterministic nearest-anchor default
         }
       }
-    }
-  } catch {}
+    } catch {} // LLM failure → nearest-anchor defaults stand
+  }
+  return assignments;
+}
 
-  // Fallback: cosine classifier
-  const mu = precomputedMu ?? await embed(text, env);
-  return classifyDomain(mu, text, env);
+// One LLM call per rebuild cluster — naming only, never grouping.
+export async function nameCluster(sampleTexts: string[], takenNames: string[], env: Env): Promise<string | null> {
+  const numbered = sampleTexts.map((t, i) => `${i + 1}. ${t.slice(0, 300)}`).join('\n');
+  try {
+    const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+      messages: [
+        {
+          role: 'system',
+          content: `These memories all belong to ONE topic cluster in a personal memory system. Name the cluster.
+${NAMING_RULES}
+${takenNames.length ? `Names already taken (do NOT reuse): ${takenNames.join(', ')}` : ''}
+Return ONLY valid JSON with no explanation: {"name":"domain-name-here"}`,
+        },
+        { role: 'user', content: numbered },
+      ],
+      max_tokens: 30,
+      temperature: 0,
+    }) as any;
+    return parseJsonName(result, 'name');
+  } catch {
+    return null;
+  }
 }
 
 export async function updateDomainCentroid(domainName: string, mu: Float32Array, env: Env, ctx?: ExecutionContext): Promise<void> {
+  // 'general' is a holding pen fixed by the nightly cron, never an anchor —
+  // an anchor row for it would attract nearest-anchor assignments forever.
+  if (domainName === 'general') return;
   await ensureDomainColumns(env);
   const existing = await env.DB.prepare(
     'SELECT embedding, memory_count FROM domain_anchors WHERE name = ?'
   ).bind(domainName).first<{ embedding: string; memory_count: number }>();
 
   if (!existing) {
-    // Enforce 50-domain cap: if at cap, redirect centroid update to nearest existing domain
+    // Enforce domain cap: if at cap, redirect centroid update to nearest existing domain
     const totalDomains = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
-    if ((totalDomains?.n ?? 0) >= 50) {
-      const allAnchors = await env.DB.prepare('SELECT name, embedding FROM domain_anchors').all<{ name: string; embedding: string }>();
-      const muArr = Array.from(mu);
-      let bestName = '';
-      let bestSim = -1;
-      for (const row of allAnchors.results ?? []) {
-        const sim = dotProduct(muArr, JSON.parse(row.embedding) as number[]);
-        if (sim > bestSim) { bestSim = sim; bestName = row.name; }
-      }
-      if (bestName) await updateDomainCentroid(bestName, mu, env);
+    if ((totalDomains?.n ?? 0) >= DOMAIN_CAP) {
+      const anchors = await loadAnchors(env);
+      const best = bestAnchor(Array.from(mu), anchors);
+      if (best) await updateDomainCentroid(best.name, mu, env);
       return;
     }
     await env.DB.prepare(
@@ -223,85 +325,4 @@ export async function refreshDomainSummary(domainName: string, newCount: number,
     await env.DB.prepare('UPDATE domain_anchors SET last_summarized_count = ? WHERE name = ?')
       .bind(newCount, domainName).run();
   }
-}
-
-// Shared Llama batch classifier — used by both cronRebuildBatch and memory_rebuild_domains.
-// Takes batch of texts + existing domain list, returns domain assignment per row.
-export async function classifyBatchDomains(
-  texts: string[],
-  existingDomains: string[],
-  env: Env,
-  timeBudgetMs = Infinity,
-  startTime = Date.now(),
-): Promise<string[]> {
-  const GROUP = 10;
-  const canCreate = existingDomains.length < 50;
-  const assignments: string[] = new Array(texts.length).fill('general');
-
-  for (let g = 0; g < texts.length; g += GROUP) {
-    if (Date.now() - startTime > timeBudgetMs) break;
-    const group = texts.slice(g, g + GROUP);
-    const numbered = group.map((t, j) => `${j + 1}. ${t.slice(0, 400)}`).join('\n');
-    const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
-      messages: [
-        {
-          role: 'system',
-          content: `Classify each memory into a semantic domain. ALWAYS pick from the existing domain list if any fits — even loosely. Only create a new domain if completely unrelated to all existing ones.\nDomain names: 2-4 lowercase hyphenated words naming a PROJECT, TOOL, PERSON, or SUBJECT — never a generic activity.\nGOOD: "acme-web-app", "cs101-coursework", "job-search"\nBAD: "data-preprocessing", "file-management", "homework-submission", "exam-preparation"\nPersonal/non-work content (hobbies, health, relationships, daily life) belongs in a personal-life-style domain rather than mixed into project domains.\n${canCreate ? 'Use existing domains or create new ones.' : 'Use existing domains only (50-domain cap).'}\nExisting: ${existingDomains.length ? existingDomains.join(', ') : 'none yet'}\nReturn ONLY a JSON array of exactly ${group.length} domain name strings: ["domain-1", ...]`,
-        },
-        { role: 'user', content: numbered },
-      ],
-      max_tokens: 512,
-    }) as any;
-
-    const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-    const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
-    try {
-      const match = raw.match(/\[[\s\S]*?\]/);
-      if (match) {
-        const parsed = JSON.parse(match[0]) as string[];
-        for (let j = 0; j < group.length && j < parsed.length; j++) {
-          let d = (parsed[j] ?? '').toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-          if (d.length === 0) d = 'unclassified';
-          assignments[g + j] = d.slice(0, 40);
-          if (!existingDomains.includes(d) && existingDomains.length < 50) existingDomains.push(d.slice(0, 40));
-        }
-      }
-    } catch {}
-  }
-  return assignments;
-}
-
-// Remap any domain assignments that have no anchor to the nearest existing anchor.
-// Uses pre-computed embeddings (mus) so no extra embed calls needed.
-// Prevents memories from being assigned micro-domains invisible to two-stage retrieval.
-export async function remapToAnchoredDomains(
-  assignments: string[],
-  mus: Float32Array[],
-  env: Env,
-): Promise<string[]> {
-  const anchorRows = await env.DB.prepare('SELECT name, embedding FROM domain_anchors')
-    .all<{ name: string; embedding: string }>();
-  const anchors = (anchorRows.results ?? []).map(r => ({
-    name: r.name,
-    emb: JSON.parse(r.embedding) as number[],
-  }));
-  if (!anchors.length) return assignments;
-
-  const MIN_REMAP_SIMILARITY = 0.3;
-  const anchoredNames = new Set(anchors.map(a => a.name));
-  for (let i = 0; i < assignments.length; i++) {
-    if (anchoredNames.has(assignments[i])) continue;
-    const muArr = Array.from(mus[i]);
-    let best = anchors[0].name;
-    let bestSim = -1;
-    for (const anchor of anchors) {
-      const sim = dotProduct(muArr, anchor.emb);
-      if (sim > bestSim) { bestSim = sim; best = anchor.name; }
-    }
-    // Only force-anchor when the match is actually good — otherwise keep the
-    // LLM's own domain guess rather than gluing unrelated content onto an
-    // existing domain just because it's the least-dissimilar option.
-    if (bestSim >= MIN_REMAP_SIMILARITY) assignments[i] = best;
-  }
-  return assignments;
 }
