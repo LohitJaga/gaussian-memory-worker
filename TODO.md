@@ -83,162 +83,41 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
 - [ ] OpenAI Codex/CLI — not mentioned in README at all yet.
 - [ ] "Supported Clients" table in README once the above are confirmed
 
-### Domain Rebuild — KNOWN ISSUE (2026-07-01)
-- [ ] **personal-life domain (180 memories) was lost in full rebuild** — Llama scattered them into career-job-search and gaussian-memory-dev (both now suspiciously large: 1238 and 537). personal-life is now in the domain hints for both classifiers so it re-emerges for new memories, but the 180 old ones need a targeted=false rebuild to recover. Not urgent — retrieval still works, just personal content surfaces in wrong domain. Do when there's time to babysit another 156-batch rebuild in OpenCode.
-- [ ] **g2f-* micro-domain explosion** — full rebuild fragmented bayer-datamine into 8 g2f-* sub-domains. Fixed via SQL merge on 2026-07-01. bayer-datamine hint added to classifier. If rebuild is run again, confirm g2f content stays consolidated.
-- [ ] **targeted=false param was silently ignored** (fixed 2026-07-01 by OpenCode: string-aware parse + schema declaration). Confirm the fix is in src/tools.ts before any future full rebuild.
+### Domain / cluster_id split — RESOLVED (2026-07-05)
+Everything above this line (regrounding, anchor-merge, hybrid-gate, k-LLMmeans plans) is superseded and
+removed — none of it shipped; it's preserved in git history (stashed, never merged) if ever needed for
+reference. The actual fix ended up being architectural, not a better threshold: domain was doing two jobs
+(human-facing named taxonomy + the signal retrieval depends on for dedup/diversity), and no amount of
+threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-mechanics job. Split them:
 
-### Domain Classifier Instability — UPDATED FIX PLAN (supersedes the hybrid-gate plan below), NOT YET IMPLEMENTED (2026-07-02)
-**Update after further research + one more rebuild rerun**: rebuild #6 (same 31-domain code, rerun clean)
-landed on 50 again — confirms the instability is a stable failure mode, not a fluke. Pulled all 50 real
-`domain_anchors` centroids from prod D1 and computed all 1225 pairwise cosine similarities: median sim = 0.91,
-and genuine duplicates (e.g. `github-project`↔`github-tool` = 0.992) sit in the *same* range as genuinely
-unrelated domains (e.g. `github-profile`↔`bayer-traitprediction-project` = 0.985). **This invalidates the
-0.82-gate plan below** — a single global threshold on raw running-mean centroids cannot separate "same domain"
-from "different domain" here. Also checked: `refreshDomainSummary`/`refreshStaleDomainSummaries` (domain.ts:195,
-cron.ts:322) already exist and run on a growth trigger, but confirmed (by reading the full function body) they
-ONLY write a display summary to KV (`domain_summary:${name}`) — they never re-embed the summary or touch
-`domain_anchors.embedding`. So none of the centroid-quality problem is mitigated by existing code; this is
-genuinely unbuilt, not a case of unused infrastructure.
-
-**Likely cause of the blur**: a running-mean centroid over many memories regresses toward the corpus-wide mean
-as a domain grows — it's an average of everything ever filed under that name, so two large, mature domains end
-up looking similarly "central" and hard to tell apart by cosine sim alone, even when their content is obviously
-different to a human. This is a known failure mode in streaming/incremental clustering, not specific to this repo.
-
-**Published fix that matches this exact failure mode**: k-LLMmeans / k-NLPmeans (arXiv 2502.09667) — periodically
-(not every item) replace the numeric running-mean centroid with a fresh embedding of an LLM-generated *textual
-summary* of the cluster's current top members. A summary embedding sits further out in semantic space (it
-describes what's distinctive, not an average of everything), so it should separate real duplicates from
-merely-related-but-distinct domains much better than the raw running mean does.
-
-**Revised plan** (research only so far, not implemented — do this next session):
-1. **Reground, don't just display**: extend `refreshDomainSummary` (domain.ts:195) so that, on the same growth
-   trigger it already has (≥5 memories, 1.25x growth since last summary), it also calls `embed()` on the
-   generated summary text and *replaces* (not blends with the running mean) `domain_anchors.embedding` for that
-   domain. Keep the existing KV write as-is. This is the "periodic re-grounding" step from the paper — cheap,
-   reuses text already being pulled for the summary.
-2. **Add an actual anchor-merge pass — this doesn't exist today.** `remapToAnchoredDomains` (domain.ts:277-307)
-   only handles assignments with NO matching anchor yet; it never compares two anchors that both already exist
-   in `domain_anchors` against each other. Two near-duplicate anchors created in different batches (e.g.
-   `github-project` and `github-tool`) currently never get merged, no matter how similar their centroids are,
-   because `anchoredNames.has(...)` short-circuits before any similarity check runs. Add a periodic pass (end of
-   a full rebuild, and/or nightly cron) that computes pairwise similarity across all *regrounded* anchors only
-   (skip ones still on a raw running-mean centroid — too blurry to compare meaningfully) and merges pairs above
-   a threshold: reassign the smaller anchor's memories to the larger one, sum `memory_count`, delete the smaller row.
-3. **Don't reuse 0.82 for step 2.** It was tuned against raw running-mean vectors; regrounded (LLM-summary)
-   vectors are a different embedding distribution and likely need a different cutoff. Before trusting a number,
-   repeat the pairwise-similarity measurement done above but on regrounded centroids for a handful of known-dup
-   vs. known-distinct pairs, and pick a threshold empirically — same method that already disproved 0.82.
-4. **Set `temperature: 0`** on the `classifyBatchDomains` and `classifyDomainWithLlama` Workers AI calls
-   (currently unset, Workers AI defaults to ~0.6) — reduces run-to-run sampling variance independent of the
-   merge-pass fix, cheap and safe to do regardless.
-5. Leave `classifyBatchDomains` itself as pure LLM classification per batch — the fix point is post-hoc merging
-   with better-grounded centroids, not trying to get every batch's assignment right in one shot. Do NOT
-   re-attempt a code-level "always remap during full-path" threshold trick (commit 9d7e128, reverted) —
-   confirmed to over-merge distinct domains.
-Verify by re-running the full rebuild 2x after implementing and confirming domain count converges to roughly the
-same number both times — a single good-looking run has already been proven not to mean the fix works (this
-happened twice this session: 31 domains looked fixed, then reran clean and got 50).
-
-<details>
-<summary>Original hybrid-gate plan (2026-07-02, invalidated by the pairwise-similarity data above — kept for history)</summary>
-
-### Domain Classifier Instability — ROOT CAUSE FOUND, FIX DESIGNED, NOT YET IMPLEMENTED (2026-07-02)
-Ran 5 full rebuilds (~4700-4800 memories each) in one session trying to land on a stable domain count.
-Same underlying code produced wildly different results run to run: **15 → 31 → 49 (hit the 50 cap) → 6
-(catastrophic over-merge, 2 domains absorbed 2000+ memories each) → reverted to the known-good 31-domain
-code and reran → landed on 50 (the cap) again.** Confirmed via retrieval.ts:323 that domain is only a
-+0.05 soft score boost, not a hard retrieval filter — so this is a correctness/cleanliness bug, not a
-functional retrieval regression, but it's a bad look for a public repo and worth fixing properly.
-
-**Root cause**: `classifyBatchDomains` (domain.ts) makes an independent LLM call per batch of ~10 memories
-during a full rebuild, and `useFullPath` mode skips `remapToAnchoredDomains` entirely for the whole rebuild
-after batch 1 (tools.ts ~1514-1515) — meaning there is zero error-correction on the LLM's domain-name
-choices. Since later batches see a domain list shaped by earlier (non-deterministic, temperature-unset)
-LLM sampling, small early divergences cascade into wildly different total fragmentation by the end. Two
-prior fix attempts both failed: a generic "avoid near-duplicate domain names" prompt instruction (made it
-worse: 31→49) and a code-level embedding-similarity remap at threshold 0.6 applied during full rebuilds
-(over-corrected badly: 49→6, merged genuinely distinct projects into mega-domains).
-
-**Fix, designed but not yet built — hybrid deterministic-gate + LLM approach:**
-The codebase already has a fully deterministic nearest-centroid classifier, `classifyDomain` (domain.ts:47-78,
-threshold 0.82 — already tuned from real usage history, see git log `214f929`), but it's currently only used
-as a fallback (JSON-parse failure or 50-cap hit), never as the primary path. Git history shows this project
-already tried pure-embedding-only classification early on (thresholds 0.75→0.88→reverted to 0.82) and moved
-*toward* LLM classification for a reason — likely because pure-embedding-only produces worse, less
-semantically meaningful groupings and its fallback naming (`deriveAnchorName`, domain.ts:24-45) just grabs a
-crude capitalized keyword instead of a clean name. So: don't replace the LLM, gate it.
-1. Add a shared `findBestAnchor(muArr, env)` helper (refactor out of `classifyDomain`'s existing anchor-fetch
-   loop) that returns `{name, sim}` for the best-matching existing anchor.
-2. In both `classifyDomainWithLlama` and `classifyBatchDomains`, check `findBestAnchor` FIRST. If similarity
-   ≥ 0.82, assign directly — no LLM call, fully deterministic, no sampling variance. Only call the LLM for
-   memories that *don't* clearly match an existing anchor — the genuinely ambiguous cases where semantic
-   judgment actually earns its keep. All 6 call sites of `classifyDomainWithLlama` in tools.ts already pass
-   `precomputedMu`, so this fast-path costs zero extra embed() calls.
-3. Set `temperature: 0` on the remaining LLM calls (currently unset anywhere in domain.ts, Workers AI default
-   is 0.6) to reduce variance on the genuinely-ambiguous cases that still need the LLM.
-4. Do NOT re-attempt the code-level "always remap in full-path mode" approach (commit 9d7e128, reverted) —
-   confirmed empirically to over-merge distinct domains at threshold 0.6.
-Should implement and test against a fresh full rebuild before trusting it — prior "looks fixed" impressions
-this session (31 domains) turned out to be one lucky run, not a stable fixed point, so verify by re-running
-the rebuild 2x and confirming domain count converges to roughly the same number both times, not just once.
-
-</details>
-
-### Domain Classifier — regrounding + merge fix IMPLEMENTED, LOHIT SAYS DON'T TRUST IT YET (2026-07-02, evening)
-Built and deployed the plan above: `refreshDomainSummary` now re-embeds its summary and replaces the centroid
-(`is_regrounded` flag), added `findAnchorMerges`/`applyAnchorMerge` (domain.ts), wired a nightly merge pass into
-cron at `ANCHOR_MERGE_THRESHOLD = 0.83` (empirically swept, not guessed), and added `/admin/reground-domains` +
-`/admin/merge-domains` (dry-run by default) for manual runs. Ran the actual convergence test the plan called for://
-full wipe-rebuild → both raw runs hit the 50-domain cap (unchanged — the classifier's own instability isn't
-touched by this fix, only cleaned up after). Reground + merge brought both runs down to **47 domains** —
-matching baseline-to-baseline, which is the number this fix was supposed to produce.
-
-**But manual review of the merge candidates found real problems, not just cosmetic ones:**
-- **False positive at the validated threshold**: `ukg-system-project` (86 memories!) → `claude-code-project` at
-  0.838 — Lohit confirmed UKG is a timecard tool, totally unrelated. This is *above* the 0.83 cutoff that
-  looked clean on the first rebuild's data, so 0.83 is not actually a safe universal cutoff — it was tuned on
-  one sample and already produced a bad merge on the second.
-- **Missed real duplicates**: `w1-project` (7), `w2-project` (32), `w3-project` (16), `w4-project` (49),
-  `w5-project` (44) are all confirmed by Lohit to be the same thing (L'Oréal weekly work-tracking) but only
-  `w3-project → w2-project` (0.868) surfaced as a candidate — w1/w4/w5 weren't flagged as duplicates of each
-  other or of w2/w3 at all, despite being conceptually identical. The pairwise-threshold approach caught some
-  duplicates and missed others in the exact same cluster.
-- Separately: `ukg-system-project` having 86 memories as its own domain in the first place (for a timecard tool)
-  suggests the *classifier itself* is over-eager to keep growing a domain that should probably be tiny or folded
-  into general admin/logistics content — a symptom the merge-pass band-aid doesn't address at the source.
-- `leetcode-problem` ↔ `job-search` (0.840) — Lohit wants these kept separate (correctly did NOT auto-merge,
-  held for manual review, this one's fine as a judgment call either way).
-
-**Lohit's verdict, verbatim: "domains still have major issues, i dont trust this at all."** Net assessment:
-regrounding+merge is a real, measured improvement (catches true duplicates like the `lore-al`/`loreal` typo and
-`gaussian-memory-worker`/`gaussian-memory` split cleanly) but is NOT a solved problem — it has both false
-positives and false negatives on the same validated threshold, and the underlying classifier still produces
-wildly fragmented output (50-cap) before any cleanup runs. Do not present this as "fixed" going forward.
-
-**Left in a safe, non-destructive state**: 3 confident merges applied (typo dup, gaussian-memory-worker dup,
-gemini-3.5-flash dup) → 47 domains. `ukg-system-project`, `leetcode-problem`/`job-search`, and the
-w1-w5-project cluster were explicitly NOT merged — left for a proper pass. Regrounding + nightly merge cron is
-live in production either way (`ANCHOR_MERGE_THRESHOLD = 0.83` in cron.ts) — worth deciding whether to disable
-the automatic nightly merge until the false-positive risk is better understood, since it now runs unattended
-every night at a threshold that's already known to produce at least one bad merge.
-
-**To pick up tomorrow:**
-1. Decide whether nightly auto-merge (cron.ts `mergeDuplicateAnchors`) should be disabled until threshold
-   reliability is better understood, or left running with manual monitoring.
-2. Investigate why `w1/w4/w5-project` didn't pair with `w2/w3-project` despite being the same conceptual
-   domain — likely means their regrounded summaries emphasize different weekly specifics (SKU anomaly vs. paid
-   media vs. calendar API) enough to separate embeddings, even though a human immediately sees them as one
-   L'Oréal-work bucket. May need a different signal than pairwise centroid similarity for this case (e.g.
-   explicit naming-pattern detection for `w[0-9]-project`, or a coarser "does this look like a sub-project of an
-   existing bigger domain" check) rather than relying on embedding similarity alone.
-3. Investigate why `ukg-system-project` grew to 86 memories as a business-admin/timecard domain in the first
-   place — may be a separate classifier-prompt issue (e.g. "personal/non-work" bucket rule not catching
-   logistics-adjacent work content) rather than something the merge pass should be responsible for fixing.
-4. Re-sweep the merge threshold with this second (worse) data point included — 0.83 already produced a false
-   positive, so the "safe cutoff" from before doesn't hold across rebuilds; may need per-pair review permanently
-   rather than a trustable global number, or an entirely different signal.
+- **domain** — unchanged, still the named/capped taxonomy for browsing + (now-abandoned) `/viz`. Full-corpus
+  rebuild replaced with deterministic clustering (Fable's work, 2026-07-05): clusters raw embeddings first
+  (order-independent average-linkage, no LLM in the grouping step), one LLM call per resulting cluster for
+  naming only. Rerunning on the same corpus now reproduces the same domains — the original instability
+  (15/31/49/6/50 across reruns) is gone. `clusterStep`'s O(k²) merge-trace computation crashed Workers'
+  CPU budget around k~2100 micro-clusters (well under the naive 2500 safety cap, never load-tested) — bounded
+  to the largest 500 clusters only (rebuild.ts, `MAX_MERGE_CANDIDATES`), small ones fold in via existing
+  nearest-cluster-or-general logic. Rebuild tool works now; not urgent to ever run since day-to-day tagging
+  isn't affected by any of this.
+- **cluster_id** (new) — raw, unnamed, uncapped micro-cluster assignment, pure embedding math, no LLM,
+  backed by a dedicated `MICRO_VECTORIZE` index (`src/microcluster.ts`). This is what `storage.ts`'s dedup
+  gates and `retrieval.ts`'s diversity cap actually read now, instead of domain — confirmed via live testing
+  (2026-07-05: verified a known 6-member near-duplicate cluster got correctly suppressed to ≤3 in real
+  results). Domain mislabeling can no longer corrupt dedup or repetition control.
+- [x] **`/viz` repointed to cluster_id, then abandoned as not worth further effort (2026-07-05)** — after
+  3 rounds of tuning (label/placement density, dust/glow contrast, cosmic color palette + radial gradient)
+  it still didn't look compelling. Purely cosmetic, not worth more time; left functional but unpolished.
+- [ ] **Known minor gap, low priority**: `retrieval.ts`'s adaptive sigma floor (line ~40-44/527,
+  `sharpenSigma`'s domain-size-based confidence floor) still reads `domain`, not `cluster_id` — the one
+  retrieval-adjacent thing domain mislabeling can still quietly affect. Confirmed via live testing this does
+  NOT cause wrong search results (tested 3 unrelated queries, only correct content surfaced) — it only nudges
+  confidence scoring slightly. Two candidate fixes were considered and both rejected on real technical
+  grounds: swapping to cluster_id count doesn't work (clusters are too fine-grained — nearly every memory
+  would read as "sparse" since most clusters have 1-5 members); swapping to the memory's own access_count
+  doesn't work either (already double-counted in baseScore's `normAccess` term — would create a rich-get-richer
+  loop rewarding anything retrieved often, relevant or not). A live embedding-neighborhood-density check
+  (looser similarity threshold than cluster_id's, computed at retrieval time) was proposed as a third option
+  but not built — revisit only if real evidence shows this actually causing bad ranking, not preemptively.
 
 ### Cleanup
 - [ ] One-time prune of old verbatim noise in the pool (pre-distillation junk: "Yeah, I do." etc.) — for clean demo retrievals
