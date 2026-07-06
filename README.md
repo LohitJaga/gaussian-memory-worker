@@ -367,8 +367,6 @@ hooks/
   gaussian-store.sh            Stop hook: extracts facts from session, syncs CLAUDE.md
   opencode-mcp-config.json     OpenCode MCP config template (~/.config/opencode/opencode.json)
   README.md                    Hook setup instructions
-scripts/
-  integration-test.sh          Live smoke test: 22 tool calls against deployed worker
 schema.sql                D1 schema
 wrangler.example.toml     Template for manual resource setup
 ```
