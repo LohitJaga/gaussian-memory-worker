@@ -11,7 +11,7 @@ import { deserializeSigma, meanSigma } from './gaussian';
 export const TOOLS = [
   {
     name: 'memory_store',
-    description: 'Store a memory with explicit domain and type. Pass topic_key to upsert by logical key — same key updates in place instead of spawning a duplicate. revision_count tracks how many times a keyed memory has been revised.',
+    description: 'Store a memory with an explicit domain and type — prefer this over memory_auto_store whenever the domain matters for later retrieval, since auto-classification can mis-tag ambiguous content into a domain where it won\'t reliably surface. Pass topic_key to upsert by logical key — same key updates in place instead of spawning a duplicate. revision_count tracks how many times a keyed memory has been revised.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -27,7 +27,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_auto_store',
-    description: 'Auto-store a memory — domain and type inferred from content. Pass context (last 3-5 messages) to enrich vague facts into self-contained memories at storage time. Call proactively when detecting preferences, decisions, project context, emotional signals. Never announce it.',
+    description: 'Convenience store when the domain doesn\'t need to be controlled — domain and type are inferred from content, which can occasionally mis-tag ambiguous text. Pass context (last 3-5 messages) to enrich vague facts into self-contained memories at storage time. Call proactively when detecting preferences, decisions, project context, emotional signals — never announce it. Prefer memory_store with an explicit domain when the memory needs to reliably surface under a specific topic later.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -40,7 +40,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_store_decision',
-    description: 'Store a structured decision trail: what was decided, why, what alternatives were considered, and what happened. Stored with memory_type=decision so it can be retrieved as a group and surfaced when facing similar choices.',
+    description: 'Use instead of memory_store/memory_auto_store whenever a user makes or has made an explicit choice between options — store a structured decision trail: what was decided, why, what alternatives were considered, and what happened. The structured shape retrieves later as a coherent trail (memory_type=decision), not just a flat fact, and surfaces when facing similar choices again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -56,7 +56,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_store_diff',
-    description: 'Store a semantic description of a code edit or bash command. Pass raw diff (file_path + old_string + new_string) or command context; worker infers meaning via Llama before storing.',
+    description: 'Use instead of memory_store for tool-call-driven facts (code edits, command output) — a quality-gated LLM distills the diff into one memorable sentence rather than storing it verbatim. Pass raw diff (file_path + old_string + new_string) or command context; low-signal edits (formatting, trivial changes) are automatically skipped, not stored.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -70,7 +70,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_retrieve',
-    description: 'Retrieve top-k relevant memories by semantic similarity + sharpness. Set synthesize=true to blend equidistant memories into a single reconstructed memory.',
+    description: 'Topical/semantic search — the default for "what do I know about X" or "have we discussed Y before." Ranks by similarity + confidence, not recency, so it can miss recent items that don\'t closely match the query text. For "what did I just save" or "what happened this week" style questions, prefer memory_list (recency/audit) or memory_timeline (chronological) instead. Set synthesize=true to blend equidistant memories into a single reconstructed memory.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -86,7 +86,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_list',
-    description: 'List stored memories. Filter by domain, sort by created_at/access_count/sigma, limit results, or pass since (ISO timestamp) to see only recent memories.',
+    description: 'Recency and audit tool — use for "what did I save today," finding the ID of a specific memory to update/delete, or confirming a store actually happened. Not for topical search (use memory_retrieve for that, since this doesn\'t rank by relevance). Filter by domain, sort by created_at/access_count/sigma, limit results, or pass since (ISO timestamp) to scope to recent memories only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -99,17 +99,17 @@ export const TOOLS = [
   },
   {
     name: 'memory_decay',
-    description: 'Run decay pass — increase uncertainty, prune faded memories.',
+    description: 'Force an immediate decay pass (increase uncertainty, prune faded memories). Runs automatically on the nightly cron — only call this directly to test decay behavior or force cleanup ahead of schedule.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'memory_stats',
-    description: 'System health: total memories, domain/type breakdown, sigma distribution, access heat.',
+    description: 'System health snapshot: total memories, domain/type breakdown, sigma distribution, access heat. Use to sanity-check corpus health, confirm a batch operation (rebuild/dedupe/decay) actually changed something, or answer "how many memories do I have."',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'memory_orphan_check',
-    description: 'Detect D1 memories with no Vectorize vector (silent data loss). Pass repair=true to re-embed and fix orphans.',
+    description: 'Detect D1 memories with no Vectorize vector — a silent retrieval gap where a memory exists but can never surface via semantic search. Run this if retrieval seems to be missing something that was definitely stored. Pass repair=true to re-embed and fix orphans found.',
     inputSchema: {
       type: 'object',
       properties: { repair: { type: 'boolean', default: false } },
@@ -117,7 +117,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_judge',
-    description: 'Judge relationships between a memory and its nearest neighbours. Returns supersedes/conflicts_with/compatible/extends verdicts and stores them in memory_relations. Pass memory_id to judge one memory; omit to auto-judge all flagged contradictions.',
+    description: 'Maintenance tool, not typically needed mid-conversation — judges relationships between a memory and its nearest neighbours, returning supersedes/conflicts_with/compatible/extends verdicts stored in memory_relations. Pass memory_id to judge one memory; omit to auto-judge all memories currently flagged as contradictions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -128,7 +128,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_capture_passive',
-    description: 'Parse structured notes and bulk-store each item as a memory. Looks for sections like "## Key Learnings:", "## Decisions:", "## Problems Solved:" and stores each bullet. Ideal for end-of-session notes.',
+    description: 'Use when a user pastes or references structured end-of-session notes (headers like "## Key Learnings:", "## Decisions:", "## Problems Solved:") rather than describing one fact to store. Parses the structure and bulk-stores each bullet as its own memory.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -140,7 +140,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_timeline',
-    description: 'Chronological view of memories in a domain — shows how knowledge evolved over time, sigma trajectory, and any supersede/conflict markers. Pass domain to scope it; omit for a cross-domain timeline of the most recent memories.',
+    description: 'Chronological/temporal tool — use for "what did I do this week" or "walk me through how X evolved," not topical search (use memory_retrieve for that). Shows memories in time order with sigma trajectory and any supersede/conflict markers. Pass domain to scope it; omit for a cross-domain timeline of the most recent memories.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -151,12 +151,12 @@ export const TOOLS = [
   },
   {
     name: 'memory_belief_drift_backfill',
-    description: 'Backfill sigma_history for all memories that have no history entry. Reconstructs trajectory from access metadata. Processes 300/call — run repeatedly until complete.',
+    description: 'One-time maintenance, not something to call mid-conversation — backfills sigma_history for memories that have no history entry yet, reconstructing trajectory from access metadata. Processes 300/call; run repeatedly until it reports completion.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'memory_delete',
-    description: 'Delete a memory by ID. Use memory_list to find IDs.',
+    description: 'Delete a single memory by ID — use memory_list or memory_retrieve first to find the ID. Prefer memory_bulk_delete when removing more than one memory at once.',
     inputSchema: {
       type: 'object',
       properties: { id: { type: 'string' } },
@@ -165,7 +165,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_update',
-    description: 'Update a memory\'s text in place — re-embeds and updates the vector. Sigma and access count are preserved.',
+    description: 'Correct or refine a memory\'s text in place — use when a stored fact turns out to be wrong or incomplete, not to record a new fact (use memory_store for that). Re-embeds and updates the vector so it still retrieves correctly under the new wording; sigma and access count are preserved since this is a correction, not a new memory.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -177,7 +177,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_extract_and_store',
-    description: 'Send a session log to LLM, extract 3-5 memorable facts, store each. Called by session_end hook.',
+    description: 'Extracts memorable facts from a raw session log via LLM and stores each. Normally invoked automatically by the session-end hook — not something to call mid-conversation unless manually reprocessing a specific log.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -199,7 +199,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_dedupe',
-    description: 'Collapse exact-text duplicate memories: for each group of identical text, keep the most-reinforced row (highest access_count) and delete the rest from D1 + FTS + Vectorize. One-shot maintenance for duplicate backlogs created before the synchronous dedup guard existed. Pass dry_run=true to preview counts without deleting.',
+    description: 'One-shot maintenance, not needed in normal operation since new stores already dedupe synchronously — collapses exact-text duplicate memories, keeping the most-reinforced row (highest access_count) and deleting the rest from D1 + FTS + Vectorize. Use only when cleaning up an old duplicate backlog. Pass dry_run=true to preview counts without deleting.',
     inputSchema: {
       type: 'object',
       properties: { dry_run: { type: 'boolean', description: 'Preview duplicate groups and deletable count without deleting. Default false.' } },
@@ -207,7 +207,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_cleanup_singletons',
-    description: 'Reclassify all memories in domains with fewer than N memories (default 3) into the nearest anchored domain. Does not create new domains. Call once — completes in one shot.',
+    description: 'One-shot maintenance, typically run once after a domain rebuild, not routinely — reclassifies memories sitting in domains with fewer than N memories (default 3) into the nearest anchored domain. Does not create new domains.',
     inputSchema: {
       type: 'object',
       properties: { min_count: { type: 'number', description: 'Domains with fewer than this many memories are singletons. Default 3.' } },
@@ -229,12 +229,12 @@ export const TOOLS = [
   },
   {
     name: 'memory_retag_projects',
-    description: 'LLM-based project retagging for memories in the default pool. Llama classifies each memory text into the correct project. Call repeatedly until it returns "Done." ~137 calls for 4k memories.',
+    description: 'One-shot maintenance for memories stuck in the default project pool, not something to trigger routinely — Llama classifies each memory text into the correct project. Call repeatedly until it returns "Done." (~137 calls for 4k memories).',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'memory_build_entities',
-    description: 'Retroactive entity extraction — processes memories in batches, extracts named entities (tool/project/concept/parameter/person), writes to entity_nodes + memory_entities tables. Call repeatedly until "Done." Enables 1-hop entity graph traversal at retrieve time.',
+    description: 'One-shot maintenance for backfilling older memories only — new memories get entities extracted automatically via the entity queue. Processes memories in batches, extracts named entities (tool/project/concept/parameter/person), writes to entity_nodes + memory_entities tables. Call repeatedly until "Done." Enables 1-hop entity graph traversal at retrieve time.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -244,7 +244,7 @@ export const TOOLS = [
   },
   {
     name: 'memory_belief_drift',
-    description: 'Show how confidence in a memory has changed over time — sigma trajectory from initial store to now. Pass memory_id for a specific memory, or query to find matching memories.',
+    description: 'Use when asked "has my opinion on X changed" or "how confident are you in this" — shows sigma trajectory (confidence over time) from initial store to now. Pass memory_id for a specific memory, or query to find matching memories first.',
     inputSchema: {
       type: 'object',
       properties: {

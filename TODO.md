@@ -252,17 +252,23 @@ threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-
       parse-by-position + re-encode. Real build, not a quick port. "Coming soon" for launch.
 - [ ] Chrome Web Store submission (or document "load unpacked" for dev-audience launch)
 
-### Agent affordances — tool descriptions as skill docs (2026-06-23)
-MCP tools have mechanical descriptions (what, not when). For an MCP server consumed by agents, tool descriptions
-ARE the skill docs — the only non-optional surface the agent reads every turn. Fix descriptions to teach agent behavior:
-- `memory_timeline` → frame as temporal/"what did I do this week," fix recency sort (currently ranks by access freq)
-  - **REPRO 2026-06-29 (tested live w/ Claude):** `memory_timeline(personal-life)` returns ALL rows stamped the same `2026-05-26` (a backfill/import date), so chronological view is collapsed — cannot surface "yesterday" no matter what. Tried passing `order=date_desc`: the MCP layer accepted the extra param (schema permissive) but output was **byte-identical** → handler either ignores `order` OR every row shares one date so re-sort is a no-op. **Root cause = data layer: ingestion flattened event timestamps onto import date.** Two fixes: (1) preserve real `created_at`/event date on ingest (don't overwrite with import time); (2) have timeline parse `order`/`since` and sort by `last_accessed`/event date, not access-freq. Until (1), recency is fundamentally unqueryable (also breaks the `yesterday`/`this week` retrieval edge-case tests above). NOTE: `order`/`since` should be declared in the tool's inputSchema, not just silently accepted.
-- `memory_list` → frame as recency/audit tool ("use with since= for 'what did I save today'")
-- `memory_retrieve` → frame as topical default, add cross-ref to list/timeline for temporal needs
-- `memory_store` → prefer over auto_store, always pass explicit domain (mis-domained memories don't surface)
-- `memory_auto_store` → convenience path; note domain inference defaults generic causing mis-tags
-- Also ship optional paste-in CLAUDE.md in npm docs for clients that ignore MCP instructions field
-See session 2026-06-23 with lohit for full draft copy + rationale.
+### Agent affordances — tool descriptions as skill docs — DONE (2026-07-06)
+MCP tools had mechanical descriptions (what, not when). For an MCP server consumed by agents, tool descriptions
+ARE the skill docs — the only non-optional surface the agent reads every turn. Rewrote all 21 non-trivial tool
+descriptions in `tools.ts` to teach when/why, not just what, deployed and verified live via `tools/list`:
+- `memory_retrieve` ↔ `memory_list` ↔ `memory_timeline` now cross-reference each other explicitly (topical
+  search vs recency/audit vs chronological), so the model reaches for the right one instead of defaulting to
+  `memory_retrieve` for everything.
+- `memory_store` / `memory_auto_store` now state the domain mis-tagging tradeoff directly, telling the model
+  when to pay the extra explicit-domain cost vs use the convenience path.
+- Maintenance-only tools (`memory_judge`, `memory_dedupe`, `memory_cleanup_singletons`, `memory_rebuild_domains`,
+  `memory_retag_projects`, `memory_build_entities`, `memory_belief_drift_backfill`, `memory_extract_and_store`)
+  now explicitly say "not typically called mid-conversation" so a model doesn't reach for them spontaneously.
+- The `memory_timeline` "all rows stamped the same backfill date" bug referenced here previously is stale —
+  confirmed 2026-07-06 the handler already does `ORDER BY timestamp DESC` correctly; that data-layer issue was
+  fixed at some prior point without this TODO entry being updated.
+- Not done: the separate "paste-in CLAUDE.md in npm docs for clients that ignore MCP instructions" idea — still
+  open, low priority, since MCP tool descriptions (now fixed) cover the primary surface every client reads.
 
 ### Be the memory layer for frameworks
 - [ ] Vendor-neutral adapter so any agent framework (incl. eve) can use GM as its memory
