@@ -188,11 +188,13 @@ export const TOOLS = [
   },
   {
     name: 'memory_bulk_delete',
-    description: 'Delete all memories whose text matches a SQL LIKE pattern. Use % as wildcard. Returns count deleted.',
+    description: 'Delete memories by text pattern (% as wildcard) and/or exact project match. At least one of pattern/project is required. Returns count deleted.',
     inputSchema: {
       type: 'object',
-      properties: { pattern: { type: 'string' } },
-      required: ['pattern'],
+      properties: {
+        pattern: { type: 'string' },
+        project: { type: 'string', description: 'Exact project match. Combine with pattern to narrow further, or use alone to delete an entire project — needed because LLM-rewritten content (memory_extract_and_store, memory_store_diff) may not retain any literal substring from the original input, making pattern-only cleanup unreliable for that content.' },
+      },
     },
   },
   {
@@ -469,17 +471,35 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       // GLM quality gate: is this diff worth storing as a long-term memory?
       // Replaces hardcoded skip lists — generalizes to any user's workflow.
       // Runs before Llama description to avoid wasting tokens on low-signal diffs.
-      const gateResult = await env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
-        messages: [
-          {
-            role: 'system',
-            content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions with rationale (why X was chosen over Y), non-trivial logic changes, bug fixes, architecture choices, meaningful command outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate. If a senior engineer could reconstruct this change just by reading the file, answer NO.',
-          },
-          { role: 'user', content: `<diff>${diffContext}</diff>` },
-        ],
-        max_tokens: 1024,
-        temperature: 0,
-      }) as any;
+      // Timeout-guarded (matches memory_auto_store's enrichment call, tools.ts:359) — confirmed
+      // live 2026-07-06 that an unguarded GLM call here can run long enough for the Workers
+      // runtime itself to cancel the request (observed via `wrangler tail`: status "Canceled"),
+      // silently dropping every diff from that call with no response ever returned to the
+      // caller. This tool fires on every Bash/Write tool call via the PostToolUse hook, so an
+      // unbounded hang here is a live reliability gap, not just a test-only concern.
+      let gateResult: any;
+      try {
+        gateResult = await Promise.race([
+          env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+            messages: [
+              {
+                role: 'system',
+                content: 'You decide if a code change or command is worth storing as a long-term developer memory. Answer ONLY "YES" or "NO". Store YES for: decisions with rationale (why X was chosen over Y), non-trivial logic changes, bug fixes, architecture choices, meaningful command outputs. Store NO for: formatting, imports, trivial edits, read-only commands, test runs with no insight, boilerplate. If a senior engineer could reconstruct this change just by reading the file, answer NO.',
+              },
+              { role: 'user', content: `<diff>${diffContext}</diff>` },
+            ],
+            max_tokens: 1024,
+            temperature: 0,
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('GLM gate timeout')), 12_000)),
+        ]) as any;
+      } catch {
+        // Timeout or AI binding error is an infra failure, not a verdict on the content's
+        // worth — skip rather than store unverified content, consistent with this gate's
+        // conservative default elsewhere (unclassifiable content falls back to 'general', not
+        // a forced guess).
+        return 'SKIP: quality gate unavailable (timeout)';
+      }
       // GLM-4.7-flash is a thinking model: reasoning goes into reasoning_content,
       // the final answer is in choices[0].message.content (null until reasoning completes).
       // Must use max_tokens >= 1024 so the model can finish reasoning and emit content.
@@ -1332,15 +1352,30 @@ Return ONLY valid JSON array:
     }
 
     case 'memory_bulk_delete': {
-      // LIKE has a complexity limit on long patterns — use INSTR instead.
-      // Split pattern on % to get literal parts; require all parts present (case-insensitive).
-      const rawPattern = args.pattern as string;
-      const parts = rawPattern.split('%').filter((p: string) => p.length > 0);
-      if (parts.length === 0) return 'Invalid pattern.';
-      const conditions = parts.map(() => 'INSTR(LOWER(text), LOWER(?)) > 0').join(' AND ');
+      // project is an exact match, independent of pattern's INSTR-based text matching — added
+      // because LLM-rewritten content (memory_extract_and_store's fact extraction,
+      // memory_store_diff's GLM/Llama description) doesn't retain any literal substring from
+      // the original input, so pattern-only cleanup can never find it, even though every store
+      // call accepts and persists a project. Confirmed live 2026-07-06: e2e test cleanup left a
+      // permanent 'tidewater-kite-club' domain in production because pattern-based afterAll
+      // cleanup couldn't match the LLM-paraphrased text these tools actually stored.
+      const conditions: string[] = [];
+      const params: string[] = [];
+      if (typeof args.pattern === 'string' && args.pattern.length > 0) {
+        const parts = args.pattern.split('%').filter((p: string) => p.length > 0);
+        if (parts.length > 0) {
+          conditions.push(parts.map(() => 'INSTR(LOWER(text), LOWER(?)) > 0').join(' AND '));
+          params.push(...parts);
+        }
+      }
+      if (typeof args.project === 'string' && args.project.length > 0) {
+        conditions.push('project = ?');
+        params.push(args.project);
+      }
+      if (conditions.length === 0) return 'Invalid pattern: at least one of pattern/project is required.';
       const rows = await env.DB.prepare(
-        `SELECT id, text, domain, memory_type, timestamp FROM memories WHERE ${conditions}`
-      ).bind(...parts).all<{ id: string; text: string; domain: string; memory_type: string; timestamp: number }>();
+        `SELECT id, text, domain, memory_type, timestamp FROM memories WHERE ${conditions.join(' AND ')}`
+      ).bind(...params).all<{ id: string; text: string; domain: string; memory_type: string; timestamp: number }>();
       const matched = rows.results ?? [];
       const ids = matched.map(r => r.id);
       if (!ids.length) return 'No memories matched pattern.';

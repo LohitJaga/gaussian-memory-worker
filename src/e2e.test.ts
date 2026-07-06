@@ -42,6 +42,9 @@ const TEXT_B = `${TEST_PREFIX} Marrow and Reed synth workshop reflows corroded V
 const SNIPPET_B = 'reflows corroded VCO boards';
 const QUERY_B = 'analog synthesizer VCO board solder paste repair';
 
+// Additional off-topic fixtures for tool-specific tests below — same isolation rationale as A/B.
+const TEXT_C = `${TEST_PREFIX} Tidewater Kite Club rigs box kites with bamboo spars for steady onshore wind afternoons.`;
+
 // ── worker RPC helper ──────────────────────────────────────────────────────
 // Uses Node's http2 module directly — Node 26's undici (global fetch) hangs
 // on HTTP/2 POST requests to Cloudflare Workers deployments.
@@ -108,9 +111,50 @@ async function pollUntilFound(
   );
 }
 
+// memory_list shows full (non-truncated) IDs, unlike store/retrieve output which shows an
+// 8-char prefix — so ID-scoped tools (belief_drift, update, delete, judge) need this to get a
+// real ID to operate on, same as a real caller would ("Use memory_list to find IDs.").
+//
+// Resolves to the single newest row in `domain` (sort defaults to timestamp DESC, limit=1) —
+// deliberately NOT a text-substring search. Two real bugs were found trying that approach
+// (2026-07-06): (1) memory_list truncates displayed text to 80 chars, so a snippet late in a
+// long TEST_PREFIX-prefixed string (e.g. "flipper tags" in TEXT_A) can never appear in the
+// output regardless of retries — it's silently cut off, not missing; (2) a global `since`-only
+// search with no domain filter competes against this account's real ambient write volume across
+// a multi-minute suite run and can genuinely evict a real entry from even a 500-row window.
+// Domain-scoping + "just take the newest" avoids both: it must be called immediately after the
+// relevant store (while that row is still the newest in its domain), which every call site here
+// already does.
+async function findLatestMemoryId(domain: string, attempts = 2, delayMs = 2000): Promise<string> {
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, delayMs));
+    const result = await call('memory_list', { domain, limit: 1 });
+    const line = result.split('\n')[0];
+    const match = line?.match(/^\[([a-f0-9-]+)\]/);
+    if (match) return match[1];
+  }
+  throw new Error(`Could not find any memory in domain "${domain}" after ${attempts} attempts`);
+}
+
+// Parses the domain a store/auto_store/store_decision response landed in, e.g.
+// "SPAWNED: '...' -> (tidewater-kite-club/episodic, id=e4df04f8)" — needed for
+// memory_auto_store, which doesn't take a domain param and auto-classifies instead.
+function parseDomainFromStoreResponse(response: string): string {
+  const match = response.match(/\(([a-z0-9-]+)\/\w+, id=/);
+  if (!match) throw new Error(`Could not parse domain from store response: ${response}`);
+  return match[1];
+}
+
 // ── suite ──────────────────────────────────────────────────────────────────
 
 describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
+  // Resolved once, immediately after TEXT_A is stored, while it's still guaranteed to be the
+  // single newest matching entry. Reused later by belief_drift/judge instead of re-searching
+  // memory_list late in the run — confirmed live 2026-07-06 that a late-run since-filtered
+  // search can still miss it (real background writes across a 2+ minute suite can exceed even
+  // a 500-row window), while resolving it right after store never has that problem.
+  let textAId = '';
+  let textCId = '';
 
   beforeAll(async () => {
     if (!WORKER_URL) return; // describe.skip still runs hooks in some Vitest versions
@@ -119,7 +163,13 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
 
   afterAll(async () => {
     if (!WORKER_URL) return;
-    const result = await call('memory_bulk_delete', { pattern: `${TEST_PREFIX}%` }, 29_000);
+    // project (exact match), NOT pattern — memory_extract_and_store and memory_store_diff both
+    // LLM-rewrite/paraphrase their input, so the stored text may not retain any literal
+    // substring from TEST_PREFIX, making pattern-based cleanup silently miss it. Every store
+    // call in this suite passes project: TEST_PROJECT explicitly, so this reliably catches
+    // everything regardless of whether the text was rewritten. Confirmed live 2026-07-06: the
+    // old pattern-only cleanup left a permanent 'tidewater-kite-club' domain in production.
+    const result = await call('memory_bulk_delete', { project: TEST_PROJECT }, 29_000);
     expect(result).toMatch(/Deleted \d+ memories|No memories matched/);
   }, 30_000);
 
@@ -134,7 +184,8 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
       emotional_intensity: 0.5,
     });
     expect(result).toMatch(/SPAWNED/i);
-  }, 20_000);
+    textAId = await findLatestMemoryId('gaussian-memory-dev');
+  }, 30_000);
 
   it('store: exact duplicate is merged, not spawned', async () => {
     const result = await call('memory_store', {
@@ -189,6 +240,50 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     expect(result).toContain(SNIPPET_B);
   }, 70_000);
 
+  // ── retrieval edge cases ─────────────────────────────────────────────────
+
+  it('retrieve: empty query returns no memories instead of erroring', async () => {
+    const result = await call('memory_retrieve', { query: '', project: TEST_PROJECT }, 15_000);
+    expect(result).toBe('No memories found.');
+  }, 20_000);
+
+  it('retrieve: whitespace-only query returns no memories instead of erroring', async () => {
+    const result = await call('memory_retrieve', { query: '   ', project: TEST_PROJECT }, 15_000);
+    expect(result).toBe('No memories found.');
+  }, 20_000);
+
+  it('retrieve: domain param does not exclude a match in a different domain (soft boost, not a hard filter)', async () => {
+    const result = await call('memory_retrieve', {
+      query: QUERY_A, domain: 'some-unrelated-domain', project: TEST_PROJECT, strict_project: true, top_k: 5,
+    }, 15_000);
+    expect(result).toContain(SNIPPET_A);
+  }, 20_000);
+
+  it('retrieve: synthesize=true does not error on a normal query', async () => {
+    // Forcing the exact synthesis trigger (score>0.85 and top-2 scores within 0.04) isn't
+    // reliably reproducible against live embeddings — this confirms the flag is safe to pass.
+    const result = await call('memory_retrieve', {
+      query: QUERY_A, synthesize: true, project: TEST_PROJECT, strict_project: true, top_k: 5,
+    }, 15_000);
+    expect(result).toContain(SNIPPET_A);
+  }, 20_000);
+
+  it('retrieve: temporal cue ("today") surfaces a memory stored earlier in this run', async () => {
+    const result = await call('memory_retrieve', {
+      query: `${QUERY_A} today`, project: TEST_PROJECT, strict_project: true, top_k: 5,
+    }, 15_000);
+    expect(result).toContain(SNIPPET_A);
+  }, 20_000);
+
+  it('retrieve: capitalized entity token in the query exercises the entity-boost path', async () => {
+    // "Halvorsen Station" is a capitalized entity token in TEXT_A — this exercises entity
+    // extraction/graph-boost code without asserting on ranking specifics, which are LLM-adjacent.
+    const result = await call('memory_retrieve', {
+      query: 'Halvorsen Station penguin tagging', project: TEST_PROJECT, strict_project: true, top_k: 5,
+    }, 15_000);
+    expect(result).toContain(SNIPPET_A);
+  }, 20_000);
+
   // ── sigma sharpening ──────────────────────────────────────────────────────
 
   it('sigma: repeated retrieval does not degrade confidence below initial ◑', async () => {
@@ -207,6 +302,127 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
       expect(line).not.toMatch(/○/);
     }
   }, 30_000);
+
+  // ── additional store-family tools ─────────────────────────────────────────
+
+  it('auto_store: infers domain/type and spawns', async () => {
+    const result = await call('memory_auto_store', {
+      text: TEXT_C,
+      project: TEST_PROJECT,
+    });
+    expect(result).toMatch(/SPAWNED/i);
+    textCId = await findLatestMemoryId(parseDomainFromStoreResponse(result));
+  }, 30_000);
+
+  it('store_decision: stores a structured decision trail', async () => {
+    const result = await call('memory_store_decision', {
+      decision: `${TEST_PREFIX} Chose bamboo spars over carbon fiber for the kite club's box kites`,
+      context: 'Carbon fiber spars snap in gusty coastal wind; bamboo flexes instead',
+      alternatives: 'Fiberglass spars (too heavy for box kite lift), carbon fiber (too brittle)',
+      outcome: 'Bamboo-spar kites held together through a full gusty afternoon session',
+      project: TEST_PROJECT,
+    });
+    expect(result).toMatch(/SPAWNED/i);
+    expect(result).toContain('decision');
+  }, 20_000);
+
+  it('store_diff: stores semantic meaning of a command output', async () => {
+    // The GLM quality gate is now timeout-guarded at 12s (tools.ts) — including the
+    // subsequent Llama description call + embed/store, 20s is comfortable headroom.
+    // GLM's quality-gate verdict is a real LLM judgment call, not deterministic — assert on
+    // the response shape (SPAWNED/MERGED/SKIP) rather than forcing a specific outcome.
+    const result = await call('memory_store_diff', {
+      command: 'wrangler deploy --dry-run',
+      output: `${TEST_PREFIX} Switched bamboo spar diameter from 6mm to 8mm because 6mm snapped under sustained 15mph gusts during the kite club's onshore test session`,
+      project: TEST_PROJECT,
+    }, 20_000);
+    expect(result).toMatch(/^(SPAWNED|MERGED|SKIP)/i);
+  }, 25_000);
+
+  it('capture_passive: parses structured notes and stores bullets', async () => {
+    const notes = `## Key Learnings
+- ${TEST_PREFIX} Box kite bridle angle of 20 degrees gives the most stable lift in light wind
+- ${TEST_PREFIX} Bamboo spars need a full season of drying before they hold a stable curve
+
+## Decisions
+- ${TEST_PREFIX} Decided to switch the club's kite fabric from ripstop nylon to spinnaker cloth`;
+    const result = await call('memory_capture_passive', { text: notes, project: TEST_PROJECT }, 25_000);
+    expect(result).toMatch(/Captured \d+ memories/);
+  }, 30_000);
+
+  // ── read-only tools ────────────────────────────────────────────────────────
+
+  it('list: finds stored memories by domain', async () => {
+    const result = await call('memory_list', { domain: 'gaussian-memory-dev', limit: 100 });
+    expect(result).toContain(TEST_PREFIX);
+  }, 20_000);
+
+  it('timeline: returns a chronological view for a domain', async () => {
+    const result = await call('memory_timeline', { domain: 'gaussian-memory-dev', limit: 50 });
+    expect(result).toMatch(/TIMELINE:/);
+  }, 20_000);
+
+  it('identity_profile_get: returns without erroring (read-only)', async () => {
+    // Read-only — identity_profile_set is a single shared production slot, not test-scoped,
+    // so it's deliberately not exercised here. This just confirms the read path works.
+    const result = await call('identity_profile_get', {}, 15_000);
+    expect(typeof result).toBe('string');
+  }, 20_000);
+
+  it('orphan_check: scans the corpus for D1 rows missing a Vectorize vector (read-only)', async () => {
+    // Full-corpus scan (chunks of 20 via Vectorize getByIds) — real cost scales with total
+    // memory count, hence the generous timeout. repair is not passed, so this never mutates data.
+    const result = await call('memory_orphan_check', {}, 90_000);
+    expect(result).toMatch(/No orphans found|Found \d+ orphans/);
+  }, 95_000);
+
+  it('belief_drift_backfill: reports progress without erroring (idempotent, additive-only)', async () => {
+    const result = await call('memory_belief_drift_backfill', {}, 30_000);
+    expect(result).toMatch(/Backfilled \d+ memories|Backfill complete/);
+  }, 35_000);
+
+  // ── ID-scoped tools ──────────────────────────────────────────────────────
+
+  it('belief_drift: reports confidence trajectory for a specific memory', async () => {
+    expect(textAId).not.toBe('');
+    const result = await call('memory_belief_drift', { memory_id: textAId }, 20_000);
+    expect(result).toMatch(/Belief Drift Report/);
+  }, 25_000);
+
+  it('judge: compares a memory against its nearest neighbours without erroring', async () => {
+    // TEXT_A's off-topic content has no real-world neighbours above the 0.70 threshold,
+    // so this exercises the code path safely — no real memory_relations get created.
+    expect(textAId).not.toBe('');
+    const result = await call('memory_judge', { memory_id: textAId }, 25_000);
+    expect(result).toMatch(/no candidates above 0\.70|→|All relations already judged/);
+  }, 30_000);
+
+  it('update: re-embeds and updates an existing memory\'s text', async () => {
+    expect(textCId).not.toBe('');
+    const updatedText = `${TEST_PREFIX} Tidewater Kite Club now rigs box kites with reinforced bamboo spars for gusty afternoons.`;
+    const result = await call('memory_update', { id: textCId, text: updatedText }, 20_000);
+    expect(result).toMatch(/^UPDATED:/);
+  }, 25_000);
+
+  it('delete: removes a specific memory by ID', async () => {
+    await call('memory_store', {
+      text: `${TEST_PREFIX} Throwaway memory for delete-by-id test.`,
+      domain: 'gaussian-memory-dev',
+      memory_type: 'episodic',
+      project: TEST_PROJECT,
+    });
+    const id = await findLatestMemoryId('gaussian-memory-dev');
+    const result = await call('memory_delete', { id }, 20_000);
+    expect(result).toMatch(/^DELETED:/);
+  }, 40_000);
+
+  // ── memory_extract_and_store ─────────────────────────────────────────────
+
+  it('extract_and_store: extracts facts from a raw session log', async () => {
+    const log = `[User]: ${TEST_PREFIX} Switched the kite club's spar material from carbon fiber to bamboo because carbon fiber snapped under sustained 15mph coastal gusts during testing. | [Assistant]: Noted — bamboo spars flex instead of snapping, and the club settled on 8mm diameter after 6mm failed under the same wind conditions.`;
+    const result = await call('memory_extract_and_store', { log_text: log, project: TEST_PROJECT }, 30_000);
+    expect(result).toMatch(/Extracted \d+ facts, stored \d+\./);
+  }, 35_000);
 
   // ── decay ─────────────────────────────────────────────────────────────────
 
