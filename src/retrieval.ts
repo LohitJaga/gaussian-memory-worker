@@ -5,6 +5,27 @@ import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
 } from './gaussian';
 
+const DOMAIN_SIZE_CACHE_KEY = 'cache:domain_sizes';
+const DOMAIN_SIZE_CACHE_TTL = 60; // seconds — only feeds sharpenSigma's floor, tolerant of staleness
+
+// Cache-aside: domain sizes only inform a confidence-floor threshold (>=15 vs <5 memories),
+// not the actual ranking, so a short-TTL KV cache is safe. Without this, retrieve() ran an
+// unconditional `GROUP BY domain` full-table scan on every single call regardless of corpus
+// size — the single most expensive query in the function relative to the value it provides.
+async function getDomainSizeMap(env: Env): Promise<Map<string, number>> {
+  const raw = await env.KV.get(DOMAIN_SIZE_CACHE_KEY).catch(() => null);
+  if (raw) {
+    try { return new Map(Object.entries(JSON.parse(raw) as Record<string, number>)); } catch {}
+  }
+
+  const rows = await env.DB.prepare('SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain')
+    .all<{ domain: string; cnt: number }>().catch(() => ({ results: [] as { domain: string; cnt: number }[] }));
+  const map: Record<string, number> = {};
+  for (const r of rows.results) map[r.domain] = r.cnt;
+  await env.KV.put(DOMAIN_SIZE_CACHE_KEY, JSON.stringify(map), { expirationTtl: DOMAIN_SIZE_CACHE_TTL }).catch(() => {});
+  return new Map(Object.entries(map));
+}
+
 export const RRF_K = 60;
 
 // Reciprocal-rank fusion: merges any number of ranked ID lists into one score map.
@@ -125,11 +146,7 @@ export async function retrieve(
 
   // Domain sizes — used to set adaptive sigma floor in sharpenSigma.
   // Large domains (>=15) use floor=0.15; small (<5) use floor=0.35 to prevent premature certainty.
-  const domainSizeMap = new Map<string, number>();
-  const domainSizeRows = await env.DB.prepare(
-    'SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain'
-  ).all<{ domain: string; cnt: number }>().catch(() => ({ results: [] as { domain: string; cnt: number }[] }));
-  for (const r of domainSizeRows.results) domainSizeMap.set(r.domain, r.cnt);
+  const domainSizeMap = await getDomainSizeMap(env);
 
   // Vector search + FTS5 keyword search in parallel (hybrid retrieval, global scope)
   // Vectorize cap: returnValues=true hard-limits topK to 50. FTS5 handles overflow.

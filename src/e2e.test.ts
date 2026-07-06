@@ -25,8 +25,22 @@ const SUITE_ID = Date.now().toString(36); // full base-36 ms timestamp — no 2.
 const TEST_PREFIX = `[E2E-${SUITE_ID}]`;
 const TEST_PROJECT = `e2e-${SUITE_ID}`;
 
-const TEXT_A = `${TEST_PREFIX} Gaussian Memory stores beliefs as Bayesian distributions that sharpen with repeated access.`;
-const TEXT_B = `${TEST_PREFIX} Cloudflare D1 and Vectorize power the storage and retrieval layer for Gaussian Memory.`;
+// Deliberately topically unrelated to anything this project (or its user) actually discusses —
+// Bayesian/Gaussian/Cloudflare content collided with real production memories in the `default`
+// project (this system dogfoods its own vocabulary constantly), which silently defeated test
+// isolation: `project = ? OR project = 'default'` in retrieve() means every query here also
+// searches real data, so on-topic test content gets crowded out or deduped against higher-
+// access-count real memories. Several tests below were passing only because their assertions
+// didn't filter by TEST_PREFIX and happened to match real content with the same phrase instead
+// of the memory this suite actually stored. Off-topic content + TEST_PREFIX filtering closes
+// that gap for good, without touching retrieve()'s production scoping semantics.
+const TEXT_A = `${TEST_PREFIX} Halvorsen Station biologists band emperor penguin chicks with colored flipper tags before the autumn ice breakup.`;
+const SNIPPET_A = 'flipper tags';
+const QUERY_A = 'emperor penguin chicks flipper tags ice breakup';
+
+const TEXT_B = `${TEST_PREFIX} Marrow and Reed synth workshop reflows corroded VCO boards from 1978 analog synthesizers with low-temp solder paste.`;
+const SNIPPET_B = 'reflows corroded VCO boards';
+const QUERY_B = 'analog synthesizer VCO board solder paste repair';
 
 // ── worker RPC helper ──────────────────────────────────────────────────────
 // Uses Node's http2 module directly — Node 26's undici (global fetch) hangs
@@ -150,17 +164,13 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     // Vectorize propagation can take 2-5 min; we poll every 6s up to 90s.
     // Increase GAUSSIAN_E2E_TIMEOUT env var if your deployment is slower.
     const timeout = Number(process.env.GAUSSIAN_E2E_TIMEOUT ?? 90_000);
-    const result = await pollUntilFound(
-      'Bayesian distributions sharpen with repeated access',
-      'sharpen with repeated access',
-      timeout,
-    );
-    expect(result).toContain('sharpen with repeated access');
+    const result = await pollUntilFound(QUERY_A, SNIPPET_A, timeout);
+    expect(result).toContain(SNIPPET_A);
   }, 100_000);
 
   it('retrieve: result includes score and confidence indicator', async () => {
     const result = await call('memory_retrieve', {
-      query: 'Bayesian distributions sharpen',
+      query: QUERY_A,
       project: TEST_PROJECT,
       top_k: 5,
     });
@@ -174,12 +184,8 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
   it('retrieve: freshness boost — recently stored memory surfaces once indexed', async () => {
     // Poll until TEXT_B appears. Vectorize propagation for the second memory may
     // lag behind TEXT_A (which the propagation test already waited for).
-    const result = await pollUntilFound(
-      'Cloudflare D1 Vectorize power storage retrieval layer Gaussian Memory',
-      'Vectorize power the storage',
-      60_000,
-    );
-    expect(result).toContain('Vectorize power the storage');
+    const result = await pollUntilFound(QUERY_B, SNIPPET_B, 60_000);
+    expect(result).toContain(SNIPPET_B);
   }, 70_000);
 
   // ── sigma sharpening ──────────────────────────────────────────────────────
@@ -189,20 +195,12 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     // After 5 retrieves sigma should stay ≤ 0.375 — verifies no regression to ○ (≥0.5).
     // Note: proving advancement to ● requires starting from ○; a separate test covers that.
     for (let i = 0; i < 4; i++) {
-      await call('memory_retrieve', {
-        query: 'Bayesian distributions sharpen with repeated access',
-        project: TEST_PROJECT,
-        top_k: 5,
-      });
+      await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, top_k: 5 });
     }
-    const result = await call('memory_retrieve', {
-      query: 'Bayesian distributions sharpen with repeated access',
-      project: TEST_PROJECT,
-      top_k: 5,
-    });
+    const result = await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, top_k: 5 });
     expect(result).not.toContain('No memories found');
     // Filter by TEST_PREFIX to exclude default-project memories from the assertion
-    const lines = result.split('\n').filter(l => l.includes(TEST_PREFIX) && l.includes('sharpen with repeated access'));
+    const lines = result.split('\n').filter(l => l.includes(TEST_PREFIX) && l.includes(SNIPPET_A));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
       expect(line).not.toMatch(/○/);
