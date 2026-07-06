@@ -68,7 +68,33 @@ Research already done — see `BENCHMARKING.md` (compiled 2026-06-15): which pub
 (with the known credibility disputes between them), a concrete LoCoMo-10 run plan, and a recommended
 benchmarking order. No actual numbers have been produced yet — this section is genuinely unstarted,
 but don't re-research from scratch, the plan already exists.
-- [ ] Latency — p50/p95 retrieve, edge vs Mem0 API roundtrip (quickest real number)
+- [x] Latency — first real number, then fixed the biggest tail cost (2026-07-06). Initial measurement
+      (15 `memory_retrieve` calls, live worker, ~4.6k-memory corpus, persistent HTTP/2 connection to
+      isolate real server time from per-call handshake overhead): **p50=1.5s, p95=9.9s**. Root-caused
+      the tail to `retrieval.ts`'s `domainSizeRows` query (`SELECT domain, COUNT(*) FROM memories
+      GROUP BY domain`) — an unindexed full-table scan run on **every single retrieve call**, only
+      used to set a confidence-floor threshold in `sharpenSigma` (tolerant of staleness). Fixed by
+      cache-aside through KV with a 60s TTL (`getDomainSizeMap`, retrieval.ts) instead of hitting D1
+      every call. Deployed and re-measured: **p50=1.4s (~6% down), p95=3.9s (~60% down)**. Not
+      benchmarked against Mem0's API yet. p50 is still not fast for a "real-time" pitch — `retrieve()`
+      still does ~6-8 D1/Vectorize/Workers-AI round trips per call (embed, vector query, FTS5, entity
+      graph, cluster cohesion, candidate fetch, BFS hops) — but the worst-case is no longer ~10s.
+- [x] **New bug found + fixed while chasing this (2026-07-06)**: the e2e sigma regression test failed
+      deterministically (reproduced twice, not flaky) because `retrieve()`'s project scoping is
+      `project = ? OR project = 'default'` — even the e2e suite's own unique test project always also
+      searches real `default`-project data. Since `default` now contains extensive real dogfooding
+      content about "Bayesian," "sharpen with reinforcement," etc., the freshly-stored test memory got
+      crowded out / deduped against real higher-access-count memories instead of surfacing cleanly.
+      Several *other* tests in the same file were only passing because their assertions didn't filter
+      by the test's unique prefix and were silently matching real production content instead of the
+      memory the test actually stored — a suite-wide false-confidence gap, not just the one failure.
+      Fixed by switching the e2e fixtures (`TEXT_A`/`TEXT_B`) to topically unrelated synthetic content
+      (penguin banding / synth repair) with zero real-world overlap, instead of Bayesian/Cloudflare
+      content that collides with this project's own vocabulary — test-only change, zero production
+      behavior change. Verified: full e2e suite (10/10) passes clean now. `retrieve()`'s actual
+      `project = ? OR project = 'default'` semantics were deliberately left alone (that's a production
+      behavior change affecting every real caller, not a test bug) — if that fallback is ever revisited,
+      it should be a deliberate product decision, not a side effect of fixing test isolation.
 - [ ] Token savings per call from caching (the resume-point metric)
 - [ ] Retrieval quality on a labeled query set
 - [ ] Identity coherence — 50 queries, LLM-judge whether injected context is coherent
@@ -128,7 +154,9 @@ threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-
 - [ ] One-time prune of old verbatim noise in the pool (pre-distillation junk: "Yeah, I do." etc.) — for clean demo retrievals
 
 ### Blog
-- [ ] Blog post (outline at Downloads/blog_post_outline.md)
+- [ ] Blog post — outline exists (`../blog_post_outline.md`, 123 lines, "Reconstructive Memory for
+      AI Agents") but the post itself is unwritten. Path was stale (said Downloads/, actually lives
+      one directory up from this repo) — fixed 2026-07-06.
 
 ### Quality / Testing
 - [ ] E2E coverage for remaining tools: `memory_auto_store`, `memory_extract_and_store`, `memory_store_decision`, `memory_store_diff`, `memory_list`, `memory_timeline`, `memory_belief_drift` / `backfill`, `memory_orphan_check`, `memory_judge`, `memory_capture_passive`, `memory_update`, `memory_delete`, `identity_profile_get/set`, domain rebuild/retag/build_entities
