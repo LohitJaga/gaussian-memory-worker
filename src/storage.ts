@@ -117,11 +117,19 @@ export async function processPendingEntityQueue(env: Env): Promise<void> {
   }
 }
 
-const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;
+export const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;
 
-function isContradiction(newText: string, existingText: string, cosineSim: number): boolean {
+// Similar text (cosineSim >= 0.88) where exactly one side uses negation language
+// ("switched from X" vs "using X") is treated as a contradiction, not a merge.
+export function isContradiction(newText: string, existingText: string, cosineSim: number): boolean {
   if (cosineSim < 0.88) return false;
   return NEGATION.test(newText) !== NEGATION.test(existingText);
+}
+
+// Graphiti-style exact-match normalization: strips punctuation/case/whitespace differences
+// so trivial surface variation ("Fixed bug!" vs "fixed bug") is recognized as the same text.
+export function normalizeForExactMatch(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 export async function storeMemory(
@@ -195,10 +203,9 @@ export async function storeMemory(
 
   // Graphiti-style fast path: exact normalized match skips Bhattacharyya entirely.
   // Catches same-text re-ingestion with trivial surface differences (case, punctuation).
-  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-  const normalizedNew = normalize(text);
+  const normalizedNew = normalizeForExactMatch(text);
   for (const row of rows.results) {
-    if (normalize(row.text) === normalizedNew) {
+    if (normalizeForExactMatch(row.text) === normalizedNew) {
       const existingSigma = deserializeSigma(row.sigma_diagonal);
       const [, newSigma] = kalmanMerge(mu, existingSigma, mu, existingSigma);
       const exactTypeClause = memoryType === 'session' ? ', memory_type = ?' : '';

@@ -1,5 +1,7 @@
 // Gaussian math — port of gaussian.py
 
+import { dotProduct } from './embed';
+
 export function bhattacharyyaDistance(
   muA: Float32Array, sigmaA: Float32Array,
   muB: Float32Array, sigmaB: Float32Array
@@ -75,10 +77,10 @@ export function initialSigma(_domain: string, emotionalIntensity = 0.0, dim: num
   return new Float32Array(dim).fill(base);
 }
 
+// Delegates to embed.ts's dotProduct — same raw-dot-product math over already-unit-normalized
+// vectors, kept as one implementation instead of two independently-maintained copies.
 export function cosine(a: Float32Array, b: Float32Array): number {
-  let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-  return dot;
+  return dotProduct(a, b);
 }
 
 export function meanSigma(sigma: Float32Array): number {

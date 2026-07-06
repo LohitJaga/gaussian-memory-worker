@@ -5,11 +5,99 @@ import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
 } from './gaussian';
 
+export const RRF_K = 60;
+
+// Reciprocal-rank fusion: merges any number of ranked ID lists into one score map.
+// Extracted so the fusion math is testable without live Vectorize/FTS5 calls.
+export function rrfMerge(rankedLists: string[][], k = RRF_K): Map<string, number> {
+  const scores = new Map<string, number>();
+  for (const list of rankedLists) {
+    list.forEach((id, rank) => {
+      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank + 1));
+    });
+  }
+  return scores;
+}
+
+// Min-max normalization within a batch — spreads a raw score component across [0,1].
+// A constant array (all-equal values) normalizes to all-1s, not all-0s or NaN.
+export function minMaxNormalize(arr: number[]): number[] {
+  const mn = Math.min(...arr), mx = Math.max(...arr);
+  return mx === mn ? arr.map(() => 1) : arr.map(v => (v - mn) / (mx - mn));
+}
+
+export const DEDUP_COS = 0.85, DEDUP_TEXT = 0.72;
+
+export function tokenize(s: string): Set<string> {
+  return new Set(
+    s.toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z0-9 ]/g, ' ')
+      .split(/\s+/).filter(w => w.length > 3)
+  );
+}
+
+export function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let inter = 0; for (const w of a) if (b.has(w)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+// Near-duplicate suppression (MMR-style): keeps the highest-scored instance of each
+// near-identical item, dropping later ones — embedding cosine when both have vectors,
+// token-Jaccard fallback otherwise. Input must already be sorted desc by score.
+export function dedupBySimilarity<T extends { text: string; vector: number[] }>(
+  list: T[], cosThreshold = DEDUP_COS, textThreshold = DEDUP_TEXT
+): T[] {
+  const out: T[] = []; const outTok: Set<string>[] = [];
+  for (const c of list) {
+    const ct = tokenize(c.text); let dup = false;
+    for (let k = 0; k < out.length; k++) {
+      const same = (c.vector.length && out[k].vector.length)
+        ? dotProduct(c.vector, out[k].vector) > cosThreshold
+        : jaccardSimilarity(ct, outTok[k]) > textThreshold;
+      if (same) { dup = true; break; }
+    }
+    if (!dup) { out.push(c); outTok.push(ct); }
+  }
+  return out;
+}
+
+// σ hard gate: specific queries only surface memories whose confidence meets the
+// query's specificity requirement. Ceiling scales with querySigmaVal so vague queries
+// stay permissive. Always keeps at least a minimum number of results (never empty).
+export function sigmaGate<T extends { sigma: Float32Array }>(
+  items: T[], querySigmaVal: number, minResults = 2, floor = 0.65, multiplier = 1.8
+): T[] {
+  const sigmaCeiling = Math.max(floor, querySigmaVal * multiplier);
+  const gated = items.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
+  return gated.length >= minResults ? gated : items.slice(0, Math.max(minResults, Math.ceil(items.length / 2)));
+}
+
+// Diversity cap: caps how many results of the same memory_type or micro-cluster can
+// appear together, so one session's worth of near-identical summaries (or one tight
+// cluster) can't flood the result set. Memories without a cluster_id are exempt.
+export function applyDiversityCap<T extends { type: string; cluster_id: string | null }>(
+  items: T[], sessionLimit = 2, otherTypeLimit = 4, clusterLimit = 3
+): T[] {
+  const out: T[] = [];
+  const typeCounts = new Map<string, number>();
+  const clusterCounts = new Map<string, number>();
+  for (const m of items) {
+    const tc = typeCounts.get(m.type) ?? 0;
+    const cc = m.cluster_id ? (clusterCounts.get(m.cluster_id) ?? 0) : 0;
+    const typeLimit = m.type === 'session' ? sessionLimit : otherTypeLimit;
+    if (tc >= typeLimit || (m.cluster_id && cc >= clusterLimit)) continue;
+    out.push(m);
+    typeCounts.set(m.type, tc + 1);
+    if (m.cluster_id) clusterCounts.set(m.cluster_id, cc + 1);
+  }
+  return out;
+}
+
 export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default'
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
-  if (!query || !query.trim()) return [];
+  if (!query?.trim()) return [];
 
   // Pure semantic retrieval — no LLM query rewriting.
   // Memories are stored with context-enriched text (via memory_auto_store context param),
@@ -63,14 +151,10 @@ export async function retrieve(
   for (const r of (ftsResults.results ?? [])) bm25Map.set(r.id, r.bm25_score ?? 0);
 
   // RRF fusion (k=60): combine vector ranks + FTS5 ranks for candidate set ordering
-  const RRF_K = 60;
-  const rrfScores = new Map<string, number>();
-  (vecFinal.matches ?? []).forEach((m, rank) => {
-    rrfScores.set(m.id, (rrfScores.get(m.id) ?? 0) + 1 / (RRF_K + rank + 1));
-  });
-  (ftsResults.results ?? []).forEach((r, rank) => {
-    rrfScores.set(r.id, (rrfScores.get(r.id) ?? 0) + 1 / (RRF_K + rank + 1));
-  });
+  const rrfScores = rrfMerge([
+    (vecFinal.matches ?? []).map(m => m.id),
+    (ftsResults.results ?? []).map(r => r.id),
+  ]);
 
   // Build merged ID set sorted by RRF score, preserve vector metadata for top vector hits
   const mergedIds = [...rrfScores.entries()]
@@ -192,9 +276,9 @@ export async function retrieve(
     const memToEntities = new Map<string, Set<string>>();
     for (const r of entRows.results ?? []) {
       if (!entityToMembers.has(r.entity_id)) entityToMembers.set(r.entity_id, new Set());
-      entityToMembers.get(r.entity_id)!.add(r.memory_id);
+      entityToMembers.get(r.entity_id)?.add(r.memory_id);
       if (!memToEntities.has(r.memory_id)) memToEntities.set(r.memory_id, new Set());
-      memToEntities.get(r.memory_id)!.add(r.entity_id);
+      memToEntities.get(r.memory_id)?.add(r.entity_id);
     }
 
     // For each memory: count how many OTHER candidates in this retrieval share its entities
@@ -244,18 +328,14 @@ export async function retrieve(
   });
 
   // Min-max normalization within batch — spreads scores across [0,1] per component
-  const minMax = (arr: number[]) => {
-    const mn = Math.min(...arr), mx = Math.max(...arr);
-    return mx === mn ? arr.map(() => 1) : arr.map(v => (v - mn) / (mx - mn));
-  };
-  const normCosine = minMax(rawCandidates.map(c => c.cosineWeighted));
-  const normRecency = minMax(rawCandidates.map(c => c.recency));
-  const normAccess = minMax(rawCandidates.map(c => c.accessFreq));
+  const normCosine = minMaxNormalize(rawCandidates.map(c => c.cosineWeighted));
+  const normRecency = minMaxNormalize(rawCandidates.map(c => c.recency));
+  const normAccess = minMaxNormalize(rawCandidates.map(c => c.accessFreq));
   // BM25: if all candidates have zero score (no FTS5 hits), return zeros — not ones.
   // minMax's constant-array fallback of 1 is correct for cosine/recency but wrong for BM25:
   // zero signal should mean zero weight, not uniform +0.15 across all candidates.
   const bm25Vals = rawCandidates.map(c => c.bm25Raw);
-  const normBm25 = bm25Vals.every(v => v === 0) ? bm25Vals.map(() => 0) : minMax(bm25Vals);
+  const normBm25 = bm25Vals.every(v => v === 0) ? bm25Vals.map(() => 0) : minMaxNormalize(bm25Vals);
 
   // Pass 2: build scored candidates using normalized components
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
@@ -368,7 +448,7 @@ export async function retrieve(
     .map(c => ({ id: c.id, vector: c.vector }));
 
   for (let hop = 0; hop < BFS_DEPTH && frontier.length > 0; hop++) {
-    const decay = Math.pow(0.6, hop + 1);
+    const decay = 0.6 ** (hop + 1);
     // Only request vectors when there's a next hop to feed; final hop vectors are unused.
     const needValues = hop < BFS_DEPTH - 1;
     const neighborQueries = frontier.map(node =>
@@ -383,6 +463,7 @@ export async function retrieve(
         // best score across all frontier nodes wins, not whichever fires first.
         if (!seenIds.has(m.id) && (m.score ?? 0) >= 0.65) {
           const activatedScore = (m.score ?? 0) * decay;
+          // biome-ignore lint/style/noNonNullAssertion: guarded by the !has() short-circuit before the ||
           if (!newMatches.has(m.id) || newMatches.get(m.id)!.score < activatedScore) {
             newMatches.set(m.id, { score: activatedScore, values: (m.values as number[]) ?? [] });
           }
@@ -415,6 +496,7 @@ export async function retrieve(
       const t = (row.text ?? '').trim();
       if (t.length < 30 || /^https?:\/\//.test(t) || /^[a-zA-Z0-9_.-]+$/.test(t) || (t.match(/\s/g) ?? []).length < 3) continue;
       const memSigma = deserializeSigma(row.sigma_diagonal);
+      // biome-ignore lint/style/noNonNullAssertion: row.id comes from newIds, which is newMatches.keys()
       const match = newMatches.get(row.id)!;
       activatedExtras.push({
         id: row.id, text: row.text, domain: row.domain, cluster_id: row.cluster_id, type: row.memory_type,
@@ -433,30 +515,6 @@ export async function retrieve(
   // once per domain; without this they self-reinforce (mutual neighbours + shared entities)
   // and flood injection 8-10x. Keep the highest-scored instance, drop later near-identical
   // ones — embedding cosine when both have vectors, token-Jaccard fallback otherwise.
-  const DEDUP_COS = 0.85, DEDUP_TEXT = 0.72;
-  const tok = (s: string) => new Set(
-    s.toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z0-9 ]/g, ' ')
-      .split(/\s+/).filter(w => w.length > 3)
-  );
-  const jac = (a: Set<string>, b: Set<string>) => {
-    if (!a.size || !b.size) return 0;
-    let inter = 0; for (const w of a) if (b.has(w)) inter++;
-    return inter / (a.size + b.size - inter);
-  };
-  const dedupBySimilarity = <T extends { text: string; vector: number[] }>(list: T[]): T[] => {
-    const out: T[] = []; const outTok: Set<string>[] = [];
-    for (const c of list) {
-      const ct = tok(c.text); let dup = false;
-      for (let k = 0; k < out.length; k++) {
-        const same = (c.vector.length && out[k].vector.length)
-          ? dotProduct(c.vector, out[k].vector) > DEDUP_COS
-          : jac(ct, outTok[k]) > DEDUP_TEXT;
-        if (same) { dup = true; break; }
-      }
-      if (!dup) { out.push(c); outTok.push(ct); }
-    }
-    return out;
-  };
   const kept = dedupBySimilarity(scored); // scored is already sorted desc by score
 
   // Threshold-based retrieval: return ALL above score floor, not a hard topK.
@@ -496,11 +554,8 @@ export async function retrieve(
   const topDeduped = dedupBySimilarity(top);
 
   // σ hard gate: specific queries only surface memories whose confidence meets the
-  // query's specificity requirement. sigmaCeiling scales with querySigmaVal so vague
-  // queries stay permissive. Always keep at least 2 results to prevent empty injection.
-  const sigmaCeiling = Math.max(0.65, querySigmaVal * 1.8);
-  const gated = topDeduped.filter(m => meanSigma(m.sigma) <= sigmaCeiling);
-  const finalTop = gated.length >= 2 ? gated : topDeduped.slice(0, Math.max(2, Math.ceil(topDeduped.length / 2)));
+  // query's specificity requirement. Always keep at least 2 results to prevent empty injection.
+  const finalTop = sigmaGate(topDeduped, querySigmaVal, 2);
 
   // Diversity cap: prevent same type/micro-cluster from flooding results.
   // Max 2 session summaries, max 3 from any single cluster_id — the raw, uncapped
@@ -508,18 +563,7 @@ export async function retrieve(
   // `domain` field. Memories without a cluster_id yet (pre-backfill) are exempt
   // rather than all bucketed under one null key, so old rows aren't penalized as
   // if they were one giant cluster.
-  const diversityCapped: typeof finalTop = [];
-  const typeCounts = new Map<string, number>();
-  const clusterCounts = new Map<string, number>();
-  for (const m of finalTop) {
-    const tc = typeCounts.get(m.type) ?? 0;
-    const cc = m.cluster_id ? (clusterCounts.get(m.cluster_id) ?? 0) : 0;
-    const typeLimit = m.type === 'session' ? 2 : 4;
-    if (tc >= typeLimit || (m.cluster_id && cc >= 3)) continue;
-    diversityCapped.push(m);
-    typeCounts.set(m.type, tc + 1);
-    if (m.cluster_id) clusterCounts.set(m.cluster_id, cc + 1);
-  }
+  const diversityCapped = applyDiversityCap(finalTop);
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
   const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
 
