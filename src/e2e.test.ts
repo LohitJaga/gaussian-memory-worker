@@ -34,8 +34,9 @@ const TEXT_B = `${TEST_PREFIX} Cloudflare D1 and Vectorize power the storage and
 
 function call(name: string, args: Record<string, unknown> = {}, timeoutMs = 20_000): Promise<string> {
   return new Promise((resolve, reject) => {
-    const http2 = require('http2');
+    const http2 = require('node:http2');
     const body = JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: args } });
+    // biome-ignore lint/style/noNonNullAssertion: describeE2E skips the whole suite when WORKER_URL is unset
     const client = http2.connect(WORKER_URL!);
     const timer = setTimeout(() => { client.close(); reject(new Error(`call(${name}) timed out after ${timeoutMs}ms`)); }, timeoutMs);
     client.on('error', (e: Error) => { clearTimeout(timer); reject(e); });
@@ -61,7 +62,7 @@ function call(name: string, args: Record<string, unknown> = {}, timeoutMs = 20_0
         if (Array.isArray(content) && content[0]?.text) return resolve(content[0].text as string);
         if (typeof json.result === 'string') return resolve(json.result);
         resolve(JSON.stringify(json.result));
-      } catch (e) {
+      } catch (_e) {
         reject(new Error(`JSON parse failed: ${data.slice(0, 200)}`));
       }
     });

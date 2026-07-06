@@ -446,7 +446,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         const projectFromPath = filePath.match(/\/([^/]+)\/(?:src|lib|app)\//)?.[1] ?? '';
         const oldSnip = ((args.old_string as string) ?? '').trim().replace(/\s+/g, ' ').slice(0, 150);
         const newSnip = ((args.new_string as string) ?? '').trim().replace(/\s+/g, ' ').slice(0, 150);
-        diffContext = `File: ${projectFromPath ? projectFromPath + '/' : ''}${file}\nBefore: ${oldSnip}\nAfter: ${newSnip}`;
+        diffContext = `File: ${projectFromPath ? `${projectFromPath}/` : ''}${file}\nBefore: ${oldSnip}\nAfter: ${newSnip}`;
       }
       if (!diffContext) return 'SKIP: no diff context provided';
 
@@ -454,7 +454,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       // after stripping digits, punctuation, whitespace — catches version bumps, count
       // changes, semicolon fixes, blank line additions that have zero semantic content.
       if (args.old_string != null && args.new_string != null) {
-        const strip = (s: string) => s.replace(/[\d\s.,;:'"()\[\]{}\-_=+!?@#$%^&*|\\/<>]/g, '').toLowerCase();
+        const strip = (s: string) => s.replace(/[\d\s.,;:'"()[\]{}\-_=+!?@#$%^&*|\\/<>]/g, '').toLowerCase();
         const strippedOld = strip(args.old_string as string);
         const strippedNew = strip(args.new_string as string);
         // Only skip if both sides have content that strips to the same thing —
@@ -777,7 +777,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         const d = new Date((m.timestamp ?? 0) * 1000);
         const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(m);
+        groups.get(key)?.push(m);
       }
 
       const lines: string[] = [
@@ -940,7 +940,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         const isPrefix = memId.length === 8 && !memId.includes('-');
         const row = isPrefix
           ? await env.DB.prepare('SELECT id, text, timestamp FROM memories WHERE id LIKE ?')
-              .bind(memId + '%').first<{ id: string; text: string; timestamp: number }>()
+              .bind(`${memId}%`).first<{ id: string; text: string; timestamp: number }>()
           : await env.DB.prepare('SELECT id, text, timestamp FROM memories WHERE id = ?')
               .bind(memId).first<{ id: string; text: string; timestamp: number }>();
         if (!row) return `Not found: ${memId}`;
@@ -1393,7 +1393,7 @@ Return ONLY valid JSON array:
       const groups = new Map<string, typeof dupRows.results>();
       for (const r of dupRows.results ?? []) {
         if (!groups.has(r.text)) groups.set(r.text, []);
-        groups.get(r.text)!.push(r);
+        groups.get(r.text)?.push(r);
       }
       const meanSig = (s: string) => {
         try { const a = deserializeSigma(s); return meanSigma(a); } catch { return 1; }

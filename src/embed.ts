@@ -16,7 +16,7 @@ async function aiRunWithRetry(env: Env, model: string, input: any, retries = 2):
 export async function embed(text: string, env: Env): Promise<Float32Array> {
   const result = await aiRunWithRetry(env, '@cf/baai/bge-base-en-v1.5', { text: [text] }) as any;
   const vec = result?.data?.[0] as number[] | undefined;
-  if (!vec || !vec.length) throw new Error(`Embedding failed: model returned no vector for text (${text.length} chars)`);
+  if (!vec?.length) throw new Error(`Embedding failed: model returned no vector for text (${text.length} chars)`);
   const norm = Math.sqrt(vec.reduce((s: number, v: number) => s + v * v, 0)) || 1;
   return new Float32Array(vec.map((v: number) => v / norm));
 }
@@ -38,7 +38,7 @@ export async function batchEmbed(texts: string[], env: Env): Promise<Float32Arra
   return out;
 }
 
-export function dotProduct(a: number[], b: number[]): number {
+export function dotProduct(a: ArrayLike<number>, b: ArrayLike<number>): number {
   let sum = 0;
   for (let i = 0; i < Math.min(a.length, b.length); i++) sum += a[i] * b[i];
   return sum;

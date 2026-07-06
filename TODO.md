@@ -133,9 +133,31 @@ threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-
 ### Quality / Testing
 - [ ] E2E coverage for remaining tools: `memory_auto_store`, `memory_extract_and_store`, `memory_store_decision`, `memory_store_diff`, `memory_list`, `memory_timeline`, `memory_belief_drift` / `backfill`, `memory_orphan_check`, `memory_judge`, `memory_capture_passive`, `memory_update`, `memory_delete`, `identity_profile_get/set`, domain rebuild/retag/build_entities
 - [ ] Retrieval edge case tests: empty query, domain filter, `synthesize=true`, temporal queries (`yesterday`, `this week`), entity boost
-- [ ] Unit tests for `src/domain.ts` — classification accuracy + centroid management
-- [ ] Unit tests for `src/storage.ts` — Kalman merge correctness, contradiction detection
-- [ ] Unit tests for `src/retrieval.ts` — RRF fusion, sigma gating, spreading activation
+- [x] `microcluster.test.ts` existed but wasn't wired into `npm test` — fixed (2026-07-06), was silently never running
+- [x] Unit tests for `src/domain.ts` (2026-07-06) — `domain.test.ts`, 16 tests covering `deriveAnchorName` + `bestAnchor`.
+      Found 2 real (minor) bugs while writing these, both fixed same day (2026-07-06): (1) the fallback-pass
+      regex stripped uppercase letters instead of case-folding, so a capitalized stop-listed word reaching that
+      pass got corrupted (e.g. "Session" → "ession") instead of being matched or skipped — fixed by lowercasing
+      before stripping (domain.ts:43); (2) `bestAnchor`'s `bestSim` started at -1 with a strict `>` compare, so
+      a lone anchor at exactly sim=-1 returned `null` instead of that anchor — fixed by using `-Infinity` as the
+      sentinel (domain.ts:64). Tests updated to pin the corrected behavior. Ran a multi-angle code review on
+      this whole diff after (2026-07-06): correctness angles found nothing; cleanup findings led to a shared
+      `normalizeToken()` helper in `deriveAnchorName` (was 3 independently-written passes, same bug class could
+      have recurred), consolidating `gaussian.ts`'s `cosine()` to delegate to `embed.ts`'s `dotProduct()` (was
+      two copies of the same math), and parameterizing `dedupBySimilarity`'s thresholds + `sigmaGate`'s
+      floor/multiplier (were hardcoded, inconsistent with `applyDiversityCap`'s style) — with tests added that
+      actually exercise the new parameters.
+- [x] Unit tests for `src/retrieval.ts` (2026-07-06) — extracted the pure pieces (`rrfMerge`, `minMaxNormalize`,
+      `tokenize`/`jaccardSimilarity`/`dedupBySimilarity`, `sigmaGate`, `applyDiversityCap`) out of the monolithic
+      `retrieve()` into named exports (behavior-preserving refactor, verified via typecheck + full e2e-adjacent
+      test pass), then added `retrieval.test.ts`, 32 tests. The BFS/spreading-activation score combination
+      itself is still untested at unit level — it's entangled with live Vectorize calls inside the hop loop;
+      e2e is still the right coverage tool for that part.
+- [x] Unit tests for `src/storage.ts` contradiction detection (2026-07-06) — exported `isContradiction` and
+      `normalizeForExactMatch` (was an inline arrow fn), added `storage.test.ts`, 12 tests. Kalman merge math
+      itself was already covered by `gaussian.test.ts` (storage.ts just calls `kalmanMerge`, doesn't reimplement
+      it). The spawn/merge/contradiction *branching* in `storeMemory` remains untested at unit level — it's
+      inline D1/Vectorize/KV calls, would need a mocked `Env` to isolate; not attempted this pass.
 - [x] Clean up dead code in `extensions/browser/inject.js` — confirmed 2026-07-05: `GM_TOOLS`/`GM_TOOL_NAMES`/`injectGMTools()`/`injectToolResults()` don't exist anywhere in the repo (removed in commit `38f3c7c`, part of the 2026-06-17 session); this item was just never checked off
 - [x] Fixed duplicate-POST bug: guarded `tapClaudeStream` (tee failure returns raw response, never re-fetches) + explicit return in Claude catch for pre-dispatch errors (2026-06-17)
 - [x] Fixed double-store: `captureChatGPTSSE` now stores the turn exactly once via a `stored` flag / `flush()` ([DONE] or stream end) (2026-06-17)

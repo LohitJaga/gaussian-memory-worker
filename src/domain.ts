@@ -28,25 +28,33 @@ const ANCHOR_STOP = new Set([
   'error','type','list','running','system',
 ]);
 
+// Always case-fold BEFORE stripping non-letters — stripping first with a lowercase-only
+// character class silently deletes uppercase letters instead of folding them (the bug that
+// turned "Session" into "ession"). Centralized so all three passes below share one invariant
+// instead of each independently re-deriving (and potentially breaking) it.
+function normalizeToken(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z]/g, '');
+}
+
 export function deriveAnchorName(text: string): string {
   const tokens = text.split(/\s+/);
   // Skip first token (sentence-starter, capitalized by grammar not by being a proper noun)
   for (let i = 1; i < tokens.length; i++) {
-    const w = tokens[i].replace(/[^a-zA-Z]/g, '');
-    if (w.length >= 4 && /^[A-Z]/.test(w)) {
-      const lw = w.toLowerCase();
-      if (!ANCHOR_STOP.has(lw)) return lw;
+    const raw = tokens[i].replace(/[^a-zA-Z]/g, '');
+    if (raw.length >= 4 && /^[A-Z]/.test(raw)) {
+      const w = normalizeToken(raw);
+      if (!ANCHOR_STOP.has(w)) return w;
     }
   }
   // Fall back to distinctive content words (skip first token here too)
   for (let i = 1; i < tokens.length; i++) {
-    const w = tokens[i].replace(/[^a-z]/g, '');
+    const w = normalizeToken(tokens[i]);
     if (w.length >= 5 && !ANCHOR_STOP.has(w)) return w;
   }
   // Last resort: any content word including first
-  for (const w of tokens) {
-    const c = w.replace(/[^a-zA-Z]/g, '').toLowerCase();
-    if (c.length >= 4 && !ANCHOR_STOP.has(c)) return c;
+  for (const raw of tokens) {
+    const w = normalizeToken(raw);
+    if (w.length >= 4 && !ANCHOR_STOP.has(w)) return w;
   }
   return `cluster_${Date.now().toString(36).slice(-4)}`;
 }
@@ -61,7 +69,7 @@ export async function loadAnchors(env: Env): Promise<Anchor[]> {
 
 export function bestAnchor(mu: number[], anchors: Anchor[]): { name: string; sim: number } | null {
   let bestName = '';
-  let bestSim = -1;
+  let bestSim = -Infinity; // not -1: a real anchor at exactly sim=-1 must still win over "nothing seen yet"
   for (const a of anchors) {
     const sim = dotProduct(mu, a.emb);
     if (sim > bestSim) { bestSim = sim; bestName = a.name; }
