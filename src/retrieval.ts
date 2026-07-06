@@ -114,8 +114,22 @@ export function applyDiversityCap<T extends { type: string; cluster_id: string |
   return out;
 }
 
+// project='default' means no project context (direct MCP call) — searches all projects, no clause.
+// Otherwise, real callers usually want project-scoped results to still surface general/default
+// facts (identity, preferences) alongside project-specific ones — hence the OR-default fallback,
+// which is genuinely useful and stays the default. strictProject opts a specific call out of that
+// fallback for true project-only isolation (e.g. tests that must not see production data).
+// Shared by all 3 project-scoped queries in retrieve() so strict-mode support can't land in only
+// some of them.
+export function projectScopeClause(project: string, strictProject = false): { clause: string; param: string | null } {
+  if (project === 'default') return { clause: '', param: null };
+  const clause = strictProject ? 'AND project = ?' : `AND (project = ? OR project = 'default')`;
+  return { clause, param: project };
+}
+
 export async function retrieve(
-  query: string, domain: string | null, topK: number, env: Env, project: string = 'default'
+  query: string, domain: string | null, topK: number, env: Env, project: string = 'default',
+  strictProject = false
 ): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
   if (!query?.trim()) return [];
@@ -193,8 +207,8 @@ export async function retrieve(
   if (temporalWindowDays >= 0) {
     const windowStart = nowSecEarly - (temporalWindowDays + 2) * 86400;
     const windowEnd = nowSecEarly - Math.max(0, temporalWindowDays - 1) * 86400;
-    const tProjectClause = project === 'default' ? '' : `AND (project = ? OR project = 'default')`;
-    const tBinds: any[] = [windowStart, windowEnd, ...(project === 'default' ? [] : [project])];
+    const { clause: tProjectClause, param: tProjectParam } = projectScopeClause(project, strictProject);
+    const tBinds: any[] = [windowStart, windowEnd, ...(tProjectParam ? [tProjectParam] : [])];
     // Two passes: general candidates (LIMIT 20) + session-only (no LIMIT) for guarantee
     const [tRows, tSessionRows] = await Promise.all([
       env.DB.prepare(
@@ -258,12 +272,9 @@ export async function retrieve(
   // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts
   const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 120);
   const placeholders = allIds.map(() => '?').join(',');
-  // project='default' = no project context (direct MCP call) → search all projects
-  const projectClause = project === 'default'
-    ? ''
-    : 'AND (project = ? OR project = \'default\')';
+  const { clause: projectClause, param: projectParam } = projectScopeClause(project, strictProject);
   const nowSec = Math.floor(Date.now() / 1000);
-  const binds = project === 'default' ? [...allIds, nowSec] : [...allIds, project, nowSec];
+  const binds = projectParam ? [...allIds, projectParam, nowSec] : [...allIds, nowSec];
   const rows = await env.DB.prepare(
     `SELECT id, text, domain, cluster_id, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
      FROM memories WHERE id IN (${placeholders}) ${projectClause} AND (valid_to IS NULL OR valid_to > ?)`
@@ -493,9 +504,9 @@ export async function retrieve(
     if (newMatches.size === 0) break;
 
     const newIds = [...newMatches.keys()];
-    // Mirror the main fetch's project scoping: project='default' searches all projects.
-    const bfsProjectClause = project === 'default' ? '' : `AND (project = ? OR project = 'default')`;
-    const bfsBinds = project === 'default' ? [...newIds, nowSec] : [...newIds, project, nowSec];
+    // Mirror the main fetch's project scoping.
+    const { clause: bfsProjectClause, param: bfsProjectParam } = projectScopeClause(project, strictProject);
+    const bfsBinds = bfsProjectParam ? [...newIds, bfsProjectParam, nowSec] : [...newIds, nowSec];
     const newRows = await env.DB.prepare(
       `SELECT id, text, domain, cluster_id, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
        FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) ${bfsProjectClause} AND (valid_to IS NULL OR valid_to > ?)`

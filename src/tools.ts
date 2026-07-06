@@ -78,6 +78,8 @@ export const TOOLS = [
         domain: { type: 'string' },
         top_k: { type: 'number', default: 8 },
         synthesize: { type: 'boolean', default: false },
+        project: { type: 'string', description: 'Scope results to this project. Defaults to searching all projects.' },
+        strict_project: { type: 'boolean', default: false, description: 'When project is set, exclude default-project results instead of blending them in.' },
       },
       required: ['query'],
     },
@@ -515,7 +517,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
     case 'memory_retrieve': {
       // Default 8 — must match the declared inputSchema default (was 5, silently diverging from schema)
-      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 8, env, args.project ?? 'default');
+      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 8, env, args.project ?? 'default', args.strict_project === true);
       if (!results.length) return 'No memories found.';
 
       // Fetch domain summaries for domains present in results (uses clean domain, not display)

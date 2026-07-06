@@ -301,7 +301,7 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 |---|---|
 | `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
 | `memory_auto_store` | Store with automatic domain and type inference |
-| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories |
+| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
 | `memory_extract_and_store` | LLM-based fact extraction from a raw session log |
 | `memory_capture_passive` | Parse structured notes with Key Learnings / Decisions / Problems Solved headers |
 | `memory_store_diff` | Store semantic meaning of a code diff or command output |
