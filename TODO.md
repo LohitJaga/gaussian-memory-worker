@@ -169,8 +169,44 @@ threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-
       one directory up from this repo) — fixed 2026-07-06.
 
 ### Quality / Testing
-- [ ] E2E coverage for remaining tools: `memory_auto_store`, `memory_extract_and_store`, `memory_store_decision`, `memory_store_diff`, `memory_list`, `memory_timeline`, `memory_belief_drift` / `backfill`, `memory_orphan_check`, `memory_judge`, `memory_capture_passive`, `memory_update`, `memory_delete`, `identity_profile_get/set`, domain rebuild/retag/build_entities
-- [ ] Retrieval edge case tests: empty query, domain filter, `synthesize=true`, temporal queries (`yesterday`, `this week`), entity boost
+- [x] E2E coverage for remaining tools (2026-07-06) — added tests for `memory_auto_store`,
+      `memory_extract_and_store`, `memory_store_decision`, `memory_store_diff`, `memory_list`,
+      `memory_timeline`, `memory_belief_drift`/`backfill`, `memory_orphan_check`, `memory_judge`,
+      `memory_capture_passive`, `memory_update`, `memory_delete`, `identity_profile_get` (read-only).
+      Deliberately skipped: `identity_profile_set` (single shared production KV key, no test
+      isolation — would clobber the real profile), `memory_rebuild_domains`/`memory_retag_projects`/
+      `memory_build_entities` (corpus-wide mutations against real production data, no dry-run
+      path for two of the three). 30/30 e2e tests pass, confirmed on 2 consecutive clean runs.
+      Found and fixed 2 real production bugs while writing these (both deployed live):
+      (1) `memory_store_diff`'s GLM-4.7-flash quality-gate call (tools.ts) had no timeout guard,
+      unlike sibling `memory_auto_store` — confirmed live via `wrangler tail` that it can hang
+      long enough for the Workers runtime to cancel the request outright (status "Canceled"),
+      silently dropping the diff with no response ever returned. This tool fires on every
+      Bash/Write via the PostToolUse hook, so this was a live reliability gap. Fixed with
+      `Promise.race` + 12s timeout, defaulting to SKIP on timeout.
+      (2) `memory_bulk_delete` only supported text-pattern matching, not project filtering, even
+      though every store call accepts and persists a project. Since `memory_extract_and_store`
+      and `memory_store_diff` both LLM-rewrite/paraphrase input text, their stored output often
+      retains no literal substring from the original text, making pattern-based test cleanup
+      silently miss it — this left a permanent `tidewater-kite-club` domain (6+ rows) polluting
+      the real production corpus from earlier test runs, which then broke test determinism by
+      colliding (cosine-similarity merge) with a later run's fresh store. Manually cleaned up the
+      leftover rows; fixed `memory_bulk_delete` to accept an optional `project` param (exact
+      match, AND-able with `pattern`); updated e2e's `afterAll` to clean up by project instead of
+      pattern, which is reliable regardless of LLM rewriting.
+      Also found and fixed a 3rd, test-only bug: `findMemoryId`-style lookups via `memory_list`
+      are fundamentally fragile two ways — `memory_list` truncates displayed text to 80 chars
+      (so a snippet late in a long TEST_PREFIX-prefixed string can never appear in output,
+      regardless of retries — not a timing issue, a display truncation), and a global
+      `since`-only search with no domain filter competes against this account's real ambient
+      write volume and can genuinely evict an entry from even a 500-row window over a
+      multi-minute suite run. Redesigned as `findLatestMemoryId(domain)`: resolves the single
+      newest row in a known domain (no text matching at all), called immediately after each
+      store while that row is still guaranteed to be the newest — sidesteps both failure modes.
+- [x] Retrieval edge case tests (2026-07-06) — empty query, whitespace-only query, domain param
+      (soft boost not hard filter), `synthesize=true`, temporal cue (`today`), and capitalized
+      entity-token boost, all against the live `retrieve()` pipeline (not unit-mockable given the
+      D1/Vectorize/AI dependencies).
 - [x] `microcluster.test.ts` existed but wasn't wired into `npm test` — fixed (2026-07-06), was silently never running
 - [x] Unit tests for `src/domain.ts` (2026-07-06) — `domain.test.ts`, 16 tests covering `deriveAnchorName` + `bestAnchor`.
       Found 2 real (minor) bugs while writing these, both fixed same day (2026-07-06): (1) the fallback-pass
