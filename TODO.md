@@ -91,10 +91,20 @@ but don't re-research from scratch, the plan already exists.
       Fixed by switching the e2e fixtures (`TEXT_A`/`TEXT_B`) to topically unrelated synthetic content
       (penguin banding / synth repair) with zero real-world overlap, instead of Bayesian/Cloudflare
       content that collides with this project's own vocabulary — test-only change, zero production
-      behavior change. Verified: full e2e suite (10/10) passes clean now. `retrieve()`'s actual
-      `project = ? OR project = 'default'` semantics were deliberately left alone (that's a production
-      behavior change affecting every real caller, not a test bug) — if that fallback is ever revisited,
-      it should be a deliberate product decision, not a side effect of fixing test isolation.
+      behavior change. Verified: full e2e suite (10/10) passes clean now.
+- [x] **`OR project='default'` fallback — made opt-out instead of ripped out (2026-07-06)**: the fallback
+      itself is genuinely useful for real callers (project-scoped agents still surfacing general
+      identity/preference facts) so it stays the default — ripping it out would regress real usage just
+      to fix test isolation. Added `strictProject` param to `retrieve()` (retrieval.ts) and `strict_project`
+      to the `memory_retrieve` MCP tool (tools.ts) so a caller can opt a specific query out of the
+      default-project blend for true isolation. Extracted `projectScopeClause()` since the same
+      `project === 'default' ? '' : '...OR default'` logic was duplicated 3x in retrieval.ts (temporal
+      fetch, main candidate fetch, BFS re-fetch) — centralizing it meant strict-mode support landed in
+      all 3 at once instead of risking 2-of-3. Also declared `project` in the tool's inputSchema (was
+      silently accepted but undocumented, same gap already flagged for `memory_timeline`'s `order`/`since`).
+      e2e suite now passes `strict_project: true` on every retrieve call — real exercise of the new
+      param, not just unit tests. Deployed + verified: 10/10 e2e pass, and ~30% faster (41s vs ~62-70s)
+      since strict scoping means a smaller candidate pool to dedupe against.
 - [ ] Token savings per call from caching (the resume-point metric)
 - [ ] Retrieval quality on a labeled query set
 - [ ] Identity coherence — 50 queries, LLM-judge whether injected context is coherent

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   RRF_K, rrfMerge, minMaxNormalize, tokenize, jaccardSimilarity,
-  dedupBySimilarity, sigmaGate, applyDiversityCap, DEDUP_COS,
+  dedupBySimilarity, sigmaGate, applyDiversityCap, DEDUP_COS, projectScopeClause,
 } from './retrieval';
 
 // Map.get() is typed as T | undefined; these tests assert the key was just inserted,
@@ -271,5 +271,25 @@ describe('applyDiversityCap', () => {
     const items = [mem('session', null), mem('session', null)];
     const result = applyDiversityCap(items, 1, 4, 3);
     expect(result).toHaveLength(1);
+  });
+});
+
+// ── projectScopeClause ───────────────────────────────────────────────────
+
+describe('projectScopeClause', () => {
+  it('returns no clause for the default project (searches everything)', () => {
+    expect(projectScopeClause('default')).toEqual({ clause: '', param: null });
+    expect(projectScopeClause('default', true)).toEqual({ clause: '', param: null });
+  });
+
+  it('defaults to the OR-default fallback for a scoped project', () => {
+    const result = projectScopeClause('my-project');
+    expect(result.param).toBe('my-project');
+    expect(result.clause).toContain("OR project = 'default'");
+  });
+
+  it('excludes the OR-default fallback when strictProject is true', () => {
+    const result = projectScopeClause('my-project', true);
+    expect(result).toEqual({ clause: 'AND project = ?', param: 'my-project' });
   });
 });

@@ -99,7 +99,7 @@ async function pollUntilFound(
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
-    lastResult = await call('memory_retrieve', { query, project: TEST_PROJECT, top_k: 10 }, Math.min(10_000, remaining));
+    lastResult = await call('memory_retrieve', { query, project: TEST_PROJECT, strict_project: true, top_k: 10 }, Math.min(10_000, remaining));
     if (lastResult.includes(expectedSnippet)) return lastResult;
     await new Promise(r => setTimeout(r, intervalMs));
   }
@@ -172,6 +172,7 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     const result = await call('memory_retrieve', {
       query: QUERY_A,
       project: TEST_PROJECT,
+      strict_project: true,
       top_k: 5,
     });
     // Score format: [1.23]
@@ -195,7 +196,7 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     // After 5 retrieves sigma should stay ≤ 0.375 — verifies no regression to ○ (≥0.5).
     // Note: proving advancement to ● requires starting from ○; a separate test covers that.
     for (let i = 0; i < 4; i++) {
-      await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, top_k: 5 });
+      await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, strict_project: true, top_k: 5 });
     }
     const result = await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, top_k: 5 });
     expect(result).not.toContain('No memories found');
