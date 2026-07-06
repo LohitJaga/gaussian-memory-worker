@@ -130,7 +130,7 @@ cp hooks/opencode-gaussian-memory.mjs ~/.opencode/gaussian-memory.mjs
 ```
 
 **What you get:**
-- **MCP tools** — all 23 memory tools available natively in the model's tool list. The model calls `memory_retrieve`, `memory_store`, etc. without any prompting.
+- **MCP tools** — all 26 memory tools available natively in the model's tool list. The model calls `memory_retrieve`, `memory_store`, etc. without any prompting.
 - **Auto-store** — every user and assistant message >80 chars is stored automatically via plugin hooks (`chat.input`, `chat.message`).
 - **Session-end extraction** — `session.idle` and `session.compacted` hooks trigger `memory_extract_and_store` on the full session transcript.
 - **Cross-editor memory** — Claude Code and OpenCode share the same D1/Vectorize backend. Context stored in one editor surfaces in the other.
@@ -178,7 +178,7 @@ chmod +x ~/.cursor/hooks/gaussian-store.sh
 ```
 
 **What you get:**
-- **MCP tools** — all 23 memory tools available in agent mode. Call `memory_retrieve` or `memory_store` directly.
+- **MCP tools** — all 26 memory tools available in agent mode. Call `memory_retrieve` or `memory_store` directly.
 - **Auto-store** — `sessionEnd` hook extracts and stores memories when you close a conversation.
 - **Auto-inject** — not available yet. Cursor's `sessionStart` hook supports an `additional_context` output field that would enable this, but injection is currently broken upstream ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). When they fix it, Cursor will have full parity with Claude Code.
 
@@ -277,8 +277,10 @@ When two memories are close enough — measured via **Bhattacharyya distance** b
 5. Deduplicate cold memories (cosine > 0.93, oldest-first)
 6. Collapse singleton domains
 7. Refresh stale domain summaries
-8. Process entity extraction queue (50/run)
+8. Incremental domain rebuild batch (bounded to 2000 memories / 10 min per run)
 9. Synthesize identity profile from semantic memories → push to KV
+10. Auto-judge memories flagged as contradictions (supersedes/conflicts_with/extends/compatible)
+11. Process entity extraction queue (50/run)
 
 ## Architecture
 
@@ -301,13 +303,15 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 |---|---|
 | `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
 | `memory_auto_store` | Store with automatic domain and type inference |
+| `memory_store_decision` | Store a structured decision trail (decision/context/alternatives/outcome) as `memory_type=decision` |
 | `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
 | `memory_extract_and_store` | LLM-based fact extraction from a raw session log |
 | `memory_capture_passive` | Parse structured notes with Key Learnings / Decisions / Problems Solved headers |
 | `memory_store_diff` | Store semantic meaning of a code diff or command output |
 | `memory_update` | Re-embed and update an existing memory |
 | `memory_delete` | Delete by ID |
-| `memory_bulk_delete` | Delete all memories matching a text pattern |
+| `memory_bulk_delete` | Delete memories by text pattern and/or exact project match |
+| `memory_dedupe` | One-shot cleanup of exact-text duplicate backlogs — keeps the most-reinforced row per group. `dry_run=true` previews counts |
 | `memory_list` | List all memories, optionally filtered by domain |
 | `memory_decay` | Manual decay pass |
 | `memory_stats` | Total count, σ distribution, domain breakdown, access heat |
@@ -316,6 +320,7 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 | `memory_cleanup_singletons` | Merge domains with fewer than N memories into nearest anchor |
 | `memory_retag_projects` | LLM-based project re-tagging for the default memory pool |
 | `memory_build_entities` | Retroactive entity extraction for entity graph traversal |
+| `memory_process_entity_queue` | Flush the pending entity-extraction queue deferred at store time |
 | `memory_judge` | LLM verdict on two memories: supersedes / conflicts_with / extends / compatible |
 | `memory_timeline` | Chronological σ trajectory per domain |
 | `memory_belief_drift` | Show how confidence in a memory has changed over time |
@@ -346,7 +351,7 @@ Trajectory (5 snapshots):
 
 ```
 src/index.ts              MCP server, routing, cron handler, /viz galaxy visualization
-src/tools.ts              All 23 tool handlers
+src/tools.ts              All 26 tool handlers
 src/retrieval.ts          Hybrid retrieval scoring, spreading activation, entity graph, temporal pipeline
 src/storage.ts            Store, merge, dedup, entity extraction queue
 src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
