@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isContradiction, normalizeForExactMatch, NEGATION } from './storage';
+import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery } from './storage';
 
 // ── isContradiction ──────────────────────────────────────────────────────
 
@@ -23,6 +23,199 @@ describe('isContradiction', () => {
 
   it('is case-insensitive on the negation pattern', () => {
     expect(isContradiction('SWITCHED FROM Postgres', 'using Postgres for storage', 0.9)).toBe(true);
+  });
+
+  it('is true when similar text disagrees on resolution status (the real domain-rebuild case)', () => {
+    expect(isContradiction(
+      'domain split resolved 2026-07-05',
+      'domain rebuild still has major issues, dont trust this',
+      0.9,
+    )).toBe(true);
+  });
+
+  it('is true for a fixed/still-broken pair regardless of which side is newText', () => {
+    expect(isContradiction('the cron job is fixed now', 'the cron job still has issues', 0.9)).toBe(true);
+    expect(isContradiction('the cron job still has issues', 'the cron job is fixed now', 0.9)).toBe(true);
+  });
+
+  it('is false when both sides agree on resolution status', () => {
+    expect(isContradiction('the cron job is fixed', 'the cron job is now working', 0.9)).toBe(false);
+    expect(isContradiction('the cron job still has issues', 'the cron job is not working', 0.9)).toBe(false);
+  });
+
+  it('status-flip class fires below the 0.88 NEGATION floor, down to its own 0.75 floor', () => {
+    // Same pair as the boundary test above, but well under 0.88 — reworded pairs often land here.
+    expect(isContradiction('the cron job is fixed now', 'the cron job still has issues', 0.80)).toBe(true);
+    expect(isContradiction('the cron job is fixed now', 'the cron job still has issues', 0.75)).toBe(true);
+  });
+
+  it('status-flip class is false below its own 0.75 floor', () => {
+    expect(isContradiction('the cron job is fixed now', 'the cron job still has issues', 0.74)).toBe(false);
+  });
+
+  it('negation class still requires 0.88 even though status floor is lower (no status words present)', () => {
+    expect(isContradiction('switched from Postgres to D1', 'using Postgres', 0.80)).toBe(false);
+  });
+
+  // Regression for a real bug found 2026-07-07 (code review): RESOLVED's bare `fixed`/`resolved`
+  // used to match inside UNRESOLVED's own "not fixed" phrase, so two memories that both say
+  // "not fixed" (i.e. AGREE the issue is unresolved) would satisfy RESOLVED on one side and
+  // UNRESOLVED on the other and get falsely flagged as contradicting each other.
+  it('is false when both sides say "not fixed" (agreeing, not contradicting)', () => {
+    expect(isContradiction('the login bug is not fixed yet', 'the login bug is still not fixed', 0.9)).toBe(false);
+  });
+
+  it('is false when both sides say "not resolved" (agreeing, not contradicting)', () => {
+    expect(isContradiction('the issue is not resolved', 'the issue is still not resolved', 0.9)).toBe(false);
+  });
+
+  it('RESOLVED does not match negated forms (not fixed, isn\'t fixed, never fixed, not resolved)', () => {
+    expect(RESOLVED.test('the bug is not fixed')).toBe(false);
+    expect(RESOLVED.test("the bug isn't fixed")).toBe(false);
+    expect(RESOLVED.test('the bug was never fixed')).toBe(false);
+    expect(RESOLVED.test('the bug is not resolved')).toBe(false);
+  });
+
+  it('RESOLVED still matches unnegated fixed/resolved', () => {
+    expect(RESOLVED.test('the bug is fixed')).toBe(true);
+    expect(RESOLVED.test('the bug is resolved')).toBe(true);
+  });
+
+  // Regression for a real bug found 2026-07-07 (fresh code review, round 2): the negative
+  // lookbehinds above only excluded a negator directly adjacent to fixed/resolved — an
+  // intervening word ("not YET fixed", "never REALLY resolved") defeated them, since those are
+  // natural, common phrasings, not edge cases.
+  it('RESOLVED does not match negation with an intervening word', () => {
+    expect(RESOLVED.test('the bug is not yet fixed')).toBe(false);
+    expect(RESOLVED.test('this was never really resolved')).toBe(false);
+    expect(RESOLVED.test('the bug has not been fixed')).toBe(false);
+    expect(RESOLVED.test("isn't really fixed")).toBe(false);
+    expect(RESOLVED.test('not fully resolved')).toBe(false);
+  });
+
+  it('is false when both sides disagree only by an intervening negation word (agreeing, not contradicting)', () => {
+    expect(isContradiction('the cron job is not yet fixed', 'the cron job still has issues', 0.9)).toBe(false);
+  });
+
+  // Regression for a real bug found 2026-07-07 (fresh code review, round 2): UNRESOLVED's
+  // optional article only matched "an ", not "a ", so the common singular phrasing "still has a
+  // major issue" silently failed to match.
+  it('UNRESOLVED matches "a" as well as "an" before a singular noun', () => {
+    expect(UNRESOLVED.test('login flow still has a major issue')).toBe(true);
+    expect(UNRESOLVED.test('login flow still has an issue')).toBe(true);
+  });
+
+  it('is true for a fixed/still-has-a-major-issue pair (singular, correct article)', () => {
+    expect(isContradiction('the login flow is fixed now', 'the login flow still has a major issue', 0.9)).toBe(true);
+  });
+});
+
+// ── resolveSupersedeDirection ────────────────────────────────────────────
+// Regression coverage for a real bug found 2026-07-07: memory_judge always inserted
+// memory_relations as (target -> cand), but target is always the OLDER side when pulled from
+// the contradiction_flag=1 auto-queue — so the surviving/current memory (to_id) got mislabeled
+// [SUPERSEDED] instead of the stale one. This must always resolve to (newer -> older) regardless
+// of which one was labeled target/cand.
+
+describe('resolveSupersedeDirection', () => {
+  it('orients (newer -> older) when target is the older side', () => {
+    const target = { id: 'old', timestamp: 100 };
+    const cand = { id: 'new', timestamp: 200 };
+    expect(resolveSupersedeDirection(target, cand)).toEqual({
+      fromId: 'new', toId: 'old', olderId: 'old', newerId: 'new',
+    });
+  });
+
+  it('orients (newer -> older) when target is the newer side (opposite input order)', () => {
+    const target = { id: 'new', timestamp: 200 };
+    const cand = { id: 'old', timestamp: 100 };
+    expect(resolveSupersedeDirection(target, cand)).toEqual({
+      fromId: 'new', toId: 'old', olderId: 'old', newerId: 'new',
+    });
+  });
+
+  it('treats equal timestamps as target being the older side (stable tie-break)', () => {
+    const target = { id: 'a', timestamp: 500 };
+    const cand = { id: 'b', timestamp: 500 };
+    expect(resolveSupersedeDirection(target, cand)).toEqual({
+      fromId: 'b', toId: 'a', olderId: 'a', newerId: 'b',
+    });
+  });
+});
+
+// ── buildKeywordQuery ────────────────────────────────────────────────────
+// Regression coverage for a real bug found 2026-07-07: the first version passed raw memory text
+// (with its natural punctuation) directly as an FTS5 MATCH query, which threw syntax errors on
+// real text (confirmed live against D1 — colons and commas both tripped the parser) and, even
+// when it didn't error, FTS5's implicit AND between barewords meant a 70-word query essentially
+// never matched anything. Every query this function builds must be syntactically safe and must
+// use OR (partial keyword overlap), not AND (near-impossible full-text overlap).
+
+describe('buildKeywordQuery', () => {
+  it('produces a quoted, OR-joined query safe for real memory text with FTS5-special characters', () => {
+    const text = 'Decided to delay the ship — doesn\'t feel comfortable: known bugs, especially "domain rebuild" instability (regrounding+merge, 15/31/49).';
+    const q = buildKeywordQuery(text);
+    expect(q).not.toContain(':');
+    expect(q).not.toContain('(');
+    expect(q).not.toContain(')');
+    // every term must be quoted and OR-joined, never bare/AND-joined
+    expect(q.split(' OR ').every(term => /^"[a-z0-9]+"$/.test(term))).toBe(true);
+  });
+
+  it('prioritizes longer/more specific words over short common ones when truncating', () => {
+    // Real 76-word memory where "domain"/"rebuild"/"instability" appear only in the second
+    // half — first-N-in-sentence-order (the reverted approach) cut them off entirely at the
+    // default maxTerms, since the first dozen-plus unique 4+ char words are all short filler
+    // ("decided", "delay", "july", "gaussian", "memory", "ship", "feel", "comfortable", ...).
+    const text = 'Decided to delay the July 1 Gaussian Memory ship — doesn\'t feel comfortable shipping with '
+      + 'known bugs, especially the domain rebuild instability (classifier lands on wildly different '
+      + 'domain counts run to run) regrounding merge fix implemented but verdict was domains still have '
+      + 'major issues with both false positive merges and false negative misses at the same threshold.';
+    const q = buildKeywordQuery(text);
+    expect(q).toContain('"instability"');
+    expect(q).toContain('"domain"');
+    expect(q).toContain('"rebuild"');
+  });
+
+  it('excludes stopwords and short words', () => {
+    const q = buildKeywordQuery('the cron job is now fixed and it was not working before');
+    expect(q).not.toContain('"the"');
+    expect(q).not.toContain('"now"');
+    expect(q).not.toContain('"not"');
+    expect(q).not.toContain('"was"');
+  });
+
+  it('returns empty string for text with no qualifying terms', () => {
+    expect(buildKeywordQuery('a to it is')).toBe('');
+  });
+
+  it('dedupes repeated terms', () => {
+    const q = buildKeywordQuery('rebuild rebuild rebuild domain');
+    expect(q.split(' OR ').length).toBe(2);
+  });
+});
+
+describe('UNRESOLVED / RESOLVED patterns', () => {
+  it('UNRESOLVED matches each documented phrase', () => {
+    const phrases = [
+      'still has major issues', 'still has an issue', 'still issues', 'still broken',
+      "doesn't work", 'does not work', 'not working', 'unresolved', 'known issue',
+      "don't trust this", 'not fixed',
+    ];
+    for (const p of phrases) expect(UNRESOLVED.test(`some text with ${p} here`)).toBe(true);
+  });
+
+  it('RESOLVED matches each documented phrase', () => {
+    const phrases = [
+      'fixed', 'resolved', 'now works', 'works now',
+      'verified working', 'verified fixed', 'confirmed working', 'confirmed fixed',
+    ];
+    for (const p of phrases) expect(RESOLVED.test(`some text with ${p} here`)).toBe(true);
+  });
+
+  it('do not false-positive on unrelated text', () => {
+    expect(UNRESOLVED.test('added a new feature for caching')).toBe(false);
+    expect(RESOLVED.test('added a new feature for caching')).toBe(false);
   });
 });
 

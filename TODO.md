@@ -112,6 +112,12 @@ but don't re-research from scratch, the plan already exists.
 - [ ] Contradiction surface rate (lower = better)
 - [ ] LoCoMo-style accuracy vs MemArchitect benchmark
 - [ ] Reconstruction — how well injected memories reconstruct original context
+- [x] **Scoring weights — applied and deployed (2026-07-07)** — `baseScore` (retrieval.ts:388)
+      recency 0.22→0.27, access_freq 0.13→0.08 (cosine/BM25 unchanged). Targets the
+      contradiction-ranking gap below (stale memories winning via access-count reinforcement).
+      Lower cosine / raise BM25 still held off — no labeled recall/precision numbers to justify it.
+      179 unit + 30 e2e pass post-deploy. Not yet measured against a labeled query set (no such set
+      exists — see benchmarking items above); validated qualitatively via the contradiction fix below.
 
 ### Client Compatibility
 - [x] Zed — confirmed 2026-07-05: `init` auto-merges a `context_servers` entry into
@@ -159,6 +165,134 @@ threshold-tuning fixes a taxonomy job's instability from corrupting a retrieval-
   loop rewarding anything retrieved often, relevant or not). A live embedding-neighborhood-density check
   (looser similarity threshold than cluster_id's, computed at retrieval time) was proposed as a third option
   but not built — revisit only if real evidence shows this actually causing bad ranking, not preemptively.
+
+### Contradiction detection — found gap, fixed + deployed (2026-07-07)
+Live example: an old "domain rebuild still has major issues, don't trust this" memory kept surfacing
+in retrieval alongside/instead of the newer "domain split resolved 2026-07-05" memory. Root cause —
+`isContradiction()` (storage.ts:124-127) only fired on cosine≥0.88 **and** a negation-word regex
+mismatch (`no longer`, `switched from`, `stopped using`, etc.) — built for preference-switch phrasing,
+not status-flip phrasing ("issues" → "resolved"). Neither side hit the NEGATION regex, so no
+`supersedes` relation ever got written, and the stale memory competed on equal footing at retrieval
+time — if it had more `access_count` from repeated surfacing, it could outrank the correct, newer memory.
+- [x] Widened `isContradiction` with a second class — `UNRESOLVED`/`RESOLVED` regex pairs
+      (storage.ts:120-141) catch "still has issues"/"fixed"/"resolved"/"doesn't work" phrasing
+      alongside the existing NEGATION check, each with its own cosine floor: NEGATION stays at
+      0.88 (tuned/tested), the status class runs at 0.75. Two floors, not one, because status-flip
+      pairs reword more than tool-switch pairs do ("switched from X" keeps "X" verbatim; "still has
+      issues" → "now fixed" often shares little surface text) — first deploy at a shared 0.88 floor
+      under-fired on a heavily-reworded real-phrasing test pair ("...don't trust the readings" →
+      "...is now fixed and resolved") despite both sides clearing the regex; confirmed live
+      afterward that dropping the status floor to 0.75 does fire `CONTRADICTION` on that exact pair.
+      Safe to run lower specifically here because the class is already gated on both sides by
+      curated vocabulary, unlike a bare cosine check. 24 unit tests (storage.test.ts). **Not yet
+      checked for false positives** — two unrelated topics that each happen to use "fixed"/"still
+      has issues" language could in principle collide above 0.75 cosine; no labeled set exists to
+      rule this out (same gap as the cosine/BM25 retrieval question above). Worth a spot-check
+      against real corpus diversity before trusting this broadly.
+- [x] **Found + fixed a second, more serious bug while verifying live (2026-07-07):** `memory_judge`
+      (tools.ts, `memory_relations` insert) always stored the `supersedes` relation as
+      `(target → cand)`, but `target` is always the *older* side when pulled from the
+      `contradiction_flag=1` auto-queue (storage.ts flags the older side at store time) — so the
+      relation was stored backwards, and retrieval's `[SUPERSEDED]` tag (which reads `to_id` as "the
+      replaced memory") landed on the surviving/correct memory instead of the stale one. `valid_to`
+      expiry was unaffected (computed by timestamp, not relation direction) so the stale memory was
+      still correctly excluded from results — but the survivor displayed as `[SUPERSEDED]`, exactly
+      inverting the intended signal. Extracted `resolveSupersedeDirection()` (storage.ts) to always
+      re-orient the relation to (newer → older) regardless of target/cand labeling; 3 unit tests.
+      Also cleared `contradiction_flag` on the surviving memory after judging (was staying flagged
+      forever, showing `[CONTRADICTED — re-evaluate]` even post-resolution). Verified end-to-end on
+      a live isolated test pair: store → `CONTRADICTION` → `memory_judge` → correct `supersedes`
+      direction confirmed via direct D1 query → `memory_retrieve` returns only the clean, current
+      memory with no tag. Deployed; 179 unit + 30 e2e still pass.
+- [x] **Multi-agent code review (2026-07-07, high effort) found 4 more real bugs, all fixed same
+      day** — the review also found risks that were already disclosed above (generic-vocab false
+      positives at 0.75) or turned out not to matter (target/cand direction issue for non-supersedes
+      verdicts, currently harmless per retrieval's own reads); the 4 below were new and real:
+  - `RESOLVED`'s bare `fixed`/`resolved` matched inside `UNRESOLVED`'s own "not fixed" phrase —
+    two memories that both say "not fixed" (i.e. *agree*) were getting flagged as contradicting.
+    Fixed with negative lookbehinds (storage.ts) on the bare alternatives; verified directly via
+    node before and after. 5 new tests.
+  - `isContradiction` was only ever checked against the single closest Vectorize candidate
+    (`bestId`) — a closer non-contradicting candidate silently prevented a real, lower-cosine
+    contradiction from ever being checked. Contradiction detection now scans all Vectorize
+    candidates independently of the merge-selected `bestId` (storage.ts) — merge/dedup logic
+    itself is untouched, still uses the single best candidate.
+  - The cross-cluster ceiling (0.90/0.97, built for merge precision) was gating the contradiction
+    check too, making the 0.75 status floor unreachable for any pair landing in different
+    clusters — exactly the reworded pairs that floor exists for. Contradiction detection no
+    longer goes through the merge ceiling (same edit as above).
+  - `memory_judge`'s own `results.push()` log line unconditionally printed `target → cand`, which
+    could diverge from the actual persisted direction once `resolveSupersedeDirection` reverses
+    it — not fixed this pass (cosmetic/log-only, didn't affect stored data), tracked as a known
+    minor gap.
+- [x] **The real underlying gap — semantic distance, not thresholds (2026-07-07):** direct testing
+      on the real "domain rebuild has issues" vs "domain/cluster_id split resolved" memories proved
+      the actual problem was never the cosine floor — `memory_judge` at a 0.70 floor checking 10
+      candidates never even considered the resolving memory a neighbor. Root cause: problem-language
+      ("wildly different domain counts," "don't trust this") and fix-language ("cluster_id,"
+      "deterministic clustering") are lexically distant even though a human sees the connection
+      instantly. **Fix: added FTS5 keyword-match candidates alongside Vectorize cosine search**, in
+      both `memory_judge` (tools.ts) and `storeMemory`'s write-time contradiction check (storage.ts)
+      — merge/dedup deliberately does not see these, only contradiction detection does. No cosine
+      floor applies to FTS5 candidates; shared vocabulary is the signal, the LLM verdict call is the
+      precision gate, same as it already is for cosine-sourced candidates.
+  - **Found and fixed a bug in this fix while verifying live**: the first version passed raw memory
+    text directly as the FTS5 `MATCH` query. Confirmed via direct D1 query that real memory text
+    throws FTS5 syntax errors (colons = column filter, plain commas tripped the parser on long
+    text) — silently caught by the existing `.catch(() => [])`, so the FTS5 path was likely
+    contributing zero candidates in practice. Also too restrictive even without erroring: FTS5's
+    default is implicit AND between barewords, so a 70-word query needs literally every word
+    present, i.e. never matches. Replaced with `buildKeywordQuery()` (storage.ts): tokenizes to
+    alphanumeric words, drops stopwords/short words, sorts longest-first (first-N-in-sentence-order
+    was tried first and cut real memories' significant words, which tend to appear mid/late-sentence
+    on longer text), OR-joins quoted terms. Verified the exact generated query against live D1 with
+    zero errors. 5 unit tests.
+  - **Real end-to-end verification, not synthetic**: stored the actual true "domain rebuild resolved
+    2026-07-05" fact into production (`default` project, `gaussian-memory` domain) — `CONTRADICTION`
+    fired automatically at write time (no manual `memory_judge` call). Ran the nightly-cron-equivalent
+    `memory_judge` sweep: found the pair via keyword match (`domain`, `rebuild`, `instability`),
+    LLM judged `supersedes (98%)`, correctly oriented (newer → older) via `resolveSupersedeDirection`.
+    Confirmed via direct D1 query: old memory now has `contradiction_flag=1, valid_to` set; new one
+    is clean. Live `memory_retrieve` for "domain rebuild classifier instability issues" — the
+    2-week-dominant stale memory is gone from top results entirely, replaced by the correct,
+    current one. 194 unit + 30 e2e pass, all deployed.
+  - **Scope note**: this closes the specific pair found this session, and the mechanism now exists
+    for future pairs with real keyword overlap. It does not generalize to pairs sharing *zero*
+    literal vocabulary (pure semantic/topical relation with no shared words) — that would need a
+    different mechanism (e.g. LLM-based topic linking), out of scope for today.
+- [x] **Fresh multi-agent review round 2 (2026-07-07) on the full expanded diff — 6 fixed, 3 noted
+      as follow-up, 1 refuted**:
+  - Fixed: `RESOLVED`'s negative lookbehinds only excluded a negator directly adjacent to
+    "fixed"/"resolved" — "not yet fixed"/"never really resolved" (real, natural phrasing) defeated
+    them. Widened to scan up to 3 words back; verified via node before/after, 5 new tests.
+  - Fixed: `UNRESOLVED`'s article group only matched "an ", not "a " — "still has a major issue"
+    (correct grammar, singular) silently failed to match. `(an )?` → `(an? )?`; verified + tests.
+  - Fixed: `env.VECTORIZE.getByIds` in `storeMemory` had no `.catch()`, unlike the sibling FTS5
+    query beside it — a transient Vectorize error would have hard-failed the entire write instead
+    of degrading gracefully. Added the same catch-and-continue pattern.
+  - Fixed: the FTS5 D1 query was awaited sequentially after Vectorize + KV recent-cache reads that
+    don't depend on it — restructured all three into one `Promise.all`, removing an extra
+    sequential round trip from every `storeMemory` call.
+  - Fixed: dead `bestText`/`bestScore` state (left over from an earlier round's refactor, no
+    longer read anywhere) and a redundant `matches.map(...)` + `new Set(...)` re-derivation when
+    the already-built, already-unique `matchIds` could be spread directly.
+  - Fixed: `getByIds` had no defensive cap to the documented 20-id limit (rebuild.ts's own
+    established pattern) — was safe only by coincidence of an unrelated FTS `LIMIT 10` constant.
+    Added `.slice(0, 20)`.
+  - **Not fixed, noted as follow-up** (discretionary, larger scope):
+    (1) `memory_judge`'s candidate set roughly doubles (Vectorize + FTS unioned, uncapped) with a
+    sequential LLM call per candidate across up to 20 targets in the nightly cron sweep — real risk
+    of the scheduled handler running long. (2) `storeMemory`'s added latency compounds in
+    `memory_capture_passive` (≤20 sequential calls) and `memory_extract_and_store` (≤13) — both
+    already latency-heavy from prior LLM calls in the same request. (3) Three independent
+    hand-rolled "merge Vectorize + FTS5 candidates" implementations now exist (storeMemory,
+    memory_judge, plus retrieval.ts's original) despite `rrfMerge` (retrieval.ts) already solving
+    this generically — worth extracting into one shared helper.
+  - **Refuted**: a finding that `memory_judge`'s FTS candidates carry no cosine score (unlike
+    `storeMemory`'s) — confirmed by reading the code that `memory_judge` never consumes a score
+    downstream at all (pure LLM judgment, no `isContradiction` call), so this divergence has no
+    functional effect there.
+  - 198 unit + 30 e2e pass, deployed.
 
 ### Cleanup
 - [ ] One-time prune of old verbatim noise in the pool (pre-distillation junk: "Yeah, I do." etc.) — for clean demo retrievals

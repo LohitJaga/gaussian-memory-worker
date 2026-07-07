@@ -384,8 +384,11 @@ export async function retrieve(
     const bhattScore = distributionalScore(normCosine[i], querySigmaVal, currentSigma);
     const bhattMultiplier = 0.70 + 0.70 * bhattScore;
     // BM25 as first-class rerank signal: keyword-matching memories surface even with mediocre cosine.
-    // Weights: cosine (semantic) 50%, BM25 (keyword) 15%, recency 22%, access 13%.
-    const baseScore = 0.50 * normCosine[i] + 0.15 * normBm25[i] + 0.22 * normRecency[i] + 0.13 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
+    // Weights: cosine (semantic) 50%, BM25 (keyword) 15%, recency 27%, access 8%. Recency raised /
+    // access lowered from 22/13 (2026-07-07) — access_count was letting stale memories that got
+    // surfaced repeatedly outrank newer, corrected ones (rich-get-richer); see isContradiction's
+    // UNRESOLVED/RESOLVED class for the complementary fix at the retrieval-eligibility level.
+    const baseScore = 0.50 * normCosine[i] + 0.15 * normBm25[i] + 0.27 * normRecency[i] + 0.08 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
     const primaryScore = baseScore * Math.min(1.40, Math.max(0.70, bhattMultiplier));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {

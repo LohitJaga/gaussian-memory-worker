@@ -3,7 +3,7 @@ import { embed, batchEmbed, dotProduct } from './embed';
 import { classifyDomainForStore, updateDomainCentroid } from './domain';
 import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
-import { storeMemory, processPendingEntityQueue } from './storage';
+import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery } from './storage';
 import { retrieve } from './retrieval';
 import { updateDecay, cleanupSingletons } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
@@ -988,19 +988,36 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const results: string[] = [];
 
       for (const target of targets) {
-        // Find nearest neighbours via Vectorize
+        // Find nearest neighbours via Vectorize (cosine) + FTS5 (keyword). Vectorize alone
+        // misses topically-related-but-lexically-distant pairs — confirmed live 2026-07-07: a
+        // real "domain rebuild has issues" vs "domain/cluster_id split resolved" pair sat below
+        // 0.70 cosine (never in Vectorize's top 10) but shared literal keywords ("domain",
+        // "rebuild"). No cosine floor applies to FTS5 candidates — shared vocabulary is the
+        // signal, and the LLM verdict call below is the actual precision gate, same as it
+        // already is for cosine-sourced candidates.
         const mu = await embed(target.text, env);
-        const vecResults = await env.VECTORIZE.query(Array.from(mu), {
-          topK: topK + 1, returnValues: false, returnMetadata: 'indexed',
-        });
+        const ftsQuery = buildKeywordQuery(target.text);
+        const [vecResults, ftsResults] = await Promise.all([
+          env.VECTORIZE.query(Array.from(mu), { topK: topK + 1, returnValues: false, returnMetadata: 'indexed' }),
+          ftsQuery.length > 0
+            ? env.DB.prepare(
+                `SELECT id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?`
+              ).bind(ftsQuery, topK).all<{ id: string }>().catch(() => ({ results: [] }))
+            : Promise.resolve({ results: [] as { id: string }[] }),
+        ]);
 
-        const candidateIds = (vecResults.matches ?? [])
+        const vecCandidateIds = (vecResults.matches ?? [])
           .filter(m => m.id !== target.id && (m.score ?? 0) >= 0.70)
           .slice(0, topK)
           .map(m => m.id);
+        const ftsCandidateIds = (ftsResults.results ?? [])
+          .map(r => r.id)
+          .filter(id => id !== target.id);
+
+        const candidateIds = [...new Set([...vecCandidateIds, ...ftsCandidateIds])];
 
         if (!candidateIds.length) {
-          results.push(`${target.id.slice(0, 8)}: no candidates above 0.70`);
+          results.push(`${target.id.slice(0, 8)}: no candidates above 0.70 or via keyword match`);
           continue;
         }
 
@@ -1061,9 +1078,14 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
             console.error('[memory_judge] JSON parse failed, defaulting to compatible:', e);
           }
 
+          const direction = resolveSupersedeDirection(target, cand);
+          const [fromId, toId] = verdict === 'supersedes'
+            ? [direction.fromId, direction.toId]
+            : [target.id, cand.id];
+
           await env.DB.prepare(
             'INSERT INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-          ).bind(crypto.randomUUID(), target.id, cand.id, verdict, confidence, reason, now).run();
+          ).bind(crypto.randomUUID(), fromId, toId, verdict, confidence, reason, now).run();
 
           // Clear pending_judge entry now that verdict is stored
           await env.DB.prepare(
@@ -1071,11 +1093,15 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
              AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
           ).bind(target.id, cand.id, cand.id, target.id).run();
 
-          // If supersedes: expire the older memory (lower timestamp) so it never surfaces again
+          // If supersedes: expire the older memory so it never surfaces again, and clear the
+          // survivor's contradiction_flag (both sides get flagged at store time — leaving the
+          // winner flagged after judging keeps showing it as "[CONTRADICTED — re-evaluate]"
+          // even though the relation is now resolved).
           if (verdict === 'supersedes') {
-            const olderId = (target.timestamp ?? 0) <= (cand.timestamp ?? 0) ? target.id : cand.id;
             await env.DB.prepare('UPDATE memories SET contradiction_flag = 1, valid_to = ? WHERE id = ?')
-              .bind(Math.floor(Date.now() / 1000), olderId).run();
+              .bind(Math.floor(Date.now() / 1000), direction.olderId).run();
+            await env.DB.prepare('UPDATE memories SET contradiction_flag = 0 WHERE id = ?')
+              .bind(direction.newerId).run();
           }
 
           results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${verdict} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
