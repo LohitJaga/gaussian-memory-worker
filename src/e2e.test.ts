@@ -209,6 +209,35 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     expect(result).toMatch(/SPAWNED/i);
   }, 20_000);
 
+  // "Newest wins" invariant (2026-07-07): merge and contradiction/supersede are two different
+  // mechanisms that can each handle a "this fact changed" pair, and which one a given pair routes
+  // through depends on measured similarity, not a deliberate choice — confirmed live the same day
+  // via a real pair that merged instead of contradicting. What actually has to hold regardless of
+  // which path fires is that the newest information always wins. resolveSupersedeDirection already
+  // has unit coverage for the supersede side; this covers the merge side, which only a live D1
+  // write can exercise (storeMemory's merge branch isn't unit-testable without mocking Env).
+  it('store: merge always keeps the newest text, never the original', async () => {
+    const mergeDomain = 'e2e-newest-wins';
+    const v1 = `${TEST_PREFIX} Speckled Hollow trailhead sign lists the loop as 4.2 miles round trip.`;
+    const v2 = `${TEST_PREFIX} Speckled Hollow trailhead sign lists the loop as 5.1 miles round trip.`;
+
+    const r1 = await call('memory_store', {
+      text: v1, domain: mergeDomain, memory_type: 'episodic', project: TEST_PROJECT,
+    });
+    expect(r1).toMatch(/SPAWNED/i);
+    const id = await findLatestMemoryId(mergeDomain);
+
+    const r2 = await call('memory_store', {
+      text: v2, domain: mergeDomain, memory_type: 'episodic', project: TEST_PROJECT,
+    });
+    expect(r2).toMatch(/MERGED/i);
+
+    const listing = await call('memory_list', { domain: mergeDomain, limit: 5 });
+    expect(listing).toContain(id.slice(0, 8));
+    expect(listing).toContain('5.1 miles');
+    expect(listing).not.toContain('4.2 miles');
+  }, 30_000);
+
   // ── retrieve (waits for Vectorize propagation) ───────────────────────────
 
   it('retrieve: memory surfaces after Vectorize propagation (≤90s)', async () => {
