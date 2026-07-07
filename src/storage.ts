@@ -119,11 +119,84 @@ export async function processPendingEntityQueue(env: Env): Promise<void> {
 
 export const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;
 
-// Similar text (cosineSim >= 0.88) where exactly one side uses negation language
-// ("switched from X" vs "using X") is treated as a contradiction, not a merge.
+// Status-flip phrasing: a bug going from "broken" to "fixed" is a contradiction too, but
+// isn't a tool-switch negation — different vocabulary class, so it's a separate pair of
+// regexes rather than an addition to NEGATION.
+export const UNRESOLVED = /\b(still (has |have )?(an? )?(major |minor )?issues?|still broken|doesn't work|does not work|not working|unresolved|known issue|don't trust this|not fixed)\b/i;
+// Negative lookbehinds on the bare "fixed"/"resolved" alternatives — without them, "not fixed"
+// (already a whole UNRESOLVED phrase above) also satisfies RESOLVED's bare `fixed`, so two
+// memories that both say "not fixed" would match RESOLVED on one side and UNRESOLVED on the
+// other and be flagged as contradicting, even though they agree the issue is unresolved. Scans
+// up to 3 words back (not just the immediately preceding word) — a single-word lookbehind missed
+// "not yet fixed"/"never really resolved" (confirmed live 2026-07-07: real, natural phrasing, not
+// an edge case). "n't" gets its own lookbehind without a leading \b since it's always attached to
+// the preceding word ("isn't") with no word boundary before the "n".
+export const RESOLVED = /\b(?<!\b(?:not|never)\b(?:\s+\w+){0,3}\s+)(?<!n't(?:\s+\w+){0,3}\s+)fixed\b|\b(?<!\b(?:not|never)\b(?:\s+\w+){0,3}\s+)(?<!n't(?:\s+\w+){0,3}\s+)resolved\b|\bnow works?\b|\bworks? now\b|\bverified (working|fixed)\b|\bconfirmed (working|fixed)\b/i;
+
+const NEGATION_COSINE_FLOOR = 0.88;
+// Status-flip pairs reword more than tool-switch pairs do ("switched from X" keeps "X" verbatim;
+// "still has issues" -> "now fixed" often doesn't share much surface text at all), so a shared
+// 0.88 floor under-fires on them (confirmed empirically 2026-07-07: a heavily-reworded real pair
+// stayed below 0.88 despite both sides clearing the UNRESOLVED/RESOLVED regex). Safe to run lower
+// here specifically because this class is already gated on both sides by curated vocabulary,
+// unlike a bare cosine check — the regex carries the precision NEGATION gets from its 0.88 floor.
+const STATUS_COSINE_FLOOR = 0.75;
+
+// Two independent contradiction classes, each with its own cosine floor: negation language
+// ("switched from X" vs "using X") at 0.88, or disagreement on resolution status
+// ("still has issues" vs "resolved") at 0.75.
 export function isContradiction(newText: string, existingText: string, cosineSim: number): boolean {
-  if (cosineSim < 0.88) return false;
-  return NEGATION.test(newText) !== NEGATION.test(existingText);
+  if (cosineSim >= NEGATION_COSINE_FLOOR && NEGATION.test(newText) !== NEGATION.test(existingText)) {
+    return true;
+  }
+  if (cosineSim >= STATUS_COSINE_FLOOR) {
+    return (RESOLVED.test(newText) && UNRESOLVED.test(existingText)) ||
+           (UNRESOLVED.test(newText) && RESOLVED.test(existingText));
+  }
+  return false;
+}
+
+// Decides how a judged 'supersedes' verdict should be persisted. Callers read to_id as "the
+// memory being replaced" (from_id supersedes to_id), but the LLM-judged pair (target/cand)
+// isn't reliably ordered newer-first — memory_judge's auto-queue pulls target from
+// contradiction_flag=1 rows, which storage.ts always sets on the OLDER side of a pair. Re-orient
+// by timestamp so the relation is stored (newer -> older) regardless of which one was target/cand.
+export function resolveSupersedeDirection(
+  target: { id: string; timestamp: number },
+  cand: { id: string; timestamp: number },
+): { fromId: string; toId: string; olderId: string; newerId: string } {
+  const olderId = (target.timestamp ?? 0) <= (cand.timestamp ?? 0) ? target.id : cand.id;
+  const newerId = olderId === target.id ? cand.id : target.id;
+  return { fromId: newerId, toId: olderId, olderId, newerId };
+}
+
+const FTS_STOPWORDS = new Set([
+  'the', 'and', 'but', 'for', 'with', 'this', 'that', 'from', 'have', 'has', 'was', 'were',
+  'are', 'not', 'now', 'still', 'been', 'into', 'about', 'when', 'then', 'than', 'also',
+]);
+
+// Builds a safe FTS5 MATCH query from arbitrary text (memory bodies, not short search queries).
+// retrieval.ts's `replace(/['"*()]/g, ' ')` sanitization is fine for short natural-language user
+// queries, but breaks on long memory text: FTS5's grammar treats `:` as a column filter, `-`
+// directly before a term as NOT, and (confirmed live 2026-07-07 against real memory text) even
+// plain commas can trip the parser on long inputs — the query silently returns zero results
+// since callers wrap this in .catch(() => []). It's also too restrictive even when it doesn't
+// error: FTS5's default is implicit AND between bareword terms, so a 70-word memory text as a
+// query requires literally every word to appear in a candidate, which is essentially always zero
+// matches. Tokenizing to bare alphanumeric words and OR-joining each as a quoted phrase fixes
+// both: quoted alphanumeric-only terms can't be misparsed as operators, and OR means partial
+// keyword overlap is enough — this is meant to be a low-precision, high-recall signal, not exact
+// matching (the LLM verdict call downstream is the real precision gate). Sorted longest-first
+// before truncating to maxTerms — taking first-N in original sentence order (tried first, then
+// reverted 2026-07-07) cut off the actual significant words on longer memories, since the
+// specific/technical vocabulary that makes a good keyword doesn't reliably show up early in a
+// sentence; longer words are a cheap, effective proxy for "specific" over "common filler".
+export function buildKeywordQuery(text: string, maxTerms = 20): string {
+  const terms = [...new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])]
+    .filter(t => t.length >= 4 && !FTS_STOPWORDS.has(t))
+    .sort((a, b) => b.length - a.length)
+    .slice(0, maxTerms);
+  return terms.map(t => `"${t}"`).join(' OR ');
 }
 
 // Graphiti-style exact-match normalization: strips punctuation/case/whitespace differences
@@ -158,13 +231,22 @@ export async function storeMemory(
     return { action: 'merged', id: exactRow.id };
   }
 
-  // Coarse search via Vectorize — no domain filter so same-text re-ingests always merge
-  // regardless of domain reclassification. Bhattacharyya distance handles isolation.
-  const results = await env.VECTORIZE.query(Array.from(mu), {
-    topK: 10,
-    returnValues: false,
-    returnMetadata: 'indexed',
-  });
+  // Coarse search via Vectorize (no domain filter so same-text re-ingests always merge
+  // regardless of domain reclassification; Bhattacharyya distance handles isolation), the FTS5
+  // keyword query (for contradiction detection — see below), and the recent-cache KV read all
+  // run in parallel: none of the three depend on each other's result, so awaiting them
+  // sequentially (as an earlier version of this function did) was pure added latency on the
+  // write hot path (storeMemory fires on every memory_store/auto_store/extract_and_store call,
+  // including the PostToolUse hook on every Bash/Write in Claude Code sessions).
+  const ftsQuery = buildKeywordQuery(text);
+  const [results, ftsRows, recentEmbeddings] = await Promise.all([
+    env.VECTORIZE.query(Array.from(mu), { topK: 10, returnValues: false, returnMetadata: 'indexed' }),
+    ftsQuery.length > 0
+      ? env.DB.prepare(`SELECT id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT 10`)
+          .bind(ftsQuery).all<{ id: string }>().catch(() => ({ results: [] as { id: string }[] }))
+      : Promise.resolve({ results: [] as { id: string }[] }),
+    recentEmbeddingsGet(env),
+  ]);
 
   // Recent-cache candidates: memories stored in the last ~10 min may not be in
   // Vectorize yet (2-5 min propagation lag), so a same-minute paraphrase would
@@ -174,7 +256,7 @@ export async function storeMemory(
   // scores — real merge/contradiction decisions still go through the existing
   // Bhattacharyya/shouldMerge logic below, this only fixes candidate recall.
   const recentMuArr = Array.from(mu);
-  const recentCandidates = (await recentEmbeddingsGet(env))
+  const recentCandidates = recentEmbeddings
     .filter(r => r.ts > now - RECENT_EMBEDDINGS_TTL)
     .map(r => ({ id: r.id, score: dotProduct(recentMuArr, r.mu), metadata: { domain: r.domain } }))
     .filter(r => r.score > 0.5);
@@ -185,14 +267,35 @@ export async function storeMemory(
     ...recentCandidates.filter(r => !seenIds.has(r.id)),
   ];
 
+  // FTS5 keyword candidates — for contradiction detection only, not merge/dedup. Vectorize's
+  // cosine search misses topically-related-but-lexically-distant pairs entirely (confirmed live
+  // 2026-07-07: a real "domain rebuild has issues" vs "domain/cluster_id split resolved" pair
+  // sat below 0.70 cosine, never appearing in Vectorize's own top 10, but shared literal
+  // keywords). Fetches stored vectors via getByIds (20-id cap, same pattern as rebuild.ts — the
+  // FTS query above is hardcoded to LIMIT 10, comfortably under that) to compute a real local
+  // cosine (dotProduct over unit-normalized embeddings, same technique as recentCandidates
+  // above) so isContradiction still gets a real score to gate on — merge/dedup deliberately does
+  // NOT see these, only the contradiction loop below does. `.catch()` guards this the same way
+  // the FTS5 query above is guarded — without it, a transient Vectorize error here would hard-fail
+  // the entire store call instead of just skipping the keyword-candidate signal for this write.
+  const matchIds = new Set(matches.map(m => m.id));
+  // Sliced to 20 defensively — getByIds hard-caps there (VECTOR_GET_ERROR 40007 above it, per
+  // rebuild.ts). Currently ftsOnlyIds is already <=10 from the FTS LIMIT above, but that's a
+  // coincidence of an unrelated constant, not a structural guarantee tying the two together.
+  const ftsOnlyIds = (ftsRows.results ?? []).map(r => r.id).filter(id => !matchIds.has(id)).slice(0, 20);
+  const ftsCandidates = ftsOnlyIds.length > 0
+    ? ((await env.VECTORIZE.getByIds(ftsOnlyIds).catch(() => [])) ?? [])
+        .filter(v => v.values)
+        .map(v => ({ id: v.id, score: dotProduct(recentMuArr, Array.from(v.values as number[])) }))
+    : [];
+  const contradictionMatches = [...matches, ...ftsCandidates];
+
   let bestId: string | null = null;
   let bestDist = Infinity;
   let bestSigma: Float32Array | null = null;
-  let bestText: string | null = null;
-  let bestScore = 0;
 
   // Batch fetch all candidate rows in one D1 query instead of N sequential selects
-  const candidateIds = matches.map(m => m.id);
+  const candidateIds = [...matchIds, ...ftsOnlyIds];
   const placeholders = candidateIds.map(() => '?').join(',');
   const rows = candidateIds.length > 0
     ? await env.DB.prepare(
@@ -239,15 +342,35 @@ export async function storeMemory(
       bestDist = approxDist;
       bestId = match.id;
       bestSigma = existingSigma;
-      bestText = row.text;
-      bestScore = match.score;
     }
   }
 
-  // Contradiction check: similar text with opposing negation pattern → flag both, force spawn
-  if (bestId && bestText && isContradiction(text, bestText, bestScore)) {
+  // Contradiction check: scans ALL candidates independently (Vectorize + recent-cache + FTS5
+  // keyword matches above), not just the merge-selected bestId. Three bugs found 2026-07-07
+  // (code review) made this necessary: (1) a closer, non-contradicting candidate would silently
+  // win the single bestId slot and prevent a real but lower-cosine contradiction from ever being
+  // checked; (2) the cross-cluster ceiling above exists for merge precision, but reworded
+  // status-flip pairs (what the 0.75 STATUS_COSINE_FLOOR was added for) are exactly the kind
+  // likely to land in a different cluster — gating them on the merge ceiling made that floor
+  // unreachable in practice; (3) topically-related-but-lexically-distant pairs never appear in
+  // Vectorize's candidates at all (see ftsCandidates above). Contradiction detection has its own
+  // precision guard (the NEGATION/UNRESOLVED/RESOLVED regexes + their own cosine floors), so it
+  // doesn't need the merge ceiling's protection.
+  let contradictionId: string | null = null;
+  let contradictionText: string | null = null;
+  for (const match of contradictionMatches) {
+    const row = rowMap.get(match.id);
+    if (!row) continue;
+    if (isContradiction(text, row.text, match.score ?? 0)) {
+      contradictionId = match.id;
+      contradictionText = row.text;
+      break;
+    }
+  }
+
+  if (contradictionId && contradictionText) {
     await env.DB.prepare('UPDATE memories SET contradiction_flag = 1 WHERE id = ?')
-      .bind(bestId).run();
+      .bind(contradictionId).run();
     // Fall through to spawn with contradiction_flag set
     const id = crypto.randomUUID();
     await env.DB.prepare(`
