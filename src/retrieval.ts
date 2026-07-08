@@ -221,14 +221,41 @@ export async function retrieve(
 
   // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
   const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
-  const [vecFinal, ftsResults] = await Promise.all([
+
+  // EXPERIMENTAL (2026-07-08): neighborhood routing for vague queries only. Proven via
+  // bench/gold/retrieval_gold.vague.json that a casual/vague query can rank the true
+  // answer beyond even a 50-candidate cosine window against the full ~4,700-memory
+  // corpus (register mismatch — casual phrasing embeds closer to other casual-toned
+  // memories than to the formally-worded fact that answers it). MICRO_VECTORIZE holds
+  // ~2,500-2,900 fine-grained cluster centroids, previously write-time-only (assignMicroCluster)
+  // and never consulted during search. Route the query to its nearest few centroids and
+  // pull in their member memories as ADDITIONAL candidates — additive, not a replacement,
+  // so precise queries (which already work well) are untouched.
+  // entityTokens.length === 0 is the gate signal: no recognized specific/named term in
+  // the query is exactly the profile this routing exists for. (Initially gated on
+  // querySigmaVal > 0.5, which never fired — short casual queries only ever compute
+  // ~0.4-0.45 under the current formula, confirmed against all 12 vague gold queries.)
+  const useClusterRouting = querySigmaVal > 0.35 || entityTokens.length === 0;
+
+  const [vecFinal, ftsResults, clusterMemberRows] = await Promise.all([
     env.VECTORIZE.query(Array.from(qvec), queryOpts),
     ftsQuery.length >= 3
       ? env.DB.prepare(
           `SELECT id, -bm25(memories_fts) as bm25_score FROM memories_fts WHERE memories_fts MATCH ? AND (project = ? OR project = 'default') ORDER BY rank LIMIT ?`
         ).bind(ftsQuery, project, topK * 4).all<{ id: string; bm25_score: number }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] as { id: string; bm25_score: number }[] }),
+    useClusterRouting
+      ? env.MICRO_VECTORIZE.query(Array.from(qvec), { topK: 3, returnMetadata: 'none' })
+          .then(async (r: any) => {
+            const clusterIds = (r.matches ?? []).map((m: any) => m.id);
+            if (!clusterIds.length) return { results: [] as { id: string }[] };
+            const placeholders = clusterIds.map(() => '?').join(',');
+            return env.DB.prepare(`SELECT id FROM memories WHERE cluster_id IN (${placeholders}) LIMIT 30`)
+              .bind(...clusterIds).all<{ id: string }>().catch(() => ({ results: [] }));
+          })
+      : Promise.resolve({ results: [] as { id: string }[] }),
   ]);
+  const clusterRoutedIds = (clusterMemberRows.results ?? []).map(r => r.id);
 
   // BM25 score map — negated so higher = better match (FTS5 rank is negative)
   const bm25Map = new Map<string, number>();
@@ -323,7 +350,8 @@ export async function retrieve(
   }
 
   // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts
-  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds])].slice(0, 120);
+  const clusterOnlyIds = clusterRoutedIds.filter(id => !results.matches.some(m => m.id === id));
+  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds])].slice(0, 120);
   const placeholders = allIds.map(() => '?').join(',');
   const { clause: projectClause, param: projectParam } = projectScopeClause(project, strictProject);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -340,6 +368,9 @@ export async function retrieve(
   // Temporal hits have no cosine (not from Vectorize) — synthetic 0.5 baseline so bhattMultiplier
   // doesn't zero them out. They win/lose on temporalBoost + access + recency.
   for (const id of temporalOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.5); }
+  // Cluster-routed hits similarly have no direct query cosine — slightly below temporal's
+  // baseline since cluster membership is a weaker relevance signal than an explicit date cue.
+  for (const id of clusterOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.45); }
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
   // Cluster cohesion: batch-fetch entity links for all candidates in one D1 query.
