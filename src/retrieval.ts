@@ -208,7 +208,16 @@ export async function retrieve(
 
   // Vector search + FTS5 keyword search in parallel (hybrid retrieval, global scope)
   // Vectorize cap: returnValues=true hard-limits topK to 50. FTS5 handles overflow.
-  const queryOpts: any = { topK: Math.min(topK * 4, 50), returnValues: true, returnMetadata: 'indexed' };
+  // Pool multiplier scales with querySigmaVal (4x precise -> 8x vague, capped at 50
+  // regardless): sigma-based gating downstream can only filter candidates that were
+  // actually fetched here — a vague query with a wide sigma gate still recalls nothing
+  // extra if the raw cosine search never pulled the right memory into the pool at all.
+  // Widening the initial fetch for vague queries is the fix that actually reaches the
+  // real bottleneck (confirmed via bench/gold/retrieval_gold.vague.json, 2026-07-08:
+  // the querySigmaVal specificity fix alone moved tokens but not recall, since it only
+  // touches post-fetch filtering).
+  const poolMultiplier = 4 + Math.round(4 * Math.max(0, Math.min(1, (querySigmaVal - 0.2) / 0.6)));
+  const queryOpts: any = { topK: Math.min(topK * poolMultiplier, 50), returnValues: true, returnMetadata: 'indexed' };
 
   // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
   const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
