@@ -180,8 +180,16 @@ export async function retrieve(
   const capPattern = /\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g;
   const entityTokens = [...new Set(query.match(capPattern) ?? [])].slice(0, 3);
 
-  // Infer query sigma: short/specific → low σ (tight), long/vague → high σ (broad)
-  const querySigmaVal = 0.3 + 0.5 * Math.min(query.length / 300, 1.0);
+  // Infer query sigma: length alone was a bad proxy for vagueness — a short casual
+  // query ("that db thing again") scored as PRECISE under pure length, when it's
+  // actually the vague case the sigma-widening mechanism exists for. Blend in a
+  // specificity signal from the entity tokens above: named/capitalized terms present
+  // → more precise (lower σ); none → more vague (higher σ), independent of length.
+  // Confirmed via bench/gold/retrieval_gold.vague.json (2026-07-08): recall was tied
+  // with a naive baseline on short casual queries, consistent with this never firing.
+  const lengthSigma = 0.5 * Math.min(query.length / 300, 1.0);
+  const specificityAdj = entityTokens.length > 0 ? -0.1 * Math.min(entityTokens.length, 2) : 0.05;
+  const querySigmaVal = Math.max(0.2, Math.min(0.8, 0.3 + lengthSigma + specificityAdj));
 
   // Temporal cue parsing — "yesterday", "this week" etc. → timestamp window boost at score time.
   const temporalDaysMap: Record<string, number> = {
