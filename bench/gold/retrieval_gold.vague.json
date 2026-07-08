@@ -1,0 +1,53 @@
+{
+  "version": "vague-suppl-2026-07-08",
+  "note": "Additive category on top of v1/multihop (both stay frozen). Precise/paraphrase queries in v1 skew toward the exact query type cosine embeddings are built to nail — this category tests loose, casual, imprecisely-worded queries closer to how memories are actually queried day-to-day, which is the specific case the sigma/Bhattacharyya machinery targets (README: 'a vague exploratory question casts wider'). Authored against real, previously-confirmed memory IDs before any run.",
+  "queries": [
+    { "id": "q33", "category": "vague", "query": "why'd we go with that db thing again",
+      "gold_ids": ["56ab6cee-d7e8-48ee-b7bc-846b8af28aec"],
+      "match_texts": ["chose cloudflare d1 over planetscale"], "note": "vague ref to the D1/PlanetScale decision" },
+
+    { "id": "q34", "category": "vague", "query": "why not just do simple key value yk",
+      "gold_ids": ["7f1d422a-d7f9-4f2d-839f-766c3fa83e20"],
+      "match_texts": ["chose bayesian gaussian model over key-value store"], "note": "vague ref to the Bayesian-vs-KV decision" },
+
+    { "id": "q35", "category": "vague", "query": "when'd the internship start again",
+      "gold_ids": ["2bf987fb-e9f7-47e7-85bc-f9ba5e2e6323"],
+      "match_texts": ["l'oreal internship started may 19 2026"], "note": "vague date lookup" },
+
+    { "id": "q36", "category": "vague", "query": "whats my leetcode goal",
+      "gold_ids": ["f387472b-519c-4fde-b3c0-8721949d00e1"],
+      "match_texts": ["150 leetcode problems by august"], "note": "vague goal lookup" },
+
+    { "id": "q37", "category": "vague", "query": "how far did cloudflare interview go",
+      "gold_ids": ["79088729-81be-4049-b692-3cec9ee94642"],
+      "match_texts": ["4th round for cloudflare"], "note": "vague interview-progress lookup" },
+
+    { "id": "q38", "category": "vague", "query": "the oauth thing for color wow, what was that",
+      "gold_ids": ["b4a4562a-d0d0-4028-9d9e-7e58e1ab3fc9", "a5f0f946-4686-4901-8cae-687a55a93792", "790e9134-f2ff-4ceb-b4c4-531428479895"],
+      "match_texts": ["oauth 2.0 client id for desktop app for color wow", "oauth consent screen with app name 'color wow agents'"], "note": "vague ref to OAuth setup cluster" },
+
+    { "id": "q39", "category": "vague", "query": "that domain rebuild bug, we fix it?",
+      "gold_ids": ["850ca374-3a64-4a37-bc10-4907a6dc4f30", "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"],
+      "match_texts": ["domain rebuild instability", "domain rebuild from unstable to stable"], "note": "vague ref to the domain-rebuild fix" },
+
+    { "id": "q40", "category": "vague", "query": "how do we differ from mem0 again",
+      "gold_ids": ["6e9be4c0-49ca-477c-93e4-3996d9deb3a9"],
+      "match_texts": ["mem0 shipped a decay mechanism"], "note": "vague competitor-comparison lookup" },
+
+    { "id": "q41", "category": "vague", "query": "whats our main differentiator yk",
+      "gold_ids": ["41d3828f-f6a4-41e8-933f-2607753f9efc"],
+      "match_texts": ["epistemic-governance angle"], "note": "vague, open-ended differentiator question" },
+
+    { "id": "q42", "category": "vague", "query": "that scoring fix we did",
+      "gold_ids": ["d698821f-1683-404b-8f03-5d3ff2464bf7"],
+      "match_texts": ["0.9–1.2 → 0.28–1.33"], "note": "vague ref to score normalization change" },
+
+    { "id": "q43", "category": "vague", "query": "why do we track confidence like that",
+      "gold_ids": ["03673c6e-872a-499d-97de-d044d8724a4c"],
+      "match_texts": ["modeling uncertainty as a first-class, decaying value"], "note": "vague, conceptual question" },
+
+    { "id": "q44", "category": "vague", "query": "when am i trying to ship this",
+      "gold_ids": ["b1c529a1-4bf4-40a7-89f5-356d4abdeb81"],
+      "match_texts": ["finish gaussian memory before august"], "note": "vague deadline lookup" }
+  ]
+}

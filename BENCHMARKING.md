@@ -1,6 +1,116 @@
-# Gaussian Memory — Benchmarking Research
+# Gaussian Memory — Benchmarking Plan
 
-**Compiled:** June 15, 2026
+**Plan revised:** July 8, 2026 · **Landscape research (Part 2):** compiled June 15, 2026
+
+> Part 1 below is the **plan of record**. It supersedes the June 15 §8 ordering
+> ("run LoCoMo first"), which was backwards for our constraints: LoCoMo is the one
+> benchmark that (a) costs paid API and (b) measures generic fact-recall — the axis
+> where we can only score "parity" and which showcases *none* of what we built.
+> Part 2 (the original research) is retained unchanged as reference/citations.
+
+---
+
+# Part 1 — The Plan (of record)
+
+## Guiding principles
+
+1. **Free-first.** Lead with metrics that cost $0 and show our differentiators. The
+   one paid benchmark (LoCoMo, needs an LLM judge) is last and optional.
+2. **Standard benchmarks measure the wrong axis for us.** LoCoMo/LongMemEval test
+   "did it recall the right fact." Our edge — σ confidence, contradiction handling,
+   temporal validity, decay — needs metrics we build ourselves. No public benchmark
+   covers staleness or contradiction, which is precisely the community's top pain.
+3. **Publish the harness, report where we're weak.** Include adversarial/contradiction
+   cases; report precision honestly (see below). The Mem0/Zep credibility dispute
+   (Part 2 §7) means any hidden weakness gets found and discredits the whole post.
+
+## Known bias: recall-favoring by design → how we handle weak precision
+
+Retrieval is **threshold-based** (all memories above a score floor, not fixed top-k —
+`retrieval.ts` threshold path), plus **spreading activation** pulls in entity-graph
+neighbors (`retrieval.ts:319`) and the **Bhattacharyya multiplier** admits fuzzy/high-σ
+memories on vague queries (`retrieval.ts:391-392`). Over a 4,715-memory store with many
+near-duplicate session summaries, this is a deliberately wide net: **high recall,
+diluted set-precision.** This is a chosen tradeoff, so we measure it as a tunable curve,
+not a single number:
+
+1. **No single precision number.** Precision is a function of the score floor → report a
+   **Precision–Recall curve swept over the threshold**, plus PR-AUC.
+2. **Headline top-heavy ranking metrics: nDCG@k and MRR.** For LLM-context memory, what
+   matters is *the right memory ranked near the top* and *present at all*; the model
+   tolerates a few extra items. These stay high even when tail junk drags set-precision
+   down — separating "bad retrieval" from "correct-but-verbose retrieval."
+3. **Set-precision reported but de-emphasized.** We still publish it (hiding it is what
+   Mem0/Zep got caught doing) — just not as the headline.
+4. **Token-per-query** as the honest precision proxy — weak precision = more junk tokens.
+   Collected for free during the retrieval run; every competitor reports it.
+5. **Decompose precision misses** into **domain-contamination** (wrong-domain memory in
+   the set → scoring/threshold fix) vs **near-duplicate flooding** (dup session summaries
+   → dedup fix). Report *domain-purity* and *dup-rate* of the returned set separately so
+   the number is actionable, not just a verdict.
+
+## Metric set (precise definitions)
+
+| Metric | Definition | Cost |
+|---|---|---|
+| Recall@k | fraction of gold memories present in top-k | $0 |
+| Precision@k | fraction of top-k that are gold | $0 |
+| MRR | mean of 1/rank of first gold memory | $0 |
+| nDCG@k | rank-discounted gain, gold-graded | $0 |
+| PR-AUC | area under P–R curve swept over score floor | $0 |
+| tokens/query | total chars/tokens of returned set (precision proxy) | $0 |
+| domain-purity | fraction of returned set in the query's target domain | $0 |
+| dup-rate | fraction of returned set that are near-duplicates of another hit | $0 |
+| p50/p95/p99 latency | wall-clock of live `memory_retrieve` calls | $0 |
+
+## Ground-truth construction (no paid API)
+
+Build a ~50-query labeled set from the existing 4,715-memory store, each query tagged with
+its gold memory ID(s):
+- **Decisions / topic_key upserts** — memories with a `topic_key` or `memory_type=decision`
+  give an unambiguous target ("what did I decide about D1 vs PlanetScale" → known row).
+- **Entity-graph neighborhoods** — for a seed memory, its 1-hop entity neighbors are the
+  expected co-retrievals; validates spreading activation directly.
+- **Domain spot-checks** — a query clearly scoped to one of the 47 domains; anything
+  returned from another domain counts against domain-purity.
+Embeddings run on our own Worker AI (effectively $0); no external judge needed for Tier 1–2.
+
+## Tier 1 — free, do first (highest ROI)
+
+| # | Benchmark | Output | Cost |
+|---|---|---|---|
+| 1 | **Latency p50/p95/p99** vs live Worker (vary top-k, cold/warm KV) | edge-latency table — our hard differentiator vs Mem0/Zep cloud APIs | $0 |
+| 2 | **Self-labeled retrieval quality** (full metric set above) | P–R curve, nDCG@k, MRR, Recall@k, tokens/query, domain-purity, dup-rate | $0 |
+
+## Tier 2 — free, our moat (nobody else publishes these)
+
+| # | Benchmark | Output | Cost |
+|---|---|---|---|
+| 3 | **σ calibration** | reliability diagram: does lower σ predict more-reliable retrieval? | $0 |
+| 4 | **Contradiction / temporal correctness** | precision/recall that superseded (`valid_to`) facts are excluded and the newer wins; uses the 28 flagged contradictions | $0 |
+| 5 | **Capacity curve** (MemBench-style) | accuracy vs store size (500 → 4,715) — the curve no competitor shows | $0 |
+
+## Tier 3 — paid, last, optional (external parity only)
+
+| # | Benchmark | Output | Cost |
+|---|---|---|---|
+| 6 | **LoCoMo-10 QA** | accuracy by category, for a number next to Mem0/Zep | $0 local Ollama judge, or ~$20 Claude Haiku |
+
+Only run Tier 3 when the blog needs a head-to-head figure. Frame as "parity," then pivot
+to Tier 2 as the story. Do **not** build it first.
+
+## Corrections to the June 15 research (Part 2)
+
+- **Scoring weights** are now `0.50·cosine + 0.15·bm25 + 0.27·recency + 0.08·access`
+  (`retrieval.ts:391`), not the `0.50/0.15/0.22/0.13` quoted in Part 2 §? / README history.
+- **Bhattacharyya is applied as a clamped multiplier** `[0.70, 1.40]` on the base score
+  (`retrieval.ts:392`), not the raw distributional score.
+- **Store size** as of 2026-07-08: **4,715 memories, 47 domains** (via `memory_stats`) —
+  use this as the capacity-curve ceiling and the ground-truth source.
+
+---
+
+# Part 2 — Landscape Research (reference, compiled June 15, 2026)
 
 ---
 
