@@ -127,6 +127,42 @@ export function projectScopeClause(project: string, strictProject = false): { cl
   return { clause, param: project };
 }
 
+// Stage B ablation baseline — deliberately dumb top-k cosine retrieval, mirroring what a
+// naive vector-store competitor (fat-context, no confidence model) would return: no BM25
+// fusion, no entity graph, no temporal boost, no cluster cohesion, no threshold expansion,
+// no diversity cap. Kept fully separate from retrieve() rather than threaded in as a bypass
+// flag — that function's signals are too interleaved to safely branch mid-pipeline, and this
+// only needs to exist for the benchmark harness's baseline-vs-Gaussian comparison.
+export async function baselineRetrieve(
+  query: string, topK: number, env: Env, project: string = 'default', strictProject = false
+): Promise<{ score: number; text: string; domain: string; type: string }[]> {
+  if (!query?.trim()) return [];
+
+  const qvec = await embed(query, env);
+  const matches = (await env.VECTORIZE.query(Array.from(qvec), {
+    topK, returnValues: false, returnMetadata: 'none',
+  })).matches ?? [];
+  if (!matches.length) return [];
+
+  const ids = matches.map(m => m.id);
+  const placeholders = ids.map(() => '?').join(',');
+  const { clause: projectClause, param: projectParam } = projectScopeClause(project, strictProject);
+  const binds = projectParam ? [...ids, projectParam] : [...ids];
+  const rows = await env.DB.prepare(
+    `SELECT id, text, domain, memory_type FROM memories WHERE id IN (${placeholders}) ${projectClause}`
+  ).bind(...binds).all<{ id: string; text: string; domain: string; memory_type: string }>();
+
+  const rowMap = new Map((rows.results ?? []).map(r => [r.id, r]));
+  const scoreMap = new Map(matches.map(m => [m.id, m.score]));
+  return ids
+    .filter(id => rowMap.has(id))
+    .map(id => {
+      const r = rowMap.get(id)!;
+      return { score: scoreMap.get(id) ?? 0, text: r.text, domain: r.domain, type: r.memory_type };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
 export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default',
   strictProject = false

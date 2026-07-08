@@ -4,7 +4,7 @@ import { classifyDomainForStore, updateDomainCentroid } from './domain';
 import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
 import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery } from './storage';
-import { retrieve } from './retrieval';
+import { retrieve, baselineRetrieve } from './retrieval';
 import { updateDecay, cleanupSingletons } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
 
@@ -80,6 +80,7 @@ export const TOOLS = [
         synthesize: { type: 'boolean', default: false },
         project: { type: 'string', description: 'Scope results to this project. Defaults to searching all projects.' },
         strict_project: { type: 'boolean', default: false, description: 'When project is set, exclude default-project results instead of blending them in.' },
+        baseline: { type: 'boolean', default: false, description: 'Benchmark-only: naive top-k cosine retrieval, bypassing hybrid scoring entirely. Used for Stage B ablation comparisons.' },
       },
       required: ['query'],
     },
@@ -235,7 +236,12 @@ export const TOOLS = [
   {
     name: 'memory_build_entities',
     description: 'One-shot maintenance for backfilling older memories only — new memories get entities extracted automatically via the entity queue. Processes memories in batches, extracts named entities (tool/project/concept/parameter/person), writes to entity_nodes + memory_entities tables. Call repeatedly until "Done." Enables 1-hop entity graph traversal at retrieve time.',
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        debug: { type: 'boolean', default: false, description: 'Read-only: returns raw/parsed diagnostics for the current front-of-queue batch instead of writing entities or advancing the offset.' },
+      },
+    },
   },
   {
     name: 'memory_process_entity_queue',
@@ -521,7 +527,10 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         max_tokens: 60,
       }) as any;
 
-      const description = ((descResult?.response ?? '') as string).trim();
+      // `as string` is compile-time only — coerce for real, same crash class as
+      // memory_build_entities (Workers AI can return a non-string response shape).
+      const descRaw = descResult?.response ?? '';
+      const description = (typeof descRaw === 'string' ? descRaw : '').trim();
       if (!description || description.length < 10) return 'SKIP: model returned empty description';
 
       const mu = await embed(description, env);
@@ -536,6 +545,15 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     }
 
     case 'memory_retrieve': {
+      // Stage B ablation path — naive top-k cosine only, no hybrid scoring. Formatted
+      // identically to the normal output below (score/domain/type/text) so the bench
+      // harness's existing parser works unchanged against either mode.
+      if (args.baseline === true) {
+        const baseResults = await baselineRetrieve(args.query, args.top_k ?? 8, env, args.project ?? 'default', args.strict_project === true);
+        if (!baseResults.length) return 'No memories found.';
+        return baseResults.map(r => `[${r.score.toFixed(2)}] (${r.domain}/${r.type}) ${r.text}`).join('\n');
+      }
+
       // Default 8 — must match the declared inputSchema default (was 5, silently diverging from schema)
       const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 8, env, args.project ?? 'default', args.strict_project === true);
       if (!results.length) return 'No memories found.';
@@ -1492,9 +1510,20 @@ Return ONLY valid JSON array:
     }
 
     case 'memory_build_entities': {
-      // Retroactive entity extraction — batch processes memories, extracts named entities,
-      // writes to entity_nodes + memory_entities for 1-hop graph traversal at retrieve time
-      const BATCH = 20;
+      // Retroactive entity extraction — processes memories one at a time (own AI.run
+      // call per memory, run concurrently within each batch via Promise.all), writes to
+      // entity_nodes + memory_entities for 1-hop graph traversal at retrieve time.
+      //
+      // Previously batched N memories into one array-of-arrays prompt. That let a small
+      // model (llama-3.2-3b) degenerate into repeating ONE item's answer for every slot
+      // when several batch items were topically similar (e.g. many Gaussian Memory
+      // session notes all mentioning topK=2/Bhattacharyya) — confirmed via the debug
+      // path below, which showed rawPreview repeating `["project:Gaussian Memory",
+      // "parameter:topK=2"]` ~15x before truncating into invalid JSON. Raising max_tokens
+      // or shrinking the batch doesn't fix that (it either truncates later or "succeeds"
+      // with every slot silently wrong) — one memory per call removes the cross-item
+      // interference entirely, since each call only ever sees one memory's text.
+      const BATCH = 8;
       const offsetRaw = await env.KV.get('ENTITY_BUILD_OFFSET');
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
 
@@ -1509,54 +1538,87 @@ Return ONLY valid JSON array:
         return `Done. ${count?.n ?? 0} entity links built.`;
       }
 
-      const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 150)}`).join('\n');
-      const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
-        messages: [
-          {
-            role: 'system',
-            content: `Extract named entities from each memory. Return ONLY a JSON array of arrays.
-Entity types: tool (specific model/library names like GLM-4.7-flash, D1, Vectorize), project (Gaussian Memory, Color Wow, Bayer), concept (spreading activation, Bhattacharyya), parameter (exact values like topK=2), person (proper names).
-For each memory return up to 4 entities as ["type:canonical_name", ...]. Use empty array [] if no clear entities.
-Example: [["tool:GLM-4.7-flash","concept:spreading activation"],["project:Gaussian Memory","parameter:topK=2"],[]]`,
-          },
-          { role: 'user', content: numbered },
-        ],
-        max_tokens: 512,
-        temperature: 0,
-      }) as any;
+      const SYSTEM_PROMPT = `Extract up to 4 named entities from this memory. Entity types: tool (specific model/library names like GLM-4.7-flash, D1, Vectorize), project (Gaussian Memory, Color Wow, Bayer), concept (spreading activation, Bhattacharyya), parameter (exact values like topK=2), person (proper names).
+Return ONLY a JSON array: ["type:canonical_name", ...]. Return [] if no clear entities.
+Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
 
-      const raw = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
-      try {
-        const match = raw.match(/\[[\s\S]*\]/);
-        if (match) {
-          const parsed = JSON.parse(match[0]) as string[][];
-          const now = Math.floor(Date.now() / 1000);
-          const dbOps: any[] = [];
+      async function extractOne(text: string): Promise<{ raw: string; entities: string[]; parseError: string }> {
+        const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: text.slice(0, 300) },
+          ],
+          max_tokens: 120,
+          temperature: 0,
+        }) as any;
 
-          for (let i = 0; i < batch.length; i++) {
-            const memId = batch[i].id;
-            const entities = parsed[i] ?? [];
-            for (const ent of entities) {
-              const [type, ...nameParts] = ent.split(':');
-              const name = nameParts.join(':').trim();
-              if (!type || !name) continue;
-              const entId = `ent_${type}_${name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`;
-              dbOps.push(
-                env.DB.prepare(`INSERT OR IGNORE INTO entity_nodes (id, type, canonical_name, last_seen) VALUES (?,?,?,?)`)
-                  .bind(entId, type, name, now)
-              );
-              dbOps.push(
-                env.DB.prepare(`UPDATE entity_nodes SET last_seen = ? WHERE id = ?`).bind(now, entId)
-              );
-              dbOps.push(
-                env.DB.prepare(`INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, entity_span) VALUES (?,?,?)`)
-                  .bind(memId, entId, name)
-              );
-            }
-          }
-          if (dbOps.length > 0) await env.DB.batch(dbOps);
+        // Coerce before use — Workers AI can return a non-string `response` (e.g. a
+        // safety/moderation object) for sensitive content; without this guard a crash
+        // here would propagate past this function with no per-item isolation.
+        const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+        const raw = typeof rawVal === 'string' ? rawVal.trim() : '';
+        try {
+          const match = raw.match(/\[[\s\S]*\]/);
+          if (!match) return { raw, entities: [], parseError: '' };
+          return { raw, entities: JSON.parse(match[0]) as string[], parseError: '' };
+        } catch (e) {
+          return { raw, entities: [], parseError: String(e) };
         }
-      } catch {}
+      }
+
+      // Sequential, not Promise.all — firing all 8 AI.run calls concurrently was
+      // silently dropping most of them (empty response, not an error): two debug
+      // runs on the identical batch came back with the exact same 6/8 positions
+      // empty every time, always the same two indices surviving. That's a
+      // concurrency ceiling on the AI binding, not a content issue — sequential
+      // calls are slower per batch but reliable.
+      // Small delay between calls — the empty-response pattern persisted across
+      // concurrent/sequential/fresh-content tests, which rules out prompt content,
+      // scheduling order, and response caching. A per-model rate limit on this
+      // account tripped by call volume (independent of the paid-tier neuron budget)
+      // is the remaining explanation; this delay keeps us under it.
+      const extractions: Awaited<ReturnType<typeof extractOne>>[] = [];
+      for (const r of batch) {
+        extractions.push(await extractOne(r.text));
+        await new Promise(res => setTimeout(res, 200));
+      }
+
+      // Read-only inspection path — returns BEFORE any DB write or offset advance,
+      // so it never disturbs the real backfill queue.
+      if (args.debug === true) {
+        return JSON.stringify({
+          debug: true, offset, batchSize: batch.length,
+          perMemory: batch.map((r, i) => ({
+            id: r.id, rawLength: extractions[i].raw.length,
+            entities: extractions[i].entities, parseError: extractions[i].parseError,
+            rawPreview: extractions[i].raw.slice(0, 300),
+          })),
+        }, null, 2);
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const dbOps: any[] = [];
+      for (let i = 0; i < batch.length; i++) {
+        const memId = batch[i].id;
+        for (const ent of extractions[i].entities) {
+          const [type, ...nameParts] = ent.split(':');
+          const name = nameParts.join(':').trim();
+          if (!type || !name) continue;
+          const entId = `ent_${type}_${name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`;
+          dbOps.push(
+            env.DB.prepare(`INSERT OR IGNORE INTO entity_nodes (id, type, canonical_name, last_seen) VALUES (?,?,?,?)`)
+              .bind(entId, type, name, now)
+          );
+          dbOps.push(
+            env.DB.prepare(`UPDATE entity_nodes SET last_seen = ? WHERE id = ?`).bind(now, entId)
+          );
+          dbOps.push(
+            env.DB.prepare(`INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, entity_span) VALUES (?,?,?)`)
+              .bind(memId, entId, name)
+          );
+        }
+      }
+      if (dbOps.length > 0) await env.DB.batch(dbOps);
 
       await env.KV.put('ENTITY_BUILD_OFFSET', String(offset + BATCH));
       const total = await env.DB.prepare('SELECT COUNT(*) as n FROM memories').first<{n:number}>();
@@ -1604,7 +1666,12 @@ Return: ["project-name", "project-name", ...]`,
         max_tokens: 256,
       }) as any;
 
-      const raw = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
+      // Same coercion as memory_build_entities above — a non-string `response` here
+      // would throw before RETAG_OFFSET advances below, permanently wedging this
+      // batch (see that fix's comment for why: safety/moderation-flagged content
+      // can make Workers AI return a non-string response shape).
+      const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+      const raw = typeof rawVal === 'string' ? rawVal.trim() : '';
       try {
         const match = raw.match(/\[[\s\S]*?\]/);
         if (match) {
