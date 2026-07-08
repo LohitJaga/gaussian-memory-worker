@@ -108,6 +108,118 @@ to Tier 2 as the story. Do **not** build it first.
 - **Store size** as of 2026-07-08: **4,715 memories, 47 domains** (via `memory_stats`) —
   use this as the capacity-curve ceiling and the ground-truth source.
 
+## Session log — 2026-07-08 evening: Stage B + vague-query investigation
+
+Git history for this session: `d09308b` (harness + 2 confirmed bug fixes + Stage B
+baseline path) → `0e0706a` → `04917cc` → `2c265b9` → `ae54677` (4 experiments, in
+order, each commit message carries its own tested result). All 5 commits were created
+back-to-back during a git-history reconstruction late in the session (the original
+work was spread across real hours with live testing between each step, but there was
+no `git commit` checkpoint between them at the time — so the commit *timestamps*
+don't independently corroborate "tested live between each change"; only the commit
+*message bodies* (written from real measurements taken at the time) and this doc do.
+
+**Stage B ablation result** (`bench/ablation.mjs`, full hybrid `retrieve()` vs a naive
+top-k-cosine-only `baselineRetrieve()`, same gold set): the thesis only holds at low
+`top_k` (4/8) — Gaussian wins recall by +0.05 to +0.08 there, but at real token cost
+(3-4x baseline). At `top_k` 16/24, Gaussian is strictly worse (lower recall, still
+more tokens). Recall vs Gaussian's own `top_k` is **non-monotonic** — a real,
+unexplained anomaly, likely an interaction between the adaptive score floor
+(`retrieval.ts` — floor is anchored to a lower-ranked item as `top_k` grows, admitting
+more distractors) and the diversity cap. Not yet root-caused.
+
+**Four experiments run against the 12-query vague/casual gold set**
+(`bench/gold/retrieval_gold.vague.json`), all four producing an apparent tied 0.38
+recall vs baseline: (1) blend entity-token specificity into `querySigmaVal` — sigma
+was previously pure query length, scoring short casual queries as *precise*, the
+opposite of intended; (2) scale the initial Vectorize candidate pool width with
+sigma; (3) route vague queries through `MICRO_VECTORIZE` neighborhood centroids as an
+additional candidate source; (4) inject globally most-accessed memories as a
+candidate source, zero embeddings involved. Working theory going into the Fable audit:
+vague/casual query phrasing embeds too far from formally-worded stored facts
+(register mismatch), and this is invariant to retrieval-strategy changes because
+they all operate within or downstream of the same embedding space.
+
+### Fable 5 audit — what it found (full independent review, real git/file access)
+
+Asked for a skeptical outside check specifically because 4 straight experiments
+producing an *identical* tied number was itself suspicious. Findings:
+
+1. **The tie was a coincidence, not evidence of invariance.** Per-query, Gaussian and
+   baseline actually disagree on individual queries (Gaussian wins some, loses
+   others) — the +1/−1s canceled to the same mean by chance across all 4 tests. With
+   only 12 queries, recall moves in coarse steps; a "frozen" aggregate carries very
+   little statistical information. **Do not trust the aggregate number alone again —
+   always inspect the per-query breakdown before concluding "nothing changed."**
+
+2. **Harness bug, confirmed live:** `bench/lib/textmatch.mjs`'s `recallOfSet` does
+   strict normalized-substring containment with no fuzzy/paraphrase tolerance. On
+   query q38 ("the oauth thing for color wow, what was that"), Gaussian's actual
+   top-1 result was a *correct*, differently-worded near-duplicate of the gold text
+   ("Updated the OAuth consent screen with **the** app name..." vs the gold string's
+   "...with app name...") — `dedupBySimilarity` (`retrieval.ts`) correctly kept the
+   higher-scored variant, but the harness scored it 0 anyway because the exact
+   substring wasn't present. Baseline (no dedup) happened to return literal-phrasing
+   duplicates that matched the strict harness by luck. **Correcting for this alone,
+   Gaussian is ahead of baseline (~0.46 vs 0.375), not tied.**
+
+3. **Real implementation bug in experiments 3 and 4, not evidence for the embedding
+   theory:** synthetic placeholder cosine scores for cluster-routed (0.45) and
+   access-frequency (0.35) candidates get run through the same `minMaxNormalize` as
+   real cosine hits (0.55–0.70) — always crushing them toward 0, then the score floor
+   cuts them before they can ever surface. Both experiments were **structurally
+   incapable of ever moving the number**, independent of whether the underlying
+   hypothesis (neighborhood routing, access-frequency fallback) has any merit.
+   Experiment 2 (pool widening) was also weaker than framed — for these specific
+   queries it only widened the pool 32→40, not toward the 50-cap.
+
+4. **Gold set verified clean:** all 12 `match_texts` confirmed to exist verbatim in
+   the live store at rank 1 under baseline mode. Not a labeling problem.
+
+5. **Contamination confirmed live and visible**, not just theorized: q38's full-mode
+   output was visibly stuffed with unrelated, recently-benchmark-touched session
+   memories scoring 1.3–1.5 — session/recency/access make up a real chunk of
+   `baseScore`, so repeated benchmark runs are measurably training the ranker toward
+   whatever the benchmark itself touched. Baseline mode writes nothing, so this
+   asymmetry only penalizes the Gaussian side.
+
+**Verdict: the register-mismatch theory is real but was materially overstated.** It
+holds for a genuine subset — queries q33/q34/q36/q42/q43/q44, where both modes score
+zero and Fable's own top-50 probe on q33 confirms the target simply isn't cosine-close
+enough to surface under casual phrasing. But "invariant across 4 experiments" was
+wrong: 2 of the 4 experiments were floor-stripped no-ops (bug, not signal), not real
+tests of the hypothesis.
+
+### What Fable flagged to pick back up on (not yet done when the audit wrapped)
+
+Fable's own words, ~85% through: *"Need to check whether the q33/q34/q36/q42/q43/q44
+cases (where **both** modes score 0) are genuine embedding-register misses... or show
+the same dedup-driven near-miss pattern. That determines whether the dedup/harness bug
+explains the whole tie or just part of it."* Its preliminary read: **not a single clean
+phenomenon** — likely both the embedding-register effect *and* the harness/dedup
+mismatch are real and landing at the same number by coincidence, worth confirming
+rather than picking one story.
+
+### Concrete next steps (before any more retrieval experiments)
+
+1. **Switch scoring to ID-based matching.** `gold_ids` already exist in every gold
+   file but no harness code reads them — only `match_texts` (string containment) is
+   used. Either add the `/bench/retrieve` structured endpoint referenced but never
+   built in `bench/lib/client.mjs`'s comments, or thread memory IDs through the
+   existing text-response parser. This eliminates the entire class of bug in finding
+   #2 above.
+2. **Fix the normalization bug** from finding #3: exempt injected/synthetic-cosine
+   candidates from `minMaxNormalize`'s pre-floor comparison, or give them a
+   post-normalization score directly, so experiments 3 and 4 get a fair test before
+   drawing any conclusion about them.
+3. **Finish Fable's unfinished check**: determine whether the both-zero queries are
+   pure embedding-register misses or partially a harness artifact.
+4. **Snapshot/restore DB state around benchmark runs** to kill the contamination
+   confound (finding #5) — every `retrieve()` call sharpens σ and increments
+   `access_count` live; repeated runs against the same store aren't clean trials.
+5. Only after 1–3: re-run the 4 experiments (or a redesigned version of 3/4) to see
+   if the real signal changes once the harness and normalization bugs are fixed.
+
 ---
 
 # Part 2 — Landscape Research (reference, compiled June 15, 2026)
