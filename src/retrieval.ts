@@ -237,7 +237,15 @@ export async function retrieve(
   // ~0.4-0.45 under the current formula, confirmed against all 12 vague gold queries.)
   const useClusterRouting = querySigmaVal > 0.35 || entityTokens.length === 0;
 
-  const [vecFinal, ftsResults, clusterMemberRows] = await Promise.all([
+  // EXPERIMENTAL (2026-07-08), 4th candidate source: pure access-frequency ranking,
+  // zero embeddings involved. Cluster-routing (above) still operates inside cosine
+  // space via MICRO_VECTORIZE centroids, so it inherits the same register-mismatch
+  // risk as raw cosine — this one sidesteps embeddings entirely. Heavily-reinforced
+  // memories (high access_count) are pulled in directly for vague queries, on the
+  // premise that a vague reference is more likely pointing at something you've
+  // actually discussed a lot, independent of whether the query's WORDING embeds
+  // anywhere near it.
+  const [vecFinal, ftsResults, clusterMemberRows, hotAccessRows] = await Promise.all([
     env.VECTORIZE.query(Array.from(qvec), queryOpts),
     ftsQuery.length >= 3
       ? env.DB.prepare(
@@ -254,8 +262,13 @@ export async function retrieve(
               .bind(...clusterIds).all<{ id: string }>().catch(() => ({ results: [] }));
           })
       : Promise.resolve({ results: [] as { id: string }[] }),
+    useClusterRouting
+      ? env.DB.prepare(`SELECT id FROM memories ORDER BY access_count DESC LIMIT 20`)
+          .all<{ id: string }>().catch(() => ({ results: [] }))
+      : Promise.resolve({ results: [] as { id: string }[] }),
   ]);
   const clusterRoutedIds = (clusterMemberRows.results ?? []).map(r => r.id);
+  const hotAccessIds = (hotAccessRows.results ?? []).map(r => r.id);
 
   // BM25 score map — negated so higher = better match (FTS5 rank is negative)
   const bm25Map = new Map<string, number>();
@@ -349,9 +362,11 @@ export async function retrieve(
     }
   }
 
-  // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts
+  // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts,
+  // then cluster-routed candidates (vague queries only — see useClusterRouting above).
   const clusterOnlyIds = clusterRoutedIds.filter(id => !results.matches.some(m => m.id === id));
-  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds])].slice(0, 120);
+  const hotAccessOnlyIds = hotAccessIds.filter(id => !results.matches.some(m => m.id === id));
+  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds, ...hotAccessOnlyIds])].slice(0, 120);
   const placeholders = allIds.map(() => '?').join(',');
   const { clause: projectClause, param: projectParam } = projectScopeClause(project, strictProject);
   const nowSec = Math.floor(Date.now() / 1000);
@@ -371,6 +386,10 @@ export async function retrieve(
   // Cluster-routed hits similarly have no direct query cosine — slightly below temporal's
   // baseline since cluster membership is a weaker relevance signal than an explicit date cue.
   for (const id of clusterOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.45); }
+  // Access-frequency hits have no embedding relation to the query at all by construction
+  // (that's the point) — lowest synthetic baseline of the three, they win purely on
+  // accessFreq/recency scoring components, not on pretending to be topically close.
+  for (const id of hotAccessOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.35); }
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
   // Cluster cohesion: batch-fetch entity links for all candidates in one D1 query.
