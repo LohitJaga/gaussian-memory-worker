@@ -279,6 +279,32 @@ describe('applyDiversityCap', () => {
     expect(result).toHaveLength(2);
   });
 
+  it('lets an exempt id through an exhausted type budget (guarantee-slot appendee)', () => {
+    // Regression: a guaranteed injected candidate appended after 4 episodic hits was
+    // silently re-dropped by the cap, making the guarantee a no-op (q34, 2026-07-09).
+    const items = [
+      { id: 'a', type: 'episodic', cluster_id: null },
+      { id: 'b', type: 'episodic', cluster_id: null },
+      { id: 'c', type: 'episodic', cluster_id: null },
+      { id: 'd', type: 'episodic', cluster_id: null },
+      { id: 'guaranteed', type: 'episodic', cluster_id: null },
+      { id: 'e', type: 'episodic', cluster_id: null },
+    ];
+    const result = applyDiversityCap(items, 2, 4, 3, new Set(['guaranteed']));
+    expect(result.map(m => m.id)).toEqual(['a', 'b', 'c', 'd', 'guaranteed']); // 'e' still capped
+  });
+
+  it('drops the same item without the exemption (cap unchanged by default)', () => {
+    const items = [
+      { id: 'a', type: 'episodic', cluster_id: null },
+      { id: 'b', type: 'episodic', cluster_id: null },
+      { id: 'c', type: 'episodic', cluster_id: null },
+      { id: 'd', type: 'episodic', cluster_id: null },
+      { id: 'guaranteed', type: 'episodic', cluster_id: null },
+    ];
+    expect(applyDiversityCap(items).map(m => m.id)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
   it('caps non-session items at the higher default limit (4)', () => {
     const items = Array(5).fill(null).map(() => mem('episodic', null));
     const result = applyDiversityCap(items);

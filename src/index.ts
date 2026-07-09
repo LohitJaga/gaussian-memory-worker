@@ -118,14 +118,16 @@ export default {
       const topK = Number(q.top_k) || 8;
       const frozen = q.frozen !== false;
       try {
+        const trace = q.trace === true ? {} as Record<string, unknown> : undefined;
         const rows = q.baseline === true
           ? await baselineRetrieve(q.query, topK, env, q.project ?? 'default', q.strict_project === true)
-          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen });
+          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen, trace });
         return new Response(JSON.stringify({
           mode: q.baseline === true ? 'baseline' : 'gaussian',
           frozen: q.baseline === true ? true : frozen, // baseline path never mutates regardless
           top_k: topK,
           rows,
+          ...(trace ? { trace } : {}),
         }), { headers: JSON_HEADERS });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
