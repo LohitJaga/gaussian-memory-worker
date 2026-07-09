@@ -222,6 +222,157 @@ rather than picking one story.
 
 ---
 
+## Session log — 2026-07-09: harness fixes landed, experiments 3/4 finally tested for real
+
+Worked through all 5 items of the 2026-07-08 next-steps list, in order. Git history:
+`b867089` (items 1+4: ID scoring + frozen trials) → `c234444` (derived id_groups) →
+`b2eaf99` (item 2: normalization fix) → `5481a72` (item 5 redesign: guarantee slot +
+diversity-cap exemption + pipeline tracing). Each commit was deployed and measured
+live before the next change — the numbers below come from those checkpoints, in order.
+
+### Item 1 — ID-based scoring (done)
+
+Built the `/bench/retrieve` structured endpoint (`src/index.ts`) rather than threading
+ids into the text parser: the agent-facing text format is a product surface and stays
+untouched; ids were already internal to `retrieve()`/`baselineRetrieve()` and are now
+returned on their rows (never printed by `tools.ts`). Scoring is **unit-based**
+(`bench/lib/idmatch.mjs`): one unit per gold `match_text`, carrying the `gold_ids`
+whose live D1 text answers it (derived once by `bench/tools/derive_id_groups.mjs`,
+committed as `bench/gold/id_groups.json` — frozen gold files untouched). A row credits
+a unit by id OR normalized containment; denominators unchanged, so recall stays
+comparable with the 2026-07-08 numbers. Derivation was clean: 41 queries, **0 missing
+ids**, exactly one non-containment assignment — q38's `790e9134`, which is precisely
+the dedup survivor the audit caught being mis-scored. `bench/ablation.mjs` now uses
+this and prints a per-query breakdown (aggregate-only reporting is what hid last
+session's bugs).
+
+### Item 4 — contamination (done, verified with a positive control)
+
+`retrieve()` takes `opts.frozen` which skips the σ-sharpen / `access_count` /
+hot-tier write-backs; `/bench/retrieve` defaults to frozen. Verified live: 3 frozen
+calls left a returned memory's `access_count`/`last_accessed`/σ byte-identical, one
+`frozen:false` control call incremented it. Repeated frozen runs reproduce identical
+per-query results. Caveat: the store still *carries* the contamination from earlier
+unfrozen runs (inflated access counts / sharpened σ on bench-touched memories); that
+bias is baked into absolute numbers but no longer grows.
+
+### The 0.38 tie, resolved
+
+Re-scored by id (pre-normalization-fix deployment): **gaussian 0.42 vs baseline 0.38**
+on the vague set at top_k 8 and 16. The audit's "correcting for this alone, ~0.46 vs
+0.375" was directionally right — the exact tie was pure harness artifact. q38's
+survivor now credits as `id-only@1`.
+
+### Item 3 — the both-zero queries (done)
+
+`bench/tools/probe_register.mjs`: baseline cosine at depth 100 + gaussian@24, per gold id:
+
+- **q33, q34, q42, q43, q44: true embedding-register misses** — gold id not in the
+  top-100 cosine window at all under casual phrasing.
+- **q36: NOT a register miss** — gold at baseline-cosine rank 24 (0.653), inside
+  gaussian's own candidate pool, but buried by hybrid ranking. Confirmed behaviorally
+  later: after this session's fixes it surfaces at rank 11 with top_k=16.
+
+So the register-mismatch theory survives for 5 of 6, with one reclassified as a
+ranking loss. Gold-staleness caveat worth recording: for q44 the baseline top-1 was
+"Ship status remains delayed, no new ship date as of 2026-07-05" — arguably a more
+current answer than the gold "finish before august" (belief drift inside the corpus);
+q42's "that scoring fix" is genuinely ambiguous (multiple scoring fixes exist). Frozen
+gold stays frozen, but a v2 vague set should re-author these.
+
+### Items 2+5 — normalization fix, and what it took to make experiments 3/4 real
+
+The fix itself (`normalizeCosineBatch`, unit-tested): real cosine hits min-max against
+each other only; injected candidates (temporal 0.5 / cluster 0.45 / access 0.35) get
+their synthetic value directly as the post-normalization score. Deployed it — and the
+vague set **did not move at all** (identical per-query). Skepticism applied as
+instructed; instrumented the pipeline (`opts.trace` on `retrieve()`, `trace:true` on
+`/bench/retrieve`) instead of theorizing. Found experiments 3/4 were behind **three**
+stacked blockers, of which the audit had found only the first:
+
+1. **Normalization crush** (audit finding #3) — fixed above.
+2. **Adaptive floor**: injected candidates now score fairly (~0.55–0.6) but the floor
+   is anchored to the median of cosine-native activation scores (~1.2+ on this
+   corpus). Structurally unreachable, same failure shape the temporal guarantee
+   already patches. Fix: an injected-source guarantee — vague queries (no named
+   entity) append the best 2 floor-missed injected candidates, ranked by query-token
+   overlap first (fair non-embedding topical signal; the injected pool has none by
+   construction — pure score ranking just hands the slots to whatever is globally
+   hottest), then score. FTS5 couldn't provide this signal: its implicit-AND requires
+   every casual token ("yk") to match.
+3. **Diversity cap eats guarantees**: the appended candidate was then silently
+   re-dropped by `applyDiversityCap` because its memory_type budget (4 episodic) was
+   already spent. Found via trace, not deduction. Guarantee-slot ids are now
+   cap-exempt (still counted toward budgets). This bug also applies in principle to
+   the *temporal* guarantee (sessions cap at 2) — not changed this session, flagged
+   below.
+
+Concrete validation of experiment 4's hypothesis: q34's gold ("Chose Bayesian
+Gaussian model over key-value store", access_count 2016, rank 8 of the global access
+pool) is **not cosine-reachable in a top-100 window** but was being injected, fairly
+scored, floor-cut, and then cap-cut on every earlier run. It now surfaces.
+
+### Results (ID-matched, frozen, per-query verified, reproduced across runs)
+
+Vague set (12 queries):
+
+| state | recall@8 | recall@16 | note |
+|---|---|---|---|
+| baseline (naive cosine) | 0.38 | 0.38 | |
+| gaussian, session start (re-scored by id) | 0.42 | 0.42 | the "0.38 tie" was harness artifact |
+| gaussian + normalization fix only | 0.42 | 0.42 | blockers 2+3 still masking |
+| gaussian + guarantee slot + cap exemption | **0.50** | **0.58** | q34 via access pool; q36 at k=16 |
+
+v1+multihop (29 queries), gaussian recall: 0.68→**0.76**@4, 0.75→**0.79**@8,
+0.75→**0.77**@16/24 — no per-query recall regressions (q02/q18 gained via the slot;
+q30 gained via cluster routing on an entity query, i.e. the normalization fix alone;
+q17's first unit slipped rank 4→8 but still hits). Gaussian recall vs top_k is now
+**monotonic** under ID matching + frozen trials — the 2026-07-08 non-monotonic anomaly
+did not reproduce once the harness artifacts were removed; it was at least partly
+text-matching + contamination noise, though k=16/24 recall still trails baseline
+(-0.02) with worse precision, so the "gaussian strictly worse at high top_k" finding
+directionally stands.
+
+Costs, honestly: gaussian tokens rose ~40% on vague queries (2 extra injected rows) —
+at k=8 gaussian spends ~6x baseline tokens on this set. Precision is unchanged-to-worse
+(0.07 vs 0.12 at k=8). The vague-set win is recall-only, driven by 1–2 queries in a
+12-query set; the overlap-first slot ranking was designed while staring at q34 and then
+validated on q02/q18/q30 (main set) — a held-out vague v2 set is needed before claiming
+generality. Token counts are now derived from structured row texts (excludes
+[DOMAIN:]/Summary framing), so ratios are not directly comparable to 2026-07-08's.
+
+### Remaining misses, fully explained
+
+- q33/q42/q43/q44: pure register misses (above) — not fixable by candidate-source or
+  ranking work; needs either query/memory register normalization at embed time or
+  keyword-OR recall (FTS with OR semantics) as a candidate source.
+- q38 unit0 (baseline wins 2/2 vs gaussian 1/2): traced — the distinct client-id
+  memory survives scoring, dedup, and σ-gate, then the **diversity cap** cuts it as
+  the 4th member of the same micro-cluster. Dedup itself is fine (u1a collapses into
+  the survivor, credited by id). Real design tension: the cap trades multi-fact recall
+  within one on-topic cluster for diversity.
+- q39 unit1: second rebuild memory never in candidate pool at k≤16 (not probed deeper).
+
+### Still open
+
+1. Diversity cap vs on-topic clusters (q38 u0) — consider relaxing `clusterLimit` when
+   candidates are topically on-query, or exempting temporal-guarantee appendees the
+   same way the injected guarantee now is (the temporal guarantee has the same
+   silent-re-drop bug, unfixed).
+2. Register misses (q33/q42/q43/q44) — the actual embedding-space problem, untouched
+   by everything above. Candidate ideas: OR-semantics keyword recall, casual-register
+   query expansion (no-LLM constraint makes this hard), or storing a casual-register
+   text variant alongside the formal one at write time.
+3. q30's k=8 vs k=4/16 asymmetry (gained at 4 and 16, not at 8) — unexplained
+   pool-width/floor interaction, low priority.
+4. Vague gold v2: re-author q42/q44 (stale/ambiguous gold), grow n beyond 12 so a
+   single query stops being worth 0.08 recall.
+5. High-top_k precision: gaussian still trails baseline recall at k=16/24 with ~2x
+   tokens on the main set — the floor-widens-with-k interaction from 2026-07-08
+   remains the suspect, now cleanly measurable with the trace tooling.
+
+---
+
 # Part 2 — Landscape Research (reference, compiled June 15, 2026)
 
 ---
