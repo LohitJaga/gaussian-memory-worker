@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  RRF_K, rrfMerge, minMaxNormalize, tokenize, jaccardSimilarity,
+  RRF_K, rrfMerge, minMaxNormalize, normalizeCosineBatch, tokenize, jaccardSimilarity,
   dedupBySimilarity, sigmaGate, applyDiversityCap, DEDUP_COS, projectScopeClause,
 } from './retrieval';
 
@@ -80,6 +80,44 @@ describe('minMaxNormalize', () => {
     const result = minMaxNormalize([10, 2, 6]);
     expect(result[1]).toBeLessThan(result[2]);
     expect(result[2]).toBeLessThan(result[0]);
+  });
+});
+
+// ── normalizeCosineBatch ─────────────────────────────────────────────────
+
+describe('normalizeCosineBatch', () => {
+  const real = (v: number) => ({ cosineWeighted: v, syntheticCos: null });
+  const synth = (v: number) => ({ cosineWeighted: 0, syntheticCos: v });
+
+  it('matches minMaxNormalize exactly when no candidate is synthetic', () => {
+    expect(normalizeCosineBatch([real(1), real(5), real(10)])).toEqual(minMaxNormalize([1, 5, 10]));
+  });
+
+  it('gives an injected candidate its synthetic value as the post-normalization score', () => {
+    // Regression for the 2026-07-08 audit finding #3: with real hits at 0.55–0.70 a
+    // synthetic 0.45 was the batch min and normalized to 0 — structurally unrankable.
+    const out = normalizeCosineBatch([real(0.70), real(0.62), real(0.55), synth(0.45), synth(0.35)]);
+    expect(out[3]).toBe(0.45);
+    expect(out[4]).toBe(0.35);
+    // and it must land mid-pack, not at the floor: strictly above the worst real hit (0)
+    expect(out[3]).toBeGreaterThan(out[2]);
+    expect(out[3]).toBeLessThan(out[0]);
+  });
+
+  it('excludes synthetic values from the real candidates\' min-max range', () => {
+    // Real range is [0.6, 0.8]; the synthetic 0.1 must NOT drag the real min down.
+    const out = normalizeCosineBatch([real(0.8), real(0.6), synth(0.1)]);
+    expect(out[0]).toBe(1);
+    expect(out[1]).toBe(0); // 0.6 is still the real min → 0, unaffected by the 0.1 synthetic
+    expect(out[2]).toBe(0.1);
+  });
+
+  it('handles an all-synthetic batch (temporal/cluster-only candidate set)', () => {
+    expect(normalizeCosineBatch([synth(0.5), synth(0.35)])).toEqual([0.5, 0.35]);
+  });
+
+  it('handles an empty batch', () => {
+    expect(normalizeCosineBatch([])).toEqual([]);
   });
 });
 
