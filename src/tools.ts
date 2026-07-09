@@ -1560,7 +1560,17 @@ Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
         try {
           const match = raw.match(/\[[\s\S]*\]/);
           if (!match) return { raw, entities: [], parseError: '' };
-          return { raw, entities: JSON.parse(match[0]) as string[], parseError: '' };
+          const parsed = JSON.parse(match[0]);
+          // Validate shape here, not `as string[]` — a cast is compile-time only and
+          // doesn't stop the model from emitting the old array-of-arrays form, numbers,
+          // or other junk. Without this, a malformed entity reaches ent.split(':') in
+          // the write loop below with no try/catch around it, throws uncaught, and
+          // wedges this batch forever since the KV offset never advances on a throw.
+          // Silently drop non-string entries instead — matches this function's existing
+          // pattern of degrading gracefully (e.g. `if (!type || !name) continue`) rather
+          // than failing the whole batch over one bad entity.
+          const entities = Array.isArray(parsed) ? parsed.filter((e): e is string => typeof e === 'string') : [];
+          return { raw, entities, parseError: '' };
         } catch (e) {
           return { raw, entities: [], parseError: String(e) };
         }
