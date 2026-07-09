@@ -185,10 +185,9 @@ export async function baselineRetrieve(
   const rowMap = new Map((rows.results ?? []).map(r => [r.id, r]));
   const scoreMap = new Map(matches.map(m => [m.id, m.score]));
   return ids
-    .filter(id => rowMap.has(id))
-    .map(id => {
-      const r = rowMap.get(id)!;
-      return { id, score: scoreMap.get(id) ?? 0, text: r.text, domain: r.domain, type: r.memory_type };
+    .flatMap(id => {
+      const r = rowMap.get(id);
+      return r ? [{ id, score: scoreMap.get(id) ?? 0, text: r.text, domain: r.domain, type: r.memory_type }] : [];
     })
     .sort((a, b) => b.score - a.score);
 }
