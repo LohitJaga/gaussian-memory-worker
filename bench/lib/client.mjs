@@ -62,7 +62,7 @@ export async function callTool(name, args, { url, token }) {
 // Parse a memory_retrieve text block (tools.ts fmt: "[score] (domain/type)[ ~] conf text")
 // into structured rows. `~` = spreading-activation hit; conf glyph ●/◑/○ maps to a sigma band.
 // [DOMAIN: x] / Summary: headers are skipped. No IDs are available on this path — callers
-// that need ID-level matching should switch to the optional /bench/retrieve endpoint.
+// that need ID-level matching should use retrieveStructured() (/bench/retrieve) below.
 const LINE_RE = /^\[(\d+\.\d+)\]\s+\(([^/]+)\/([^)]+)\)(\s+~)?\s*([●◑○])?\s*(.*)$/;
 
 export function parseRetrieval(text) {
@@ -84,6 +84,38 @@ export function parseRetrieval(text) {
     });
   }
   return rows;
+}
+
+// Structured retrieval via POST /bench/retrieve — returns rows WITH memory ids, so
+// scoring can match against gold_ids instead of substring-matching display text.
+// frozen defaults to true server-side: bench trials do not sharpen sigma or bump
+// access_count. rows: [{ id, score, text, domain, type, activated?, sigma? }].
+// `text` here is the raw memory text (plus any [SUPERSEDED]/[CONTRADICTED] prefix),
+// NOT the full agent-facing block — token counts derived from it exclude the
+// [DOMAIN:]/Summary:/[SYNTHESIS] framing lines (roughly constant overhead).
+export async function retrieveStructured(query, { top_k = 8, domain, project, strict_project, baseline, frozen = true } = {}, env) {
+  const payload = { query, top_k, frozen };
+  if (domain) payload.domain = domain;
+  if (project) payload.project = project;
+  if (strict_project) payload.strict_project = true;
+  if (baseline) payload.baseline = true;
+  const t0 = performance.now();
+  let json;
+  try {
+    const resp = await fetch(new URL('/bench/retrieve', env.url), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.token}` },
+      body: JSON.stringify(payload),
+    });
+    json = await resp.json();
+    if (!resp.ok || json.error) {
+      return { rows: [], latencyMs: performance.now() - t0, ok: false, error: json.error ?? `HTTP ${resp.status}` };
+    }
+  } catch (e) {
+    return { rows: [], latencyMs: performance.now() - t0, ok: false, error: String(e) };
+  }
+  const rows = (json.rows ?? []).map((r, i) => ({ ...r, rank: i + 1 }));
+  return { rows, latencyMs: performance.now() - t0, ok: true, mode: json.mode, frozen: json.frozen };
 }
 
 // Convenience: retrieve + parse in one call. baseline:true hits the Stage B naive

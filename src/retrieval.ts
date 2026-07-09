@@ -135,7 +135,7 @@ export function projectScopeClause(project: string, strictProject = false): { cl
 // only needs to exist for the benchmark harness's baseline-vs-Gaussian comparison.
 export async function baselineRetrieve(
   query: string, topK: number, env: Env, project: string = 'default', strictProject = false
-): Promise<{ score: number; text: string; domain: string; type: string }[]> {
+): Promise<{ id: string; score: number; text: string; domain: string; type: string }[]> {
   if (!query?.trim()) return [];
 
   const qvec = await embed(query, env);
@@ -158,15 +158,21 @@ export async function baselineRetrieve(
     .filter(id => rowMap.has(id))
     .map(id => {
       const r = rowMap.get(id)!;
-      return { score: scoreMap.get(id) ?? 0, text: r.text, domain: r.domain, type: r.memory_type };
+      return { id, score: scoreMap.get(id) ?? 0, text: r.text, domain: r.domain, type: r.memory_type };
     })
     .sort((a, b) => b.score - a.score);
 }
 
 export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default',
-  strictProject = false
-): Promise<{ score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
+  strictProject = false,
+  // frozen: read-only trial — skips the sigma-sharpen / access_count / hot-tier write-backs
+  // at the end of the pipeline. Live agent calls keep the default (false): reinforcement on
+  // access is the product behavior. The bench endpoint sets true so repeated benchmark runs
+  // are clean trials instead of training the ranker toward whatever the benchmark touched
+  // (confirmed contamination, BENCHMARKING.md 2026-07-08 audit finding #5).
+  opts: { frozen?: boolean } = {}
+): Promise<{ id: string; score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
   if (!query?.trim()) return [];
 
@@ -704,25 +710,28 @@ export async function retrieve(
   // Sharpen accessed memories + record history if σ changed meaningfully.
   // Batched: previously one UPDATE (+ optional INSERT) + one KV read-modify-write
   // per memory — N+1 D1 round-trips and racy KV writes on every retrieve.
-  const now = Math.floor(Date.now() / 1000);
-  const writeStmts: D1PreparedStatement[] = [];
-  for (const mem of postDiversity) {
-    const domSize = domainSizeMap.get(mem.domain) ?? 10;
-    const newSigma = sharpenSigma(mem.sigma, 0.85, 0.15, mem.contradiction, domSize);
-    writeStmts.push(env.DB.prepare(
-      'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
-    ).bind(now, serializeSigma(newSigma), mem.id));
-    // Record sigma history if it moved by more than 0.05 — avoids spammy writes on tiny changes
-    const oldMean = meanSigma(mem.sigma);
-    const newMean = meanSigma(newSigma);
-    if (Math.abs(newMean - oldMean) >= 0.05) {
+  // Skipped entirely under opts.frozen (benchmark trials must not mutate the store).
+  if (!opts.frozen) {
+    const now = Math.floor(Date.now() / 1000);
+    const writeStmts: D1PreparedStatement[] = [];
+    for (const mem of postDiversity) {
+      const domSize = domainSizeMap.get(mem.domain) ?? 10;
+      const newSigma = sharpenSigma(mem.sigma, 0.85, 0.15, mem.contradiction, domSize);
       writeStmts.push(env.DB.prepare(
-        'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
-      ).bind(crypto.randomUUID(), mem.id, newMean, 'sharpen', now));
+        'UPDATE memories SET last_accessed = ?, access_count = access_count + 1, sigma_diagonal = ? WHERE id = ?'
+      ).bind(now, serializeSigma(newSigma), mem.id));
+      // Record sigma history if it moved by more than 0.05 — avoids spammy writes on tiny changes
+      const oldMean = meanSigma(mem.sigma);
+      const newMean = meanSigma(newSigma);
+      if (Math.abs(newMean - oldMean) >= 0.05) {
+        writeStmts.push(env.DB.prepare(
+          'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
+        ).bind(crypto.randomUUID(), mem.id, newMean, 'sharpen', now));
+      }
     }
+    if (writeStmts.length) await env.DB.batch(writeStmts).catch(() => {});
+    await hotTierAddMany(postDiversity.map(m => m.id), env); // hot tier = recently accessed, not recently stored
   }
-  if (writeStmts.length) await env.DB.batch(writeStmts).catch(() => {});
-  await hotTierAddMany(postDiversity.map(m => m.id), env); // hot tier = recently accessed, not recently stored
 
   // Check memory_relations: mark superseded memories so caller knows they've been replaced
   const topIds = postDiversity.map(m => m.id);
@@ -743,6 +752,7 @@ export async function retrieve(
       ? `[SUPERSEDED] ${m.text}`
       : m.contradiction ? `[CONTRADICTED — re-evaluate] ${m.text}` : m.text;
     return {
+      id: m.id,                                      // internal/bench only — tools.ts text format never prints it
       score: m.score,
       text: baseText,
       domain: m.domain,                              // clean — used for KV summary lookup
