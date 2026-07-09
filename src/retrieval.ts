@@ -261,53 +261,63 @@ export async function retrieve(
   // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
   const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
 
-  // EXPERIMENTAL (2026-07-08): neighborhood routing for vague queries only. Proven via
-  // bench/gold/retrieval_gold.vague.json that a casual/vague query can rank the true
-  // answer beyond even a 50-candidate cosine window against the full ~4,700-memory
-  // corpus (register mismatch — casual phrasing embeds closer to other casual-toned
-  // memories than to the formally-worded fact that answers it). MICRO_VECTORIZE holds
-  // ~2,500-2,900 fine-grained cluster centroids, previously write-time-only (assignMicroCluster)
-  // and never consulted during search. Route the query to its nearest few centroids and
-  // pull in their member memories as ADDITIONAL candidates — additive, not a replacement,
-  // so precise queries (which already work well) are untouched.
-  // entityTokens.length === 0 is the gate signal: no recognized specific/named term in
-  // the query is exactly the profile this routing exists for. (Initially gated on
-  // querySigmaVal > 0.5, which never fired — short casual queries only ever compute
-  // ~0.4-0.45 under the current formula, confirmed against all 12 vague gold queries.)
-  const useClusterRouting = querySigmaVal > 0.35 || entityTokens.length === 0;
-
   // EXPERIMENTAL (2026-07-08), 4th candidate source: pure access-frequency ranking,
-  // zero embeddings involved. Cluster-routing (above) still operates inside cosine
-  // space via MICRO_VECTORIZE centroids, so it inherits the same register-mismatch
-  // risk as raw cosine — this one sidesteps embeddings entirely. Heavily-reinforced
-  // memories (high access_count) are pulled in directly for vague queries, on the
-  // premise that a vague reference is more likely pointing at something you've
-  // actually discussed a lot, independent of whether the query's WORDING embeds
-  // anywhere near it.
-  const [vecFinal, ftsResults, clusterMemberRows, hotAccessRows] = await Promise.all([
+  // zero embeddings involved. Heavily-reinforced memories (high access_count) are
+  // pulled in directly for vague queries, on the premise that a vague reference is
+  // more likely pointing at something you've actually discussed a lot, independent
+  // of whether the query's WORDING embeds anywhere near it. Kept always-on (not
+  // fallback-gated like cluster-routing below): single cheap D1 query, and it has a
+  // confirmed real win (q34) at that low cost — cluster-routing's cost/benefit case
+  // was much weaker (see below), access-frequency's wasn't.
+  // Project-scoped as of 2026-07-09 (audit finding): this query had no project
+  // filter at all, unlike every other query in this file — for multi-project
+  // accounts, "top 20 by access_count" was pulling globally-hot ids from whatever
+  // project dominates total activity, which then silently got dropped at the
+  // project-scoped row fetch below. Harmless (no cross-project leak, since the row
+  // fetch always filters), but wasteful and meant this source could contribute
+  // nothing useful for any project other than the dominant one.
+  const useAccessFrequency = querySigmaVal > 0.35 || entityTokens.length === 0;
+  const { clause: afClause, param: afParam } = projectScopeClause(project, strictProject);
+  const afBinds = afParam ? [afParam] : [];
+
+  const [vecFinal, ftsResults, hotAccessRows] = await Promise.all([
     env.VECTORIZE.query(Array.from(qvec), queryOpts),
     ftsQuery.length >= 3
       ? env.DB.prepare(
           `SELECT id, -bm25(memories_fts) as bm25_score FROM memories_fts WHERE memories_fts MATCH ? AND (project = ? OR project = 'default') ORDER BY rank LIMIT ?`
         ).bind(ftsQuery, project, topK * 4).all<{ id: string; bm25_score: number }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] as { id: string; bm25_score: number }[] }),
-    useClusterRouting
-      ? env.MICRO_VECTORIZE.query(Array.from(qvec), { topK: 3, returnMetadata: 'none' })
-          .then(async (r: any) => {
-            const clusterIds = (r.matches ?? []).map((m: any) => m.id);
-            if (!clusterIds.length) return { results: [] as { id: string }[] };
-            const placeholders = clusterIds.map(() => '?').join(',');
-            return env.DB.prepare(`SELECT id FROM memories WHERE cluster_id IN (${placeholders}) LIMIT 30`)
-              .bind(...clusterIds).all<{ id: string }>().catch(() => ({ results: [] }));
-          })
-      : Promise.resolve({ results: [] as { id: string }[] }),
-    useClusterRouting
-      ? env.DB.prepare(`SELECT id FROM memories ORDER BY access_count DESC LIMIT 20`)
-          .all<{ id: string }>().catch(() => ({ results: [] }))
+    useAccessFrequency
+      ? env.DB.prepare(`SELECT id FROM memories WHERE 1=1 ${afClause} ORDER BY access_count DESC LIMIT 20`)
+          .bind(...afBinds).all<{ id: string }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] as { id: string }[] }),
   ]);
-  const clusterRoutedIds = (clusterMemberRows.results ?? []).map(r => r.id);
   const hotAccessIds = (hotAccessRows.results ?? []).map(r => r.id);
+
+  // Cluster-routing (MICRO_VECTORIZE search-time consultation) — REMOVED 2026-07-09.
+  // Two design attempts, both failed for principled reasons, not just bad luck:
+  // (1) 2026-07-08, always-on for no-entity queries: theorized that cluster centroids
+  //     could bridge the register-mismatch gap. Wrong — centroids are themselves built
+  //     via cosine proximity (microcluster.ts's assignMicroCluster), so a query too far
+  //     from a target in cosine space is generally also too far from that target's
+  //     cluster centroid. No independent signal, just cosine-to-a-different-point.
+  // (2) 2026-07-09, confidence-gated fallback (fire only when the primary fetch's top
+  //     real cosine hit is weak): wrong signal for what this actually helps with.
+  //     Traced empirically: cluster-routing's one unique contribution across all 12
+  //     vague gold queries (q36) is a topical-crowding case — several similar memories
+  //     compete and the target gets buried, but the WINNING (wrong) competitor still
+  //     scores a confident top-1 cosine hit (0.81 for q36). Crowding produces a
+  //     confident-but-wrong top score, not a weak one, so "weak top score" as a trigger
+  //     never fires for the one case it was built for.
+  // A correct version would need a genuinely different signal (score concentration
+  // across top-N, not top-1 magnitude) — real design work, for a mechanism whose best
+  // case across the entire vague gold set is 1 of 12 queries. Not worth it: cutting
+  // this returns these queries to the already-validated baseline (0.42-0.50 vague
+  // recall via harness fixes + access-frequency), not a regression from anything real.
+  // (assignMicroCluster's WRITE-time cluster assignment in microcluster.ts is
+  // unrelated and untouched — only the search-time consultation added yesterday is
+  // being removed.)
+  const clusterRoutedIds: string[] = [];
 
   // BM25 score map — negated so higher = better match (FTS5 rank is negative)
   const bm25Map = new Map<string, number>();
@@ -402,7 +412,7 @@ export async function retrieve(
   }
 
   // Merge IDs for D1 fetch — hot tier first, then temporal candidates, then vector/fts,
-  // then cluster-routed candidates (vague queries only — see useClusterRouting above).
+  // (cluster-routing removed 2026-07-09 — clusterRoutedIds is always [] now, see above).
   const clusterOnlyIds = clusterRoutedIds.filter(id => !results.matches.some(m => m.id === id));
   const hotAccessOnlyIds = hotAccessIds.filter(id => !results.matches.some(m => m.id === id));
   const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds, ...hotAccessOnlyIds])].slice(0, 120);

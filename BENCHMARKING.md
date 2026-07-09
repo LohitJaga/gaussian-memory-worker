@@ -365,11 +365,141 @@ generality. Token counts are now derived from structured row texts (excludes
    text variant alongside the formal one at write time.
 3. q30's k=8 vs k=4/16 asymmetry (gained at 4 and 16, not at 8) — unexplained
    pool-width/floor interaction, low priority.
-4. Vague gold v2: re-author q42/q44 (stale/ambiguous gold), grow n beyond 12 so a
-   single query stops being worth 0.08 recall.
+4. Vague gold v2: re-author q42 (genuinely ambiguous — multiple valid "scoring fix"
+   answers exist) so a single query stops being worth 0.08 recall. q44 is NOT stale —
+   corrected below, see 2026-07-09 evening session.
 5. High-top_k precision: gaussian still trails baseline recall at k=16/24 with ~2x
    tokens on the main set — the floor-widens-with-k interaction from 2026-07-08
-   remains the suspect, now cleanly measurable with the trace tooling.
+   remains the suspect, now cleanly measurable with the trace tooling. Untouched by
+   the 2026-07-09 evening session below.
+
+---
+
+## Session log — 2026-07-09 evening: close-read audit of both gold sets, cluster-routing removed
+
+Prompted by a simple question worth repeating: does a failing recall NUMBER actually
+mean the retrieved answer was wrong, or does it just mean it didn't literal-match
+gold's exact string? Nobody had actually read the raw response text end-to-end before
+today — every prior session trusted the mechanical scorer's aggregate output. Doing
+that for real changed several conclusions from the 2026-07-08/09 morning sessions.
+
+### Vague set (12 queries) — re-diagnosed with hard evidence, not inference
+
+- **q33** ("why'd we go with that db thing again" → PlanetScale comparison): the
+  underlying memory is real (created 2026-06-04, technically accurate — PlanetScale
+  genuinely isn't edge-native), but almost certainly captures Claude's own reasoning
+  during an early architecture discussion, not a decision the user ever consciously
+  weighed. The query itself is unnatural — no real version of the user would ask to
+  recall a decision he never felt he made. Still a mechanical miss, weaker evidence
+  of a real retrieval gap than it looked.
+- **q40** (Mem0 differentiator): confirmed low-priority — authored in early June,
+  before the storage pipeline was reliable. Not touched further.
+- **q42** (scoring fix): confirmed genuinely ambiguous — multiple scoring fixes exist
+  in the corpus, gold's match_text is a bare number range with no words. Bad gold,
+  not a system defect.
+- **q44** ("when am i trying to ship this" → "finish before august"): **the prior
+  session's staleness claim was WRONG.** Checked real timestamps: "ship status
+  remains delayed, no new ship date" was created 2026-07-06 13:39; "finish Gaussian
+  Memory before August" was created 2026-07-06 20:41 — seven hours LATER, same day.
+  Gold is the more recent belief, not the stale one. This is a genuine retrieval
+  miss, not a bad-gold case — corrects the 2026-07-08 audit.
+- **q43** (confidence-tracking, zero shared words with gold): the #1 wrong result
+  ("Emotional intensity above 0.7 halves initial uncertainty...") looked like noise
+  by domain tag (personal-life-style) but is REAL, accurate system logic
+  (`gaussian.ts:75`, `if (emotionalIntensity > 0.7) base *= 0.5`) — a correct,
+  complementary answer mis-domained by domain-bleed, not garbage. The only clean,
+  fully-uncontested miss left in the set once every other one was actually checked.
+
+Net: of the 5 originally-flagged vague failures, 1 was already fixed (q34), 2 were
+bad gold (q40 low-priority, q42), 1 was a wrong staleness claim now corrected to a
+real miss (q44), and 1 is genuinely hard with no confound (q43).
+
+### Main set (v1: 26 queries, multihop: 6 queries) — same treatment, same pattern
+
+Full query/gold/top-3-response dump for every miss (not just aggregate pass/fail) —
+see `bench/tools/inspect_all.mjs`, usage: `node bench/tools/inspect_all.mjs <gold
+files> ` (env `MISSES_ONLY=1` to filter, `BASELINE=1` to run baseline mode instead of
+gaussian). Of 9 flagged misses (q06, q09, q10, q26, q27, q28, q29, q30, q31), 6 had
+the correct fact sitting in the top 3 responses, just phrased differently than gold's
+exact string (q09, q10, q28, q29, q30, q31) — scorer brittleness, not retrieval
+failure. Two hold up as real: **q26** (repo path — genuinely absent from top 3) and
+**q27**, which is confounded twice over — the query itself is unnatural (no real
+agent asks "what techniques make up your own retrieval pipeline" mid-task) AND its
+top-1 result was Claude's own past commentary text outranking the actual documented
+fact (buried at rank 3) — a real ranking-quality concern independent of the query's
+naturalness.
+
+**Baseline (naive cosine) got the same treatment, not just Gaussian — this matters:**
+re-ran `bench/tools/inspect_all.mjs` with `BASELINE=1` against the same two gold
+files. Baseline has MORE raw misses (10 vs 9) and, critically, does NOT get the same
+rescue on close reading: q05, q16, q18, q27 return either nothing relevant or a
+conflicting/wrong fact in the top 3 (not just differently-worded correct answers).
+Conclusion: the brittle-scorer problem cuts asymmetrically — Gaussian's richer
+candidate sources (BM25 fusion, dedup, entity graph) surface correct-but-differently-
+worded answers more often, which the strict scorer then wrongly zeroes; baseline's
+narrower approach more often returns genuinely nothing. The TRUE gap between Gaussian
+and baseline is at least as large as the raw scored numbers show, likely larger.
+
+**Version-integrity check, since this determines whether any of the above is even
+valid:** confirmed the deployed worker matches the code being read (the `/bench/
+retrieve` trace's `guaranteedInjected` field only exists because of 2026-07-09
+morning's guarantee-slot code — its presence in live traces proves that code is
+live, independent of `wrangler deployments list`'s timestamp ordering, which looked
+inconsistent but isn't a reliable signal). Separately confirmed the entity-token gate
+means the cluster-routing/access-frequency machinery never fires for most v1/multihop
+queries at all (they're mostly entity-bearing) — so the v1/multihop "mostly correct"
+finding is validated against the STABLE core retrieval, independent of whatever gets
+decided about experiments 3/4 below.
+
+### Cluster-routing (experiment 3): two failed redesigns, then removed
+
+Given cluster-routing's thin justification (from the 2026-07-09 morning session:
+1 of 12 vague queries, q36, uniquely rescued by it), attempted to re-gate it as a
+fallback instead of always-on, to cut its per-query cost (extra Vectorize + D1 query
+on every no-entity query) down to only the cases it might actually help.
+
+**Attempt 1** (confidence-gated: fire only when the primary fetch's best real cosine
+hit is weak, threshold 0.55) — implemented, unit-tested (5 new tests, all passing),
+deployed, and it broke q36 on live re-verification. Root cause, confirmed via a new
+`topRealCosine`/`clusterFallbackTriggered` trace field added specifically to debug
+this: q36's top real cosine hit is 0.81 — a CONFIDENT score, nowhere near the
+threshold. The theory that crowding produces a weak top score was wrong: crowding
+produces a confident-but-WRONG top score (several similar "LeetCode goal" memories
+compete; one of them, not the right one, matches well enough to look confident). A
+single top-1 magnitude check can't distinguish "one correct dominant match" from
+"one wrong dominant match with the real target buried one rank down" — they look
+identical on that one number.
+
+**Attempt 2** would need a genuinely different signal — score concentration across
+the top-N (many close-together strong scores = crowding signature), not top-1
+magnitude. Real, more involved design work, for a mechanism whose ceiling across the
+entire 12-query vague set is 1 confirmed win. Decision: not worth a second design
+iteration for that ceiling — **cluster-routing (the search-time MICRO_VECTORIZE
+consultation) is removed entirely**, both attempts' code reverted. This returns the
+vague set to the already-validated baseline (0.42-0.50 recall via harness fixes +
+access-frequency) — not a regression, just walking back a detour. (`assignMicroCluster`'s
+WRITE-time cluster assignment in `microcluster.ts` is unrelated and untouched — only
+the search-time consultation is gone.)
+
+### What was kept
+
+- **Access-frequency (experiment 4)**: unchanged trigger (`querySigmaVal > 0.35 ||
+  entityTokens.length === 0`), still has its one confirmed win (q34) at low cost
+  (single D1 query, no chained second query).
+- **Project-scoping fix**: the access-frequency query (`SELECT id FROM memories
+  ORDER BY access_count DESC LIMIT 20`) had no project filter at all, unlike every
+  other query in the file — for multi-project accounts, this meant "top 20 by
+  access_count" pulled globally-hot ids from whichever project dominates total
+  activity, silently dropped later at the project-scoped row fetch. No leak (row
+  fetch was always scoped), but wasteful, and meant the source could contribute
+  nothing for any project other than the dominant one. Fixed — now scoped like
+  everything else.
+
+### Still open (unchanged from 2026-07-09 morning, not addressed today)
+
+Diversity cap vs on-topic clusters (q38 u0), the register misses (q33 unnatural
+query, q43 genuine), q30's k=8 asymmetry, high-top_k precision on the main set. None
+of today's work touched these.
 
 ---
 
