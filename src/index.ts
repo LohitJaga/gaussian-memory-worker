@@ -7,6 +7,7 @@ import {
   cronRebuildBatch, synthesizeIdentityProfile, consolidateColdMemories,
 } from './cron';
 import { processPendingEntityQueue } from './storage';
+import { retrieve, baselineRetrieve } from './retrieval';
 
 export type { Env };
 
@@ -102,6 +103,35 @@ export default {
         status: 400, headers: JSON_HEADERS,
       });
     }
+    // Bench-only structured retrieval endpoint (referenced by bench/lib/client.mjs).
+    // Returns raw JSON rows WITH memory ids so the harness can score by gold_ids instead
+    // of substring-matching the agent-facing text (which mis-scored correct dedup
+    // survivors — BENCHMARKING.md 2026-07-08 audit finding #2). The agent-facing
+    // tools/call text format is deliberately untouched. frozen defaults to TRUE here:
+    // benchmark trials must not sharpen sigma / bump access_count (audit finding #5);
+    // pass frozen:false explicitly to opt back into live-mutating behavior.
+    if (url.pathname === '/bench/retrieve') {
+      const q = body ?? {};
+      if (typeof q.query !== 'string' || !q.query.trim()) {
+        return new Response(JSON.stringify({ error: 'query (string) is required' }), { status: 400, headers: JSON_HEADERS });
+      }
+      const topK = Number(q.top_k) || 8;
+      const frozen = q.frozen !== false;
+      try {
+        const rows = q.baseline === true
+          ? await baselineRetrieve(q.query, topK, env, q.project ?? 'default', q.strict_project === true)
+          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen });
+        return new Response(JSON.stringify({
+          mode: q.baseline === true ? 'baseline' : 'gaussian',
+          frozen: q.baseline === true ? true : frozen, // baseline path never mutates regardless
+          top_k: topK,
+          rows,
+        }), { headers: JSON_HEADERS });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
+      }
+    }
+
     const { method, params, id } = body;
 
     // MCP notifications have no id — must return 202 with no body
