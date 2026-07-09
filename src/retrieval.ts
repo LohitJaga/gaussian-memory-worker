@@ -47,6 +47,30 @@ export function minMaxNormalize(arr: number[]): number[] {
   return mx === mn ? arr.map(() => 1) : arr.map(v => (v - mn) / (mx - mn));
 }
 
+// Cosine normalization with injected-candidate exemption (2026-07-09, audit finding #3).
+// Candidates injected by non-cosine sources (temporal window, cluster routing, access
+// frequency) carry a SYNTHETIC placeholder cosine, not a real query similarity. Running
+// those through the same min-max as real cosine hits crushed them to ~0 — real hits
+// cluster in a narrow high band (≈0.55–0.70), so a synthetic 0.35–0.5 was always the
+// batch minimum and normalized to 0 before the score floor could ever let it surface,
+// making the cluster-routing and access-frequency experiments structurally unable to
+// move any result. Fix: min-max only the real-cosine candidates against each other;
+// injected candidates receive their synthetic value directly as the POST-normalization
+// score (0.5 temporal > 0.45 cluster > 0.35 access — mid-pack by design: they should
+// compete on their own boosts, not win or lose on a fake cosine).
+export function normalizeCosineBatch(items: { cosineWeighted: number; syntheticCos: number | null }[]): number[] {
+  const realIdx: number[] = [];
+  for (let i = 0; i < items.length; i++) if (items[i].syntheticCos === null) realIdx.push(i);
+  const realNorm = minMaxNormalize(realIdx.map(i => items[i].cosineWeighted));
+  const out = new Array<number>(items.length).fill(0);
+  realIdx.forEach((i, j) => { out[i] = realNorm[j]; });
+  for (let i = 0; i < items.length; i++) {
+    const s = items[i].syntheticCos;
+    if (s !== null) out[i] = s;
+  }
+  return out;
+}
+
 export const DEDUP_COS = 0.85, DEDUP_TEXT = 0.72;
 
 export function tokenize(s: string): Set<string> {
@@ -386,16 +410,15 @@ export async function retrieve(
   }>();
 
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
-  // Temporal hits have no cosine (not from Vectorize) — synthetic 0.5 baseline so bhattMultiplier
-  // doesn't zero them out. They win/lose on temporalBoost + access + recency.
-  for (const id of temporalOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.5); }
-  // Cluster-routed hits similarly have no direct query cosine — slightly below temporal's
-  // baseline since cluster membership is a weaker relevance signal than an explicit date cue.
-  for (const id of clusterOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.45); }
-  // Access-frequency hits have no embedding relation to the query at all by construction
-  // (that's the point) — lowest synthetic baseline of the three, they win purely on
-  // accessFreq/recency scoring components, not on pretending to be topically close.
-  for (const id of hotAccessOnlyIds) { if (!cosineMap.has(id)) cosineMap.set(id, 0.35); }
+  // Injected candidates (no real query cosine) get a SYNTHETIC score, kept in a separate
+  // map so normalization can exempt them (see normalizeCosineBatch — running these through
+  // min-max alongside real hits crushed them to ~0 and made the injection sources no-ops).
+  // Temporal 0.5 > cluster-routed 0.45 (membership is weaker evidence than a date cue) >
+  // access-frequency 0.35 (zero embedding relation by construction — wins on its boosts).
+  const syntheticCosMap = new Map<string, number>();
+  for (const id of temporalOnlyIds) { if (!cosineMap.has(id)) syntheticCosMap.set(id, 0.5); }
+  for (const id of clusterOnlyIds) { if (!cosineMap.has(id) && !syntheticCosMap.has(id)) syntheticCosMap.set(id, 0.45); }
+  for (const id of hotAccessOnlyIds) { if (!cosineMap.has(id) && !syntheticCosMap.has(id)) syntheticCosMap.set(id, 0.35); }
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
   // Cluster cohesion: batch-fetch entity links for all candidates in one D1 query.
@@ -455,17 +478,20 @@ export async function retrieve(
   const rawCandidates = qualityRows.map(row => {
     const memSigma = deserializeSigma(row.sigma_diagonal);
     const cosineSim = cosineMap.get(row.id) ?? 0;
+    const syntheticCos = syntheticCosMap.get(row.id) ?? null;
     const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
     const recency = Math.max(0, 1 - (nowSec - lastAccessed) / NINETY_DAYS);
     const accessFreq = Math.min(1, Math.log1p(row.access_count ?? 0) / Math.log1p(50));
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
     const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
     const bm25Raw = bm25Map.get(row.id) ?? 0;
-    return { row, memSigma, cosineWeighted, recency, accessFreq, bm25Raw };
+    return { row, memSigma, cosineWeighted, syntheticCos, recency, accessFreq, bm25Raw };
   });
 
-  // Min-max normalization within batch — spreads scores across [0,1] per component
-  const normCosine = minMaxNormalize(rawCandidates.map(c => c.cosineWeighted));
+  // Min-max normalization within batch — spreads scores across [0,1] per component.
+  // Cosine: real hits min-max against each other; injected candidates keep their
+  // synthetic value as the post-normalization score (see normalizeCosineBatch).
+  const normCosine = normalizeCosineBatch(rawCandidates);
   const normRecency = minMaxNormalize(rawCandidates.map(c => c.recency));
   const normAccess = minMaxNormalize(rawCandidates.map(c => c.accessFreq));
   // BM25: if all candidates have zero score (no FTS5 hits), return zeros — not ones.
