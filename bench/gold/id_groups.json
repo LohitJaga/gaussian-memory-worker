@@ -1,0 +1,518 @@
+{
+  "generated_by": "bench/tools/derive_id_groups.mjs",
+  "generated_at": "2026-07-09T14:04:19.349Z",
+  "note": "Maps each gold query to units: one group per match_text, with the gold_ids whose live D1 text answers it. Containment assignment when possible, token-overlap fallback otherwise (fallbacks + missing ids listed in stderr at generation time). Frozen gold files untouched.",
+  "missing_ids": [],
+  "queries": {
+    "q01": {
+      "groups": [
+        {
+          "match_text": "chose cloudflare d1 over planetscale",
+          "ids": [
+            "56ab6cee-d7e8-48ee-b7bc-846b8af28aec"
+          ]
+        }
+      ]
+    },
+    "q02": {
+      "groups": [
+        {
+          "match_text": "chose bayesian gaussian model over key-value store",
+          "ids": [
+            "7f1d422a-d7f9-4f2d-839f-766c3fa83e20"
+          ]
+        }
+      ]
+    },
+    "q03": {
+      "groups": [
+        {
+          "match_text": "l'oreal internship started may 19 2026",
+          "ids": [
+            "2bf987fb-e9f7-47e7-85bc-f9ba5e2e6323"
+          ]
+        }
+      ]
+    },
+    "q04": {
+      "groups": [
+        {
+          "match_text": "switched glm",
+          "ids": [
+            "d64264e3-9a9c-490c-9ac5-50f37c35cc5b"
+          ]
+        },
+        {
+          "match_text": "llama-3.1-8b for batch classification",
+          "ids": [
+            "d64264e3-9a9c-490c-9ac5-50f37c35cc5b"
+          ]
+        }
+      ]
+    },
+    "q05": {
+      "groups": [
+        {
+          "match_text": "finish 150 leetcode problems by august",
+          "ids": [
+            "f387472b-519c-4fde-b3c0-8721949d00e1"
+          ]
+        }
+      ]
+    },
+    "q06": {
+      "groups": [
+        {
+          "match_text": "4th round for cloudflare",
+          "ids": [
+            "79088729-81be-4049-b692-3cec9ee94642"
+          ]
+        }
+      ]
+    },
+    "q07": {
+      "groups": [
+        {
+          "match_text": "unordered",
+          "ids": [
+            "adacb1f3-b13e-4293-854c-0fc6bb0e35fa"
+          ]
+        },
+        {
+          "match_text": "ordered outcomes for marble draws",
+          "ids": [
+            "adacb1f3-b13e-4293-854c-0fc6bb0e35fa"
+          ]
+        }
+      ]
+    },
+    "q08": {
+      "groups": [
+        {
+          "match_text": "blocked on rahul for bq iam",
+          "ids": [
+            "e9a57626-4b15-4651-b9e8-8f67a69e2190"
+          ]
+        }
+      ]
+    },
+    "q09": {
+      "groups": [
+        {
+          "match_text": "oauth 2.0 client id for desktop app for color wow",
+          "ids": [
+            "b4a4562a-d0d0-4028-9d9e-7e58e1ab3fc9"
+          ]
+        },
+        {
+          "match_text": "oauth consent screen with app name 'color wow agents'",
+          "ids": [
+            "a5f0f946-4686-4901-8cae-687a55a93792"
+          ]
+        },
+        {
+          "match_text": "updated the oauth consent screen with the app name 'color wow agents'",
+          "ids": [
+            "790e9134-f2ff-4ceb-b4c4-531428479895"
+          ]
+        }
+      ]
+    },
+    "q10": {
+      "groups": [
+        {
+          "match_text": "augmentation layers for all 5 workflows",
+          "ids": [
+            "721f6171-7ff7-4dc8-a01b-fed044ddeb39",
+            "c7dbffce-c8e1-42d0-aff7-2d1021539bff"
+          ]
+        },
+        {
+          "match_text": "augmentation approach because it improves all wo",
+          "ids": [
+            "23869ee3-addc-467c-b5b2-d512e15825c3"
+          ]
+        }
+      ]
+    },
+    "q11": {
+      "groups": [
+        {
+          "match_text": "0.9–1.2 → 0.28–1.33",
+          "ids": [
+            "48ccda8f-b267-4e83-a7de-006c19df2118",
+            "d698821f-1683-404b-8f03-5d3ff2464bf7"
+          ]
+        }
+      ]
+    },
+    "q12": {
+      "groups": [
+        {
+          "match_text": "tracks uncertainty",
+          "ids": [
+            "7f1d422a-d7f9-4f2d-839f-766c3fa83e20"
+          ]
+        },
+        {
+          "match_text": "sharpen with reinforcement",
+          "ids": [
+            "7f1d422a-d7f9-4f2d-839f-766c3fa83e20"
+          ]
+        }
+      ]
+    },
+    "q13": {
+      "groups": [
+        {
+          "match_text": "stat 416 study cadence (revised)",
+          "ids": [
+            "a97b9e02-b4fc-46d1-8f02-d8eaeac80638"
+          ]
+        }
+      ]
+    },
+    "q14": {
+      "groups": [
+        {
+          "match_text": "concise responses without showing answers",
+          "ids": [
+            "d6b6379a-06a7-494c-a040-b6ff8da7fa15"
+          ]
+        }
+      ]
+    },
+    "q15": {
+      "groups": [
+        {
+          "match_text": "thedatamine/f2025_s2026_wl_bayer_traitprediction",
+          "ids": [
+            "eeb87a6b-84ce-4b47-b3d7-349eb76850fc"
+          ]
+        }
+      ]
+    },
+    "q16": {
+      "groups": [
+        {
+          "match_text": "puid: 036214734",
+          "ids": [
+            "e6b89cf1-a2f3-4cd9-a861-597fd7d1ad1a"
+          ]
+        }
+      ]
+    },
+    "q17": {
+      "groups": [
+        {
+          "match_text": "cloudflare workers + d1 + vectorize",
+          "ids": [
+            "2a9fbd00-2069-4d4a-bf16-78e90dbb4c03"
+          ]
+        },
+        {
+          "match_text": "cloudflare d1 and vectorize for bayesian",
+          "ids": [
+            "10727942-d7bf-4d58-a6ab-e32388c1a75a"
+          ]
+        }
+      ]
+    },
+    "q18": {
+      "groups": [
+        {
+          "match_text": "distinctive call to gaussian memory that shows as called",
+          "ids": [
+            "96efc801-3424-42ae-89a9-c0e27a8df8ff"
+          ]
+        }
+      ]
+    },
+    "q22": {
+      "groups": [
+        {
+          "match_text": "backup command to gaussian-memory-worker for data safety",
+          "ids": [
+            "551bc6a8-2b9d-40f4-9ec5-b46105109136"
+          ]
+        }
+      ]
+    },
+    "q23": {
+      "groups": [
+        {
+          "match_text": "faang background may make it harder",
+          "ids": [
+            "2b257e89-92f1-489c-8534-5385b2e3d86e"
+          ]
+        },
+        {
+          "match_text": "worried about being compared",
+          "ids": [
+            "21788114-a894-4faf-9034-b975905a4b98"
+          ]
+        }
+      ]
+    },
+    "q24": {
+      "groups": [
+        {
+          "match_text": "glm-4.7-flash and topk=2 are key parameters",
+          "ids": [
+            "9dbffa4e-ca9a-48bf-951b-87056de84e2f"
+          ]
+        }
+      ]
+    },
+    "q25": {
+      "groups": [
+        {
+          "match_text": "specific messages over generic ones when applying",
+          "ids": [
+            "ec8f9cbe-3db0-447e-99cb-6edf4aa43390"
+          ]
+        }
+      ]
+    },
+    "q26": {
+      "groups": [
+        {
+          "match_text": "/users/intern-lohit/lorealinternship",
+          "ids": [
+            "f03ed01e-5d4c-4364-b5d4-63ab84a2525a"
+          ]
+        }
+      ]
+    },
+    "q27": {
+      "groups": [
+        {
+          "match_text": "confidence-weighted retrieval with bhattacharyya",
+          "ids": [
+            "c736e4d5-b874-401d-8d6b-3aca2db48dbb"
+          ]
+        },
+        {
+          "match_text": "bayesian confidence modeling and kalman",
+          "ids": [
+            "d8d6b07f-7938-4df7-b7bf-65ed4966065e"
+          ]
+        }
+      ]
+    },
+    "q28": {
+      "groups": [
+        {
+          "match_text": "chose cloudflare d1 over planetscale",
+          "ids": [
+            "56ab6cee-d7e8-48ee-b7bc-846b8af28aec"
+          ]
+        },
+        {
+          "match_text": "vectorize-backed ann lookup",
+          "ids": [
+            "c985a5b9-f7ed-40fa-8859-0b8b808d2e83"
+          ]
+        }
+      ]
+    },
+    "q29": {
+      "groups": [
+        {
+          "match_text": "mem0 shipped a decay mechanism",
+          "ids": [
+            "6e9be4c0-49ca-477c-93e4-3996d9deb3a9"
+          ]
+        },
+        {
+          "match_text": "epistemic-governance angle",
+          "ids": [
+            "41d3828f-f6a4-41e8-933f-2607753f9efc"
+          ]
+        }
+      ]
+    },
+    "q30": {
+      "groups": [
+        {
+          "match_text": "architecture with 5 ai agents",
+          "ids": [
+            "708be274-b632-4887-88e6-d6d9fe4c2bae"
+          ]
+        },
+        {
+          "match_text": "augmentation layers for all 5 workflows",
+          "ids": [
+            "721f6171-7ff7-4dc8-a01b-fed044ddeb39"
+          ]
+        }
+      ]
+    },
+    "q31": {
+      "groups": [
+        {
+          "match_text": "domain rebuild instability",
+          "ids": [
+            "850ca374-3a64-4a37-bc10-4907a6dc4f30"
+          ]
+        },
+        {
+          "match_text": "domain rebuild from unstable to stable",
+          "ids": [
+            "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"
+          ]
+        }
+      ]
+    },
+    "q32": {
+      "groups": [
+        {
+          "match_text": "ai timelines are way off",
+          "ids": [
+            "2dc50727-00fa-44c9-b38e-d85495126ad3"
+          ]
+        },
+        {
+          "match_text": "integration will still need to happen even if agi",
+          "ids": [
+            "2dc50727-00fa-44c9-b38e-d85495126ad3",
+            "de0447d8-ac4d-401b-8bc5-a1153a184892"
+          ]
+        }
+      ]
+    },
+    "q33": {
+      "groups": [
+        {
+          "match_text": "chose cloudflare d1 over planetscale",
+          "ids": [
+            "56ab6cee-d7e8-48ee-b7bc-846b8af28aec"
+          ]
+        }
+      ]
+    },
+    "q34": {
+      "groups": [
+        {
+          "match_text": "chose bayesian gaussian model over key-value store",
+          "ids": [
+            "7f1d422a-d7f9-4f2d-839f-766c3fa83e20"
+          ]
+        }
+      ]
+    },
+    "q35": {
+      "groups": [
+        {
+          "match_text": "l'oreal internship started may 19 2026",
+          "ids": [
+            "2bf987fb-e9f7-47e7-85bc-f9ba5e2e6323"
+          ]
+        }
+      ]
+    },
+    "q36": {
+      "groups": [
+        {
+          "match_text": "150 leetcode problems by august",
+          "ids": [
+            "f387472b-519c-4fde-b3c0-8721949d00e1"
+          ]
+        }
+      ]
+    },
+    "q37": {
+      "groups": [
+        {
+          "match_text": "4th round for cloudflare",
+          "ids": [
+            "79088729-81be-4049-b692-3cec9ee94642"
+          ]
+        }
+      ]
+    },
+    "q38": {
+      "groups": [
+        {
+          "match_text": "oauth 2.0 client id for desktop app for color wow",
+          "ids": [
+            "b4a4562a-d0d0-4028-9d9e-7e58e1ab3fc9"
+          ]
+        },
+        {
+          "match_text": "oauth consent screen with app name 'color wow agents'",
+          "ids": [
+            "a5f0f946-4686-4901-8cae-687a55a93792",
+            "790e9134-f2ff-4ceb-b4c4-531428479895"
+          ]
+        }
+      ]
+    },
+    "q39": {
+      "groups": [
+        {
+          "match_text": "domain rebuild instability",
+          "ids": [
+            "850ca374-3a64-4a37-bc10-4907a6dc4f30"
+          ]
+        },
+        {
+          "match_text": "domain rebuild from unstable to stable",
+          "ids": [
+            "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"
+          ]
+        }
+      ]
+    },
+    "q40": {
+      "groups": [
+        {
+          "match_text": "mem0 shipped a decay mechanism",
+          "ids": [
+            "6e9be4c0-49ca-477c-93e4-3996d9deb3a9"
+          ]
+        }
+      ]
+    },
+    "q41": {
+      "groups": [
+        {
+          "match_text": "epistemic-governance angle",
+          "ids": [
+            "41d3828f-f6a4-41e8-933f-2607753f9efc"
+          ]
+        }
+      ]
+    },
+    "q42": {
+      "groups": [
+        {
+          "match_text": "0.9–1.2 → 0.28–1.33",
+          "ids": [
+            "d698821f-1683-404b-8f03-5d3ff2464bf7"
+          ]
+        }
+      ]
+    },
+    "q43": {
+      "groups": [
+        {
+          "match_text": "modeling uncertainty as a first-class, decaying value",
+          "ids": [
+            "03673c6e-872a-499d-97de-d044d8724a4c"
+          ]
+        }
+      ]
+    },
+    "q44": {
+      "groups": [
+        {
+          "match_text": "finish gaussian memory before august",
+          "ids": [
+            "b1c529a1-4bf4-40a7-89f5-356d4abdeb81"
+          ]
+        }
+      ]
+    }
+  }
+}
