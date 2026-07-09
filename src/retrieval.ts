@@ -120,8 +120,13 @@ export function sigmaGate<T extends { sigma: Float32Array }>(
 // Diversity cap: caps how many results of the same memory_type or micro-cluster can
 // appear together, so one session's worth of near-identical summaries (or one tight
 // cluster) can't flood the result set. Memories without a cluster_id are exempt.
-export function applyDiversityCap<T extends { type: string; cluster_id: string | null }>(
-  items: T[], sessionLimit = 2, otherTypeLimit = 4, clusterLimit = 3
+// exemptIds (2026-07-09): guarantee-slot appendees bypass the caps — a "guaranteed"
+// injected/temporal candidate appended after the main ranking was being silently
+// re-dropped here whenever its memory_type budget was already spent (confirmed live:
+// q34's access-frequency gold is episodic, and 4 episodic hits always precede it).
+// Exempt items still count toward the budgets for whatever follows them.
+export function applyDiversityCap<T extends { id?: string; type: string; cluster_id: string | null }>(
+  items: T[], sessionLimit = 2, otherTypeLimit = 4, clusterLimit = 3, exemptIds: Set<string> = new Set()
 ): T[] {
   const out: T[] = [];
   const typeCounts = new Map<string, number>();
@@ -130,7 +135,8 @@ export function applyDiversityCap<T extends { type: string; cluster_id: string |
     const tc = typeCounts.get(m.type) ?? 0;
     const cc = m.cluster_id ? (clusterCounts.get(m.cluster_id) ?? 0) : 0;
     const typeLimit = m.type === 'session' ? sessionLimit : otherTypeLimit;
-    if (tc >= typeLimit || (m.cluster_id && cc >= clusterLimit)) continue;
+    const exempt = m.id !== undefined && exemptIds.has(m.id);
+    if (!exempt && (tc >= typeLimit || (m.cluster_id && cc >= clusterLimit))) continue;
     out.push(m);
     typeCounts.set(m.type, tc + 1);
     if (m.cluster_id) clusterCounts.set(m.cluster_id, cc + 1);
@@ -195,7 +201,10 @@ export async function retrieve(
   // access is the product behavior. The bench endpoint sets true so repeated benchmark runs
   // are clean trials instead of training the ranker toward whatever the benchmark touched
   // (confirmed contamination, BENCHMARKING.md 2026-07-08 audit finding #5).
-  opts: { frozen?: boolean } = {}
+  // opts.trace: bench-only pipeline introspection — pass an empty object and retrieve()
+  // fills it with per-stage candidate id lists so a "why didn't memory X surface" question
+  // is answerable from data instead of deduction. No effect on scoring.
+  opts: { frozen?: boolean; trace?: Record<string, unknown> } = {}
 ): Promise<{ id: string; score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
   if (!query?.trim()) return [];
@@ -715,6 +724,55 @@ export async function retrieve(
     top.push(...missedTemporalSessions);
   }
 
+  // Injected-source guarantee (2026-07-09, experiments 3/4 redesigned): the adaptive
+  // floor is anchored to the median of the top cosine-native activation scores (~1.2+
+  // on this corpus), so cluster-routed / access-frequency candidates — fairly scored
+  // ~0.5-0.8 after the normalization fix — could STILL never clear it. Same failure
+  // shape the temporal guarantee above exists for. For vague queries only (no named
+  // entity in the query — the profile these sources were added for), append the best
+  // 2 injected candidates that missed the floor. Confirmed concrete case: q34 "why
+  // not just do simple key value yk" — the gold Bayesian-vs-KV decision is not
+  // cosine-reachable in a top-100 window but sits at rank 8 of the global access pool;
+  // it was injected, scored, and then floor-cut on every earlier run.
+  const guaranteedInjectedIds = new Set<string>();
+  if (entityTokens.length === 0 && (clusterOnlyIds.length > 0 || hotAccessOnlyIds.length > 0)) {
+    const injectedIdSet = new Set([...clusterOnlyIds, ...hotAccessOnlyIds]);
+    const topIdSetInj = new Set(top.map(c => c.id));
+    const missedInjected = kept.filter(c => injectedIdSet.has(c.id) && !topIdSetInj.has(c.id));
+    // Rank slot candidates by query-token overlap first, activation score second.
+    // Within the injected pool there is NO topical signal by construction (that was the
+    // point of the access-frequency source), so pure score ranking just hands the slots
+    // to whatever is globally hottest/most recent. Token overlap is a fair non-embedding
+    // topical signal — it catches casual queries whose informal keywords appear verbatim
+    // in the stored fact ("key value" -> the Bayesian-vs-KV decision) where FTS5 already
+    // failed (its implicit-AND requires EVERY casual token, e.g. "yk", to appear).
+    const qTokens = tokenize(searchQuery);
+    const withOverlap = missedInjected
+      .map(c => ({ c, ov: jaccardSimilarity(qTokens, tokenize(c.text)) }))
+      .sort((a, b) => (b.ov - a.ov) || (b.c.score - a.c.score));
+    for (const w of withOverlap.slice(0, 2)) {
+      top.push(w.c);
+      guaranteedInjectedIds.add(w.c.id); // exempt from the diversity cap below — see applyDiversityCap
+    }
+  }
+
+  if (opts.trace) {
+    const brief = (list: { id: string; score: number }[]) => list.map(c => `${c.id.slice(0, 8)}:${c.score.toFixed(2)}`);
+    opts.trace.querySigmaVal = querySigmaVal;
+    opts.trace.entityTokens = entityTokens;
+    opts.trace.poolCounts = {
+      vector: results.matches.length, ftsOnly: ftsOnlyIds.length, hotOnly: hotOnlyIds.length,
+      temporalOnly: temporalOnlyIds.length, clusterOnly: clusterOnlyIds.length,
+      hotAccessOnly: hotAccessOnlyIds.length, allIds: allIds.length, fetched: (rows.results ?? []).length,
+      quality: qualityRows.length,
+    };
+    opts.trace.clusterOnlyIds = clusterOnlyIds.map(id => id.slice(0, 8));
+    opts.trace.hotAccessOnlyIds = hotAccessOnlyIds.map(id => id.slice(0, 8));
+    opts.trace.kept = brief(kept);
+    opts.trace.top = brief(top);
+    opts.trace.guaranteedInjected = [...guaranteedInjectedIds].map(id => id.slice(0, 8));
+  }
+
   // Final near-dup sweep: the BFS/temporal/contradiction de-biasing above can re-introduce
   // near-duplicates the main pass already dropped — collapse them once more before gating.
   const topDeduped = dedupBySimilarity(top);
@@ -729,9 +787,15 @@ export async function retrieve(
   // `domain` field. Memories without a cluster_id yet (pre-backfill) are exempt
   // rather than all bucketed under one null key, so old rows aren't penalized as
   // if they were one giant cluster.
-  const diversityCapped = applyDiversityCap(finalTop);
+  const diversityCapped = applyDiversityCap(finalTop, 2, 4, 3, guaranteedInjectedIds);
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
   const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
+
+  if (opts.trace) {
+    opts.trace.topDeduped = topDeduped.map(c => c.id.slice(0, 8));
+    opts.trace.afterSigmaGate = finalTop.map(c => c.id.slice(0, 8));
+    opts.trace.afterDiversityCap = postDiversity.map(c => c.id.slice(0, 8));
+  }
 
   // Sharpen accessed memories + record history if σ changed meaningfully.
   // Batched: previously one UPDATE (+ optional INSERT) + one KV read-modify-write
