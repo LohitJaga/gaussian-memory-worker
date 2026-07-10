@@ -376,12 +376,18 @@ export async function storeMemory(
     await env.DB.prepare(`
       INSERT INTO memories
         (id, text, sigma_diagonal, timestamp, last_accessed,
-         access_count, memory_type, domain, emotional_intensity, contradiction_flag, project, valid_from)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)
-    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now).run();
+         access_count, memory_type, domain, emotional_intensity, contradiction_flag, project, valid_from, cluster_id)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?, ?)
+    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now, clusterId).run();
     await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
       .bind(id, text, project).run().catch(() => {});
     await env.VECTORIZE.upsert([{ id, values: Array.from(mu), metadata: { domain, memory_type: memoryType, project } }]);
+    await recentEmbeddingsAdd(id, mu, domain, env); // visible to merge-check immediately, unlike Vectorize
+    await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
+    // Record initial σ — baseline for belief drift tracking
+    await env.DB.prepare(
+      'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), id, meanSigma(sigma), 'store', now).run().catch(() => {});
     return { action: 'contradiction', id };
   }
 
@@ -395,12 +401,12 @@ export async function storeMemory(
     // Preserve 'session' type on merge — session summaries must not silently become episodic
     const typeUpdate = memoryType === 'session' ? ', memory_type = ?' : '';
     const typeParams = memoryType === 'session'
-      ? [serializeSigma(newSigma), now, text, 'session', bestId]
-      : [serializeSigma(newSigma), now, text, bestId];
+      ? [serializeSigma(newSigma), now, text, domain, 'session', bestId]
+      : [serializeSigma(newSigma), now, text, domain, bestId];
     await env.DB.prepare(`
       UPDATE memories SET
         sigma_diagonal = ?, last_accessed = ?,
-        access_count = access_count + 1, text = ?${typeUpdate}
+        access_count = access_count + 1, text = ?, domain = ?${typeUpdate}
       WHERE id = ?
     `).bind(...typeParams).run();
     await env.DB.batch([
@@ -420,26 +426,34 @@ export async function storeMemory(
   // Spawn new
   const id = crypto.randomUUID();
 
-  await env.DB.prepare(`
-    INSERT INTO memories
-      (id, text, sigma_diagonal, timestamp, last_accessed,
-       access_count, memory_type, domain, emotional_intensity, project, valid_from)
-    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-  `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now).run();
-  await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
-    .bind(id, text, project).run().catch(() => {});
+  // Batched: 3 D1 writes (memories, fts, sigma_history baseline) in one round-trip
+  // instead of 3 sequential ones — this is the write hot path (fires on every
+  // memory_store/auto_store call, including the PostToolUse hook on every Bash/Write).
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO memories
+        (id, text, sigma_diagonal, timestamp, last_accessed,
+         access_count, memory_type, domain, emotional_intensity, project, valid_from, cluster_id)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+    `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now, clusterId),
+    env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`).bind(id, text, project),
+    // Record initial σ — baseline for belief drift tracking
+    env.DB.prepare(
+      'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), id, meanSigma(sigma), 'store', now),
+  ]);
 
-  await env.VECTORIZE.upsert([{
-    id,
-    values: Array.from(mu),
-    metadata: { domain, memory_type: memoryType, project },
-  }]);
-  await recentEmbeddingsAdd(id, mu, domain, env); // visible to merge-check immediately, unlike Vectorize
-  await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
-  // Record initial σ — baseline for belief drift tracking
-  await env.DB.prepare(
-    'INSERT INTO memory_sigma_history (id, memory_id, sigma, event_type, recorded_at) VALUES (?, ?, ?, ?, ?)'
-  ).bind(crypto.randomUUID(), id, meanSigma(sigma), 'store', now).run().catch(() => {});
+  // Vectorize upsert and the two KV bookkeeping writes touch independent stores —
+  // none depends on another's result, so run them in parallel.
+  await Promise.all([
+    env.VECTORIZE.upsert([{
+      id,
+      values: Array.from(mu),
+      metadata: { domain, memory_type: memoryType, project },
+    }]),
+    recentEmbeddingsAdd(id, mu, domain, env), // visible to merge-check immediately, unlike Vectorize
+    extractAndLinkEntities(id, text, env), // awaited — KV write must complete
+  ]);
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
   const nearMissIds = matches

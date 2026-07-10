@@ -93,7 +93,7 @@ export const TOOLS = [
       properties: {
         domain: { type: 'string' },
         limit: { type: 'number', default: 50 },
-        sort: { type: 'string', enum: ['timestamp', 'access_count', 'sigma'], default: 'timestamp' },
+        sort: { type: 'string', enum: ['timestamp', 'access_count', 'sigma', 'last_accessed'], default: 'timestamp' },
         since: { type: 'string', description: 'ISO 8601 timestamp — return only memories stored after this time' },
       },
     },
@@ -329,9 +329,13 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         if (existing) {
           const mu = await embed(args.text, env);
           const revisions = (existing.revision_count ?? 0) + 1;
-          await env.DB.prepare(
-            'UPDATE memories SET text = ?, last_accessed = ?, access_count = access_count + 1, revision_count = ? WHERE id = ?'
-          ).bind(args.text, now, revisions, existing.id).run();
+          await env.DB.batch([
+            env.DB.prepare(
+              'UPDATE memories SET text = ?, last_accessed = ?, access_count = access_count + 1, revision_count = ? WHERE id = ?'
+            ).bind(args.text, now, revisions, existing.id),
+            env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(existing.id),
+            env.DB.prepare('INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)').bind(existing.id, args.text, project),
+          ]);
           await env.VECTORIZE.upsert([{
             id: existing.id, values: Array.from(mu),
             metadata: { domain: existing.domain, memory_type: existing.memory_type, project },
@@ -612,6 +616,12 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const limit = Math.min(Number(args.limit) || 50, 500);
 
+      // Corrupt/unparseable sigma_diagonal (e.g. bad base64) must not 500 the whole
+      // list — same tolerance memory_dedupe's meanSig helper already applies.
+      const safeMeanSigma = (s: string): number => {
+        try { return meanSigma(deserializeSigma(s)); } catch { return 1; }
+      };
+
       // sort=sigma: sigma_diagonal is base64-serialized Float32 — SQL ORDER BY on it is a
       // lexicographic string sort, not numeric. Fetch a wider window and sort by meanSigma in JS.
       let resultRows: any[];
@@ -620,7 +630,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           `SELECT id, text, sigma_diagonal, domain, memory_type, access_count, timestamp FROM memories ${where} LIMIT 2000`
         ).bind(...params).all<any>();
         resultRows = (rows.results ?? [])
-          .sort((a: any, b: any) => meanSigma(deserializeSigma(a.sigma_diagonal)) - meanSigma(deserializeSigma(b.sigma_diagonal)))
+          .sort((a: any, b: any) => safeMeanSigma(a.sigma_diagonal) - safeMeanSigma(b.sigma_diagonal))
           .slice(0, limit);
       } else {
         const sortCol = args.sort === 'access_count' ? 'access_count DESC'
@@ -634,9 +644,9 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
       if (!resultRows.length) return 'No memories stored.';
       return resultRows.map((r: any) => {
-        const sigma = deserializeSigma(r.sigma_diagonal);
+        const sigmaMean = safeMeanSigma(r.sigma_diagonal);
         const ts = r.timestamp ? new Date(r.timestamp * 1000).toISOString().slice(0, 16) : '';
-        return `[${r.id}] [${ts}] [σ=${meanSigma(sigma).toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 80)}`;
+        return `[${r.id}] [${ts}] [σ=${sigmaMean.toFixed(3)}] [${r.access_count}x] (${r.domain}/${r.memory_type}) ${r.text.slice(0, 80)}`;
       }).join('\n');
     }
 
@@ -644,8 +654,8 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const repair = args.repair === true;
       // Fetch all D1 IDs + text in batches
       const allRows = await env.DB.prepare(
-        'SELECT id, text, domain, memory_type FROM memories ORDER BY rowid'
-      ).all<{ id: string; text: string; domain: string; memory_type: string }>();
+        'SELECT id, text, domain, memory_type, project FROM memories ORDER BY rowid'
+      ).all<{ id: string; text: string; domain: string; memory_type: string; project: string }>();
 
       const rows = allRows.results ?? [];
       if (!rows.length) return 'No memories found.';
@@ -683,7 +693,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         await env.VECTORIZE.upsert(batch.map((row, j) => ({
           id: row.id,
           values: Array.from(mus[j]),
-          metadata: { domain: row.domain, memory_type: row.memory_type },
+          metadata: { domain: row.domain, memory_type: row.memory_type, project: row.project ?? 'default' },
         })));
         fixed += batch.length;
       }
@@ -742,8 +752,12 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       let stored = 0, skipped = 0;
       const storedMus: Float32Array[] = [];
 
-      for (const item of items.slice(0, 20)) { // cap at 20 per call
-        const mu = await embed(item.text, env);
+      const capturedItems = items.slice(0, 20); // cap at 20 per call
+      const mus = await batchEmbed(capturedItems.map(i => i.text), env);
+
+      for (let i = 0; i < capturedItems.length; i++) {
+        const item = capturedItems[i];
+        const mu = mus[i];
         const tooSimilar = storedMus.some(prev => dotProduct(Array.from(mu), Array.from(prev)) > 0.92);
         if (tooSimilar) { skipped++; continue; }
 
@@ -1164,7 +1178,9 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
         byDomain[r.domain] = (byDomain[r.domain] ?? 0) + 1;
         byType[r.memory_type] = (byType[r.memory_type] ?? 0) + 1;
 
-        const s = meanSigma(deserializeSigma(r.sigma_diagonal));
+        // Corrupt/unparseable sigma_diagonal must not 500 the whole stats call.
+        let s: number;
+        try { s = meanSigma(deserializeSigma(r.sigma_diagonal)); } catch { s = 1; }
         totalSigma += s;
         if (s < 0.3) sharp++;
         else if (s < 0.8) medium++;
@@ -1223,6 +1239,9 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
       await env.DB.batch([
         env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(args.id),
         env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(args.id),
+        env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(args.id, args.id),
+        env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(args.id),
+        env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(args.id),
       ]);
       await env.VECTORIZE.deleteByIds([args.id]);
       return `DELETED: '${row.text.slice(0, 60)}' (id=${args.id.slice(0, 8)})`;
@@ -1247,7 +1266,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
       await env.VECTORIZE.upsert([{
         id: args.id,
         values: Array.from(mu),
-        metadata: { domain: existing.domain, memory_type: existing.memory_type },
+        metadata: { domain: existing.domain, memory_type: existing.memory_type, project },
       }]);
 
       return `UPDATED: '${args.text.slice(0, 60)}' (id=${args.id.slice(0, 8)}, sigma preserved)`;
@@ -1345,9 +1364,12 @@ Return ONLY valid JSON array:
       let stored = 0;
       const storedMus: Float32Array[] = [];  // intra-batch dedup
 
-      for (const fact of cleanFacts) {
+      const factMus = await batchEmbed(cleanFacts.map(f => f.text ?? ''), env);
+
+      for (let i = 0; i < cleanFacts.length; i++) {
+        const fact = cleanFacts[i];
         const text = fact.text ?? '';
-        const mu = await embed(text, env);
+        const mu = factMus[i];
 
         // Intra-batch dedup: skip if too similar to something already stored this run
         const tooSimilar = storedMus.some(prev => {
@@ -1450,10 +1472,13 @@ Return ONLY valid JSON array:
         await env.DB.batch([
           ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
           ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(id, id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(id)),
         ]);
         await env.VECTORIZE.deleteByIds(chunk);
       }
-      return `Deleted ${ids.length} memories matching "${args.pattern}".`;
+      return `Deleted ${ids.length} memories${typeof args.pattern === 'string' && args.pattern.length > 0 ? ` matching "${args.pattern}".` : '.'}`;
     }
 
     case 'memory_dedupe': {
@@ -1498,6 +1523,9 @@ Return ONLY valid JSON array:
         await env.DB.batch([
           ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
           ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(id, id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id)),
+          ...chunk.map(id => env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(id)),
         ]);
         await env.VECTORIZE.deleteByIds(chunk);
       }
@@ -1647,8 +1675,8 @@ Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
 
       const rows = await env.DB.prepare(
-        `SELECT id, text FROM memories WHERE project = 'default' ORDER BY rowid LIMIT ?`
-      ).bind(BATCH).all<{ id: string; text: string }>();
+        `SELECT id, text FROM memories WHERE project = 'default' ORDER BY rowid LIMIT ? OFFSET ?`
+      ).bind(BATCH, offset).all<{ id: string; text: string }>();
 
       const batch = rows.results ?? [];
       if (!batch.length) {

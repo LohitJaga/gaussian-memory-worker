@@ -8,6 +8,13 @@ import {
 const DOMAIN_SIZE_CACHE_KEY = 'cache:domain_sizes';
 const DOMAIN_SIZE_CACHE_TTL = 60; // seconds — only feeds sharpenSigma's floor, tolerant of staleness
 
+// Corrupt/unparseable sigma_diagonal (e.g. bad base64) must not 500 the whole
+// retrieve() call — falls back to a neutral single-value sigma (mean 1, same
+// fallback value memory_dedupe's meanSig helper already uses).
+function safeDeserializeSigma(s: string): Float32Array {
+  try { return deserializeSigma(s); } catch { return new Float32Array([1]); }
+}
+
 // Cache-aside: domain sizes only inform a confidence-floor threshold (>=15 vs <5 memories),
 // not the actual ranking, so a short-TTL KV cache is safe. Without this, retrieve() ran an
 // unconditional `GROUP BY domain` full-table scan on every single call regardless of corpus
@@ -157,6 +164,51 @@ export function projectScopeClause(project: string, strictProject = false): { cl
   return { clause, param: project };
 }
 
+// Vectorize-side counterpart to projectScopeClause. Requires a metadata index on
+// `project` on the live Vectorize index (`gaussian-memory-index`) before this has any
+// effect; passing `filter` against an unindexed field is rejected/ignored by Vectorize,
+// so this must not be wired into a query call until that index exists and the full
+// corpus has been re-upserted (existing vectors are not retroactively covered by a
+// metadata index created after they were inserted). Both confirmed live 2026-07-10.
+//
+// default/strict are single exact-match queries; the third (OR-default blend) case is
+// NOT a single filter — see queryVectorizeScoped below. An earlier version used
+// filter:{project:{$in:[project,'default']}} in one query, which reintroduced the exact
+// starvation bug this whole fix targets one level down: `default` is the single largest
+// project bucket in this account (2,133/4,845 memories, 44% of the corpus, measured
+// 2026-07-10) and would win nearly every slot in a capped topK window against a genuine
+// target project, the same way the whole unscoped account used to. Two separate
+// exact-match queries with independent budgets (project gets its full budget, default
+// gets a small supplement) is the fix — reserved capacity per bucket, same principle
+// applyDiversityCap already uses downstream for memory_type, just applied one stage
+// earlier at the ANN fetch itself where the candidate was previously being lost before
+// any downstream capping logic ever got a chance to see it.
+async function queryVectorizeScoped(
+  env: Env, vector: number[],
+  opts: { topK: number; returnValues?: boolean; returnMetadata?: boolean | 'all' | 'indexed' | 'none' },
+  project: string, strictProject: boolean
+): Promise<VectorizeMatches> {
+  if (project === 'default') {
+    return env.VECTORIZE.query(vector, opts);
+  }
+  if (strictProject) {
+    return env.VECTORIZE.query(vector, { ...opts, filter: { project } });
+  }
+  const defaultBudget = Math.max(3, Math.round(opts.topK * 0.3));
+  const [projectResult, defaultResult] = await Promise.all([
+    env.VECTORIZE.query(vector, { ...opts, filter: { project } }),
+    env.VECTORIZE.query(vector, { ...opts, topK: defaultBudget, filter: { project: 'default' } }),
+  ]);
+  const merged = new Map<string, VectorizeMatch>();
+  for (const m of projectResult.matches) merged.set(m.id, m);
+  for (const m of defaultResult.matches) {
+    const existing = merged.get(m.id);
+    if (!existing || (m.score ?? 0) > (existing.score ?? 0)) merged.set(m.id, m);
+  }
+  const matches = [...merged.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  return { matches, count: matches.length };
+}
+
 // Stage B ablation baseline — deliberately dumb top-k cosine retrieval, mirroring what a
 // naive vector-store competitor (fat-context, no confidence model) would return: no BM25
 // fusion, no entity graph, no temporal boost, no cluster cohesion, no threshold expansion,
@@ -169,9 +221,9 @@ export async function baselineRetrieve(
   if (!query?.trim()) return [];
 
   const qvec = await embed(query, env);
-  const matches = (await env.VECTORIZE.query(Array.from(qvec), {
-    topK, returnValues: false, returnMetadata: 'none',
-  })).matches ?? [];
+  const matches = (await queryVectorizeScoped(
+    env, Array.from(qvec), { topK, returnValues: false, returnMetadata: 'none' }, project, strictProject
+  )).matches ?? [];
   if (!matches.length) return [];
 
   const ids = matches.map(m => m.id);
@@ -255,7 +307,7 @@ export async function retrieve(
   // the querySigmaVal specificity fix alone moved tokens but not recall, since it only
   // touches post-fetch filtering).
   const poolMultiplier = 4 + Math.round(4 * Math.max(0, Math.min(1, (querySigmaVal - 0.2) / 0.6)));
-  const queryOpts: any = { topK: Math.min(topK * poolMultiplier, 50), returnValues: true, returnMetadata: 'indexed' };
+  const queryOpts = { topK: Math.min(topK * poolMultiplier, 50), returnValues: true, returnMetadata: 'indexed' as const };
 
   // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
   const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
@@ -278,13 +330,15 @@ export async function retrieve(
   const useAccessFrequency = querySigmaVal > 0.35 || entityTokens.length === 0;
   const { clause: afClause, param: afParam } = projectScopeClause(project, strictProject);
   const afBinds = afParam ? [afParam] : [];
+  const { clause: ftsProjectClause, param: ftsProjectParam } = projectScopeClause(project, strictProject);
+  const ftsBinds = ftsProjectParam ? [ftsQuery, ftsProjectParam, topK * 4] : [ftsQuery, topK * 4];
 
   const [vecFinal, ftsResults, hotAccessRows] = await Promise.all([
-    env.VECTORIZE.query(Array.from(qvec), queryOpts),
+    queryVectorizeScoped(env, Array.from(qvec), queryOpts, project, strictProject),
     ftsQuery.length >= 3
       ? env.DB.prepare(
-          `SELECT id, -bm25(memories_fts) as bm25_score FROM memories_fts WHERE memories_fts MATCH ? AND (project = ? OR project = 'default') ORDER BY rank LIMIT ?`
-        ).bind(ftsQuery, project, topK * 4).all<{ id: string; bm25_score: number }>().catch(() => ({ results: [] }))
+          `SELECT id, -bm25(memories_fts) as bm25_score FROM memories_fts WHERE memories_fts MATCH ? ${ftsProjectClause} ORDER BY rank LIMIT ?`
+        ).bind(...ftsBinds).all<{ id: string; bm25_score: number }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] as { id: string; bm25_score: number }[] }),
     useAccessFrequency
       ? env.DB.prepare(`SELECT id FROM memories WHERE 1=1 ${afClause} ORDER BY access_count DESC LIMIT 20`)
@@ -398,7 +452,7 @@ export async function retrieve(
   if (entityTokens.length > 0) {
     const entityVecs = await batchEmbed(entityTokens, env);
     const entityQueries = entityVecs.map(ev =>
-      env.VECTORIZE.query(Array.from(ev), { topK: 10, returnValues: false, returnMetadata: 'none' })
+      queryVectorizeScoped(env, Array.from(ev), { topK: 10, returnValues: false, returnMetadata: 'none' }, project, strictProject)
     );
     const entityResults = await Promise.all(entityQueries);
     for (const er of entityResults) {
@@ -494,7 +548,7 @@ export async function retrieve(
 
   // Pass 1: compute raw scores
   const rawCandidates = qualityRows.map(row => {
-    const memSigma = deserializeSigma(row.sigma_diagonal);
+    const memSigma = safeDeserializeSigma(row.sigma_diagonal);
     const cosineSim = cosineMap.get(row.id) ?? 0;
     const syntheticCos = syntheticCosMap.get(row.id) ?? null;
     const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
@@ -636,7 +690,7 @@ export async function retrieve(
     // Only request vectors when there's a next hop to feed; final hop vectors are unused.
     const needValues = hop < BFS_DEPTH - 1;
     const neighborQueries = frontier.map(node =>
-      env.VECTORIZE.query(node.vector, { topK: 3, returnValues: needValues, returnMetadata: 'indexed' })
+      queryVectorizeScoped(env, node.vector, { topK: 3, returnValues: needValues, returnMetadata: 'indexed' }, project, strictProject)
     );
     const neighborResults = await Promise.all(neighborQueries);
 
@@ -679,7 +733,7 @@ export async function retrieve(
       // re-surface items that were already rejected by quality filtering.
       const t = (row.text ?? '').trim();
       if (t.length < 30 || /^https?:\/\//.test(t) || /^[a-zA-Z0-9_.-]+$/.test(t) || (t.match(/\s/g) ?? []).length < 3) continue;
-      const memSigma = deserializeSigma(row.sigma_diagonal);
+      const memSigma = safeDeserializeSigma(row.sigma_diagonal);
       // biome-ignore lint/style/noNonNullAssertion: row.id comes from newIds, which is newMatches.keys()
       const match = newMatches.get(row.id)!;
       activatedExtras.push({
