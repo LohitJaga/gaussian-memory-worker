@@ -16,6 +16,15 @@ const JSON_HEADERS = {
   'Access-Control-Allow-Origin': '*',
 };
 
+// Timing-safe token compare — length mismatch short-circuits (length isn't the secret),
+// equal-length content compare goes through crypto.subtle.timingSafeEqual.
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const bufA = new TextEncoder().encode(a);
+  const bufB = new TextEncoder().encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === 'OPTIONS') {
@@ -35,16 +44,22 @@ export default {
     }
 
     if (request.method === 'GET' && url.pathname === '/viz/data') {
+      if (!env.AUTH_TOKEN) {
+        return new Response(JSON.stringify({ error: 'Server misconfigured: AUTH_TOKEN not set' }), { status: 500, headers: JSON_HEADERS });
+      }
       const apiKey = url.searchParams.get('key') ?? '';
-      if (apiKey !== (env.AUTH_TOKEN ?? '')) {
+      if (!timingSafeEqualStr(apiKey, env.AUTH_TOKEN)) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: JSON_HEADERS });
       }
       return handleVizData(env);
     }
 
     if (request.method === 'POST' && url.pathname === '/admin/seed-domains') {
+      if (!env.AUTH_TOKEN) {
+        return new Response(JSON.stringify({ error: 'Server misconfigured: AUTH_TOKEN not set' }), { status: 500, headers: JSON_HEADERS });
+      }
       const apiKey = (request.headers.get('Authorization') ?? '').replace('Bearer ', '');
-      if (apiKey !== (env.AUTH_TOKEN ?? '')) {
+      if (!timingSafeEqualStr(apiKey, env.AUTH_TOKEN)) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: JSON_HEADERS });
       }
       const body: { clear?: boolean; seeds: { name: string; text: string }[] } = await request.json();
@@ -77,7 +92,7 @@ export default {
     }
     const authHeader = request.headers.get('Authorization') ?? '';
     const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-    if (headerToken !== env.AUTH_TOKEN) {
+    if (!timingSafeEqualStr(headerToken, env.AUTH_TOKEN)) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401, headers: JSON_HEADERS,
       });

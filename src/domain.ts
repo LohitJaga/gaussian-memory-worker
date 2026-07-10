@@ -133,11 +133,15 @@ export async function classifyDomainForStore(text: string, env: Env, precomputed
     .slice(0, 5);
 
   try {
-    const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
-      messages: [
-        {
-          role: 'system',
-          content: `You classify one memory into a semantic domain.
+    // Timeout-guarded — this runs on the store hot path (memory_auto_store etc.),
+    // same reasoning as tools.ts's enrichment/GLM-gate calls: an unguarded AI call
+    // here can run long enough for the Workers runtime to cancel the whole request.
+    const result = await Promise.race([
+      env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+        messages: [
+          {
+            role: 'system',
+            content: `You classify one memory into a semantic domain.
 ${candidates.length
   ? `Nearest existing domains: ${candidates.map(c => c.name).join(', ')}\nALWAYS pick one of these if it reasonably fits — even loosely.`
   : 'No existing domain is close to this memory.'}
@@ -145,12 +149,14 @@ ${atCap
   ? 'Do NOT invent a new domain (cap reached) — pick from the list above, or "general" if nothing fits.'
   : `Only if none fits, create a new domain name. ${NAMING_RULES}`}
 Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
-        },
-        { role: 'user', content: `<memory_text>${text.slice(0, 600)}</memory_text>` },
-      ],
-      max_tokens: 30,
-      temperature: 0,
-    }) as any;
+          },
+          { role: 'user', content: `<memory_text>${text.slice(0, 600)}</memory_text>` },
+        ],
+        max_tokens: 30,
+        temperature: 0,
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('domain classify timeout')), 8000)),
+    ]) as any;
 
     const choice = parseJsonName(result, 'domain');
     if (!choice) return fallback;

@@ -97,12 +97,17 @@ export async function pruneJunkMemories(env: Env): Promise<number> {
   const ids = (rows.results ?? []).map(r => r.id);
   if (!ids.length) return 0;
 
-  const CHUNK = 500;
+  // 100, not 500: now 5 delete statements per id (memories/fts/relations/entities/
+  // sigma_history) — D1's free-tier batch cap is 1,000 statements per .batch() call.
+  const CHUNK = 100;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const chunk = ids.slice(i, i + CHUNK);
     await env.DB.batch([
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(id, id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(id)),
     ]);
     await env.VECTORIZE.deleteByIds(chunk);
   }
@@ -123,10 +128,12 @@ export async function deduplicateRecentMemories(env: Env, windowSec = 86400, thr
   const deleted = new Set<string>();
   for (let i = 0; i < rows.length; i++) {
     if (deleted.has(rows[i].id)) continue;
-    const results = await env.VECTORIZE.query(mus[i], { topK: 2, returnMetadata: 'indexed' });
+    const rowProject = rows[i].project ?? 'default';
+    // Project filter narrows the (small, topK=2) candidate window to same-project matches at
+    // the ANN stage — the matchProject check below is now belt-and-suspenders, not the only guard.
+    const results = await env.VECTORIZE.query(mus[i], { topK: 2, returnMetadata: 'indexed', filter: { project: rowProject } });
     for (const match of results.matches) {
       const matchProject = (match.metadata as any)?.project ?? 'default';
-      const rowProject = rows[i].project ?? 'default';
       // Only dedup within same project — never delete a memory from a different project
       if (match.id !== rows[i].id && (match.score ?? 0) >= threshold && !deleted.has(match.id) && matchProject === rowProject) {
         toDelete.push(rows[i].id);
@@ -138,11 +145,16 @@ export async function deduplicateRecentMemories(env: Env, windowSec = 86400, thr
 
   if (toDelete.length === 0) return 'No duplicates in last 24h.';
 
-  for (let i = 0; i < toDelete.length; i += 500) {
-    const chunk = toDelete.slice(i, i + 500);
+  // 100, not 500: now 5 delete statements per id — D1's free-tier batch cap is
+  // 1,000 statements per .batch() call.
+  for (let i = 0; i < toDelete.length; i += 100) {
+    const chunk = toDelete.slice(i, i + 100);
     await env.DB.batch([
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(id, id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(id)),
     ]);
   }
   await env.VECTORIZE.deleteByIds(toDelete);
@@ -167,10 +179,12 @@ export async function deduplicateColdMemories(env: Env): Promise<string> {
 
   for (let i = 0; i < cold.length; i++) {
     if (deleted.has(cold[i].id)) continue;
-    const results = await env.VECTORIZE.query(mus[i], { topK: 3, returnMetadata: 'indexed' });
+    const rowProject = cold[i].project ?? 'default';
+    // Project filter narrows the (small, topK=3) candidate window to same-project matches at
+    // the ANN stage — the matchProject check below is now belt-and-suspenders, not the only guard.
+    const results = await env.VECTORIZE.query(mus[i], { topK: 3, returnMetadata: 'indexed', filter: { project: rowProject } });
     for (const match of results.matches ?? []) {
       const matchProject = (match.metadata as any)?.project ?? 'default';
-      const rowProject = cold[i].project ?? 'default';
       // Guard !deleted.has(match.id): if the surviving copy was itself deleted earlier
       // in this pass, deleting this one too would destroy BOTH copies of the pair.
       // Same-project guard mirrors deduplicateRecentMemories — never dedup across projects.
@@ -184,12 +198,17 @@ export async function deduplicateColdMemories(env: Env): Promise<string> {
 
   if (!toDelete.length) return 'No cold duplicates found.';
 
-  const CHUNK = 500;
+  // 100, not 500: now 5 delete statements per id — D1's free-tier batch cap is
+  // 1,000 statements per .batch() call.
+  const CHUNK = 100;
   for (let i = 0; i < toDelete.length; i += CHUNK) {
     const chunk = toDelete.slice(i, i + CHUNK);
     await env.DB.batch([
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(id, id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(id)),
     ]);
   }
   await env.VECTORIZE.deleteByIds(toDelete);
@@ -235,8 +254,8 @@ export async function cleanupSingletons(env: Env, minCount = 3): Promise<string>
 
   for (const singletonName of singletonNames) {
     const memories = await env.DB.prepare(
-      'SELECT id, text, memory_type FROM memories WHERE domain = ?'
-    ).bind(singletonName).all<{ id: string; text: string; memory_type: string }>();
+      'SELECT id, text, memory_type, project FROM memories WHERE domain = ?'
+    ).bind(singletonName).all<{ id: string; text: string; memory_type: string; project: string }>();
 
     const batch = memories.results ?? [];
     if (batch.length === 0) continue;
@@ -256,7 +275,7 @@ export async function cleanupSingletons(env: Env, minCount = 3): Promise<string>
       );
       vectorizeUpdates.push({
         id: batch[i].id, values: mu,
-        metadata: { domain: bestDomain, memory_type: batch[i].memory_type },
+        metadata: { domain: bestDomain, memory_type: batch[i].memory_type, project: batch[i].project ?? 'default' },
       });
       totalReassigned++;
     }
@@ -389,6 +408,9 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
     await env.DB.batch([
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories WHERE id = ?').bind(id)),
       ...chunk.map(id => env.DB.prepare('DELETE FROM memories_fts WHERE id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_relations WHERE from_id = ? OR to_id = ?').bind(id, id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id)),
+      ...chunk.map(id => env.DB.prepare('DELETE FROM memory_sigma_history WHERE memory_id = ?').bind(id)),
     ]);
     await env.VECTORIZE.deleteByIds(chunk).catch(() => {});
   }

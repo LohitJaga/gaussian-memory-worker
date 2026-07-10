@@ -322,9 +322,13 @@ describeE2E('E2E: store → retrieve → sigma → dedup → decay', () => {
     for (let i = 0; i < 4; i++) {
       await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, strict_project: true, top_k: 5 });
     }
-    const result = await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, top_k: 5 });
+    // strict_project: true (2026-07-10) — this was the one call in the suite that omitted it,
+    // which let real default-project content (44% of the account's corpus) outcompete this
+    // fixture in final ranking under the OR-default blend. That's a separate, real, low-priority
+    // scoring-weight gap (project match isn't its own scored signal), not what this test is
+    // about — aligning with the other retrieve calls above avoids depending on it here.
+    const result = await call('memory_retrieve', { query: QUERY_A, project: TEST_PROJECT, strict_project: true, top_k: 5 });
     expect(result).not.toContain('No memories found');
-    // Filter by TEST_PREFIX to exclude default-project memories from the assertion
     const lines = result.split('\n').filter(l => l.includes(TEST_PREFIX) && l.includes(SNIPPET_A));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) {
