@@ -1,10 +1,10 @@
 {
-  "version": "vague-suppl-2026-07-08",
-  "note": "Additive category on top of v1/multihop (both stay frozen). Precise/paraphrase queries in v1 skew toward the exact query type cosine embeddings are built to nail — this category tests loose, casual, imprecisely-worded queries closer to how memories are actually queried day-to-day, which is the specific case the sigma/Bhattacharyya machinery targets (README: 'a vague exploratory question casts wider'). Authored against real, previously-confirmed memory IDs before any run.",
+  "version": "vague-suppl-2026-07-09-v2",
+  "note": "Additive category on top of v1/multihop (both stay frozen). Precise/paraphrase queries in v1 skew toward the exact query type cosine embeddings are built to nail — this category tests loose, casual, imprecisely-worded queries closer to how memories are actually queried day-to-day, which is the specific case the sigma/Bhattacharyya machinery targets (README: 'a vague exploratory question casts wider'). Authored against real, previously-confirmed memory IDs before any run. v2 (2026-07-09 evening): q33 and q42 replaced after close-read audit found real defects — q33's original target likely captured an assistant aside during architecture discussion, not a decision the user ever consciously weighed (no real query would expect to recall it); q42's original query was genuinely ambiguous, since multiple distinct 'scoring fix' memories exist in the corpus and nothing in the query disambiguates which. q36/q43/q44 were also flagged during the same audit but are confirmed genuine system gaps, not gold defects — left unchanged as fair hard cases.",
   "queries": [
-    { "id": "q33", "category": "vague", "query": "why'd we go with that db thing again",
-      "gold_ids": ["56ab6cee-d7e8-48ee-b7bc-846b8af28aec"],
-      "match_texts": ["chose cloudflare d1 over planetscale"], "note": "vague ref to the D1/PlanetScale decision" },
+    { "id": "q33", "category": "vague", "query": "remind me why we didnt just use a normal server",
+      "gold_ids": ["28714cb3-de6c-45dc-a309-31bc647b24be"],
+      "match_texts": ["edge-native deployment with no server ops"], "note": "v2 (2026-07-09): replaces the original db-thing/PlanetScale query, which targeted a memory that was likely Claude's own aside during an architecture discussion rather than a decision the user consciously made. This targets a genuine, clearly first-person 'Decision:' record instead." },
 
     { "id": "q34", "category": "vague", "query": "why not just do simple key value yk",
       "gold_ids": ["7f1d422a-d7f9-4f2d-839f-766c3fa83e20"],
@@ -38,9 +38,9 @@
       "gold_ids": ["41d3828f-f6a4-41e8-933f-2607753f9efc"],
       "match_texts": ["epistemic-governance angle"], "note": "vague, open-ended differentiator question" },
 
-    { "id": "q42", "category": "vague", "query": "that scoring fix we did",
+    { "id": "q42", "category": "vague", "query": "that score spread thing we widened",
       "gold_ids": ["d698821f-1683-404b-8f03-5d3ff2464bf7"],
-      "match_texts": ["0.9–1.2 → 0.28–1.33"], "note": "vague ref to score normalization change" },
+      "match_texts": ["0.9–1.2 → 0.28–1.33"], "note": "v2 (2026-07-09): re-authored from 'that scoring fix we did', which was genuinely ambiguous — multiple distinct scoring-fix memories exist in the corpus (the Bhattacharyya-to-hybrid switch, generic 'fix retrieval scoring' tasks) and the original query didn't disambiguate which. 'spread'/'widened' are terms specific to this memory's actual text, not shared by the others." },
 
     { "id": "q43", "category": "vague", "query": "why do we track confidence like that",
       "gold_ids": ["03673c6e-872a-499d-97de-d044d8724a4c"],

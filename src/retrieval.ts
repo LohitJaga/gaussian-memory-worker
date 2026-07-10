@@ -791,12 +791,17 @@ export async function retrieve(
   const finalTop = sigmaGate(topDeduped, querySigmaVal, 2);
 
   // Diversity cap: prevent same type/micro-cluster from flooding results.
-  // Max 2 session summaries, max 3 from any single cluster_id — the raw, uncapped
-  // internal grouping signal (microcluster.ts), not the human-facing capped/named
-  // `domain` field. Memories without a cluster_id yet (pre-backfill) are exempt
-  // rather than all bucketed under one null key, so old rows aren't penalized as
-  // if they were one giant cluster.
-  const diversityCapped = applyDiversityCap(finalTop, 2, 4, 3, guaranteedInjectedIds);
+  // Max 2 session summaries, max 7 of any other single type (raised from 4 on
+  // 2026-07-09 — traced a real case where multiple genuinely-distinct episodic
+  // facts about one multi-step event, e.g. separate OAuth setup steps, were
+  // capped out even though none were near-duplicates; swept 4/5/6/7/8/10 against
+  // the full 44-query benchmark, gains plateaued at 7 with zero regressions found
+  // at any tested value up to 10 — see BENCHMARKING.md), max 3 from any single
+  // cluster_id — the raw, uncapped internal grouping signal (microcluster.ts), not
+  // the human-facing capped/named `domain` field. Memories without a cluster_id yet
+  // (pre-backfill) are exempt rather than all bucketed under one null key, so old
+  // rows aren't penalized as if they were one giant cluster.
+  const diversityCapped = applyDiversityCap(finalTop, 2, 7, 3, guaranteedInjectedIds);
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
   const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
 

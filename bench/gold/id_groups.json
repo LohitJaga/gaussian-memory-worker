@@ -1,6 +1,6 @@
 {
   "generated_by": "bench/tools/derive_id_groups.mjs",
-  "generated_at": "2026-07-09T14:04:19.349Z",
+  "generated_at": "2026-07-09T20:33:14.977Z",
   "note": "Maps each gold query to units: one group per match_text, with the gold_ids whose live D1 text answers it. Containment assignment when possible, token-overlap fallback otherwise (fallbacks + missing ids listed in stderr at generation time). Frozen gold files untouched.",
   "missing_ids": [],
   "queries": {
@@ -384,9 +384,9 @@
     "q33": {
       "groups": [
         {
-          "match_text": "chose cloudflare d1 over planetscale",
+          "match_text": "edge-native deployment with no server ops",
           "ids": [
-            "56ab6cee-d7e8-48ee-b7bc-846b8af28aec"
+            "28714cb3-de6c-45dc-a309-31bc647b24be"
           ]
         }
       ]

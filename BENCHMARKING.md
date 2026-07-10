@@ -501,6 +501,30 @@ Diversity cap vs on-topic clusters (q38 u0), the register misses (q33 unnatural
 query, q43 genuine), q30's k=8 asymmetry, high-top_k precision on the main set. None
 of today's work touched these.
 
+## Planned for next session (2026-07-09 evening)
+
+1. **Sigma-aware diversity cap.** Right now `applyDiversityCap`'s type/cluster limits
+   are pure counts — a well-consolidated, heavily-reinforced, low-sigma memory gets
+   capped identically to a fresh, uncertain one. This is the actual mechanism behind
+   the q09/q10-style "real fact exists but gets crowded out" cases (see the
+   otherTypeLimit sweep above: 4→7 fixed 3 real queries with zero regression, but
+   plateaued — some gaps are structural, not just a threshold problem). Cognitive
+   psychology's interference-theory literature says consolidated memories should
+   resist crowding better than fresh ones; the IR literature's Maximal Marginal
+   Relevance (Carbonell & Goldstein 1998) is the principled continuous version of
+   what the current cap crudely discretizes. Concrete next step: let low-sigma items
+   bypass the count cap more readily, reusing the existing `guaranteedInjectedIds`
+   exemption pattern rather than inventing a new mechanism.
+2. **LLM-judge as a proper harness tier**, not just a one-off calibration check.
+   Tonight's Haiku judge run (10 cases) agreed with manual reading on 9/10 and caught
+   one real overreach (q10) — cheap (~19K tokens for 10 cases) and genuinely more
+   reliable than lexical fuzzy-matching, which was directly proven to fail (q36 scored
+   a *higher* overlap coefficient than a true positive). Worth wiring into
+   `bench/ablation.mjs`/`inspect_all.mjs` as an automatic tier for any unit that's an
+   `id`/`text` miss, rather than re-running one-off agent calls each time.
+3. **Run LoCoMo** — after (1) and (2) land, so the external, comparable number
+   reflects the actually-improved system, not tonight's starting state.
+
 ---
 
 # Part 2 — Landscape Research (reference, compiled June 15, 2026)
