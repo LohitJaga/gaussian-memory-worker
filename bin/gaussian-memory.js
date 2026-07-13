@@ -337,7 +337,8 @@ async function init() {
         if (!oconfig.plugin.includes(pluginDst)) oconfig.plugin.push(pluginDst);
         if (!oconfig.mcp) oconfig.mcp = {};
         oconfig.mcp['gaussian-memory'] = { type: 'remote', url, headers: { Authorization: `Bearer ${token}` } };
-        fs.writeFileSync(opencodeJson, JSON.stringify(oconfig, null, 2));
+        fs.writeFileSync(opencodeJson, JSON.stringify(oconfig, null, 2), { mode: 0o600 });
+        fs.chmodSync(opencodeJson, 0o600); // writeFileSync's mode is ignored when the file already existed
         console.log('done');
       } catch (e) {
         console.log('failed:', e.message);
@@ -384,7 +385,8 @@ async function init() {
             const mcpCursorConfig = readJsonOrEmpty(cursorMcpJson);
             if (!mcpCursorConfig.mcpServers) mcpCursorConfig.mcpServers = {};
             mcpCursorConfig.mcpServers['gaussian-memory'] = { type: 'http', url, headers: { Authorization: `Bearer ${token}` } };
-            fs.writeFileSync(cursorMcpJson, JSON.stringify(mcpCursorConfig, null, 2));
+            fs.writeFileSync(cursorMcpJson, JSON.stringify(mcpCursorConfig, null, 2), { mode: 0o600 });
+            fs.chmodSync(cursorMcpJson, 0o600); // writeFileSync's mode is ignored when the file already existed
           }
         }
         console.log('done');
@@ -406,7 +408,8 @@ async function init() {
           url,
           headers: { Authorization: `Bearer ${token}` },
         };
-        fs.writeFileSync(zedSettings, JSON.stringify(zedConfig, null, 2));
+        fs.writeFileSync(zedSettings, JSON.stringify(zedConfig, null, 2), { mode: 0o600 });
+        fs.chmodSync(zedSettings, 0o600); // writeFileSync's mode is ignored when the file already existed
         console.log('done');
       } catch (e) {
         console.log('failed:', e.message);
@@ -425,7 +428,8 @@ async function init() {
           url,
           headers: { Authorization: `Bearer ${token}` },
         };
-        fs.writeFileSync(universalMcpPath, JSON.stringify(universalMcp, null, 2));
+        fs.writeFileSync(universalMcpPath, JSON.stringify(universalMcp, null, 2), { mode: 0o600 });
+        fs.chmodSync(universalMcpPath, 0o600); // writeFileSync's mode is ignored when the file already existed
         console.log('done');
       } catch (e) {
         console.log('failed:', e.message);
