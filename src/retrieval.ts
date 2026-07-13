@@ -844,6 +844,19 @@ export async function retrieve(
   // query's specificity requirement. Always keep at least 2 results to prevent empty injection.
   const finalTop = sigmaGate(topDeduped, querySigmaVal, 2);
 
+  // Sigma-aware exemption (2026-07-13): a low-rank member of an on-topic cluster that
+  // has actually earned high confidence via repeated Kalman reinforcement shouldn't be
+  // dropped by the diversity cap just because it ranked 4th — count-based position is
+  // not evidence of correctness. Reuses the guarantee-slot exemption mechanism instead
+  // of inventing a new one. Threshold 0.35 = sharpenSigma's own worst-case floor
+  // (sparse domains, domainSize<5, bottom out at 0.35 — see gaussian.ts:65); anything at
+  // or below that has sharpened to full convergence for its domain, not just "somewhat
+  // reinforced" — so the cutoff doesn't unfairly favor memories from larger domains
+  // (whose floor is lower, 0.15-0.25) over ones from small/sparse domains.
+  const SIGMA_EXEMPT_CEILING = 0.35;
+  const sigmaExemptIds = new Set(finalTop.filter(c => meanSigma(c.sigma) <= SIGMA_EXEMPT_CEILING).map(c => c.id));
+  const capExemptIds = new Set([...guaranteedInjectedIds, ...sigmaExemptIds]);
+
   // Diversity cap: prevent same type/micro-cluster from flooding results.
   // Max 2 session summaries, max 7 of any other single type (raised from 4 on
   // 2026-07-09 — traced a real case where multiple genuinely-distinct episodic
@@ -855,13 +868,14 @@ export async function retrieve(
   // the human-facing capped/named `domain` field. Memories without a cluster_id yet
   // (pre-backfill) are exempt rather than all bucketed under one null key, so old
   // rows aren't penalized as if they were one giant cluster.
-  const diversityCapped = applyDiversityCap(finalTop, 2, 7, 3, guaranteedInjectedIds);
+  const diversityCapped = applyDiversityCap(finalTop, 2, 7, 3, capExemptIds);
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
   const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
 
   if (opts.trace) {
     opts.trace.topDeduped = topDeduped.map(c => c.id.slice(0, 8));
     opts.trace.afterSigmaGate = finalTop.map(c => c.id.slice(0, 8));
+    opts.trace.sigmaExempt = [...sigmaExemptIds].map(id => id.slice(0, 8));
     opts.trace.afterDiversityCap = postDiversity.map(c => c.id.slice(0, 8));
   }
 
