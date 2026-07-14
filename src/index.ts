@@ -1,6 +1,7 @@
 import type { Env } from './types';
 import { TOOLS, handleToolCall } from './tools';
 import { embed } from './embed';
+import { initialSigma, serializeSigma } from './gaussian';
 import {
   pruneJunkMemories, updateDecay, deduplicateRecentMemories,
   deduplicateColdMemories, cleanupSingletons, refreshStaleDomainSummaries,
@@ -144,6 +145,77 @@ export default {
           rows,
           ...(trace ? { trace } : {}),
         }), { headers: JSON_HEADERS });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
+      }
+    }
+
+    // Bench-only generic completion endpoint — lets local bench scripts (which run outside
+    // the worker and have no env.AI binding) get a Workers AI completion without a separate
+    // Cloudflare API token. Reuses the same AUTH_TOKEN already required above. Generic on
+    // purpose (model + messages, not LoCoMo-specific) so both the LoCoMo eval script and a
+    // future shared LLM-judge harness tier (bench/lib/judge.mjs) can call it.
+    if (url.pathname === '/bench/generate') {
+      const q = body ?? {};
+      if (typeof q.model !== 'string' || !q.model.trim()) {
+        return new Response(JSON.stringify({ error: 'model (string) is required' }), { status: 400, headers: JSON_HEADERS });
+      }
+      if (!Array.isArray(q.messages) || q.messages.length === 0) {
+        return new Response(JSON.stringify({ error: 'messages (non-empty array) is required' }), { status: 400, headers: JSON_HEADERS });
+      }
+      try {
+        const result = await env.AI.run(q.model as any, {
+          messages: q.messages,
+          // 1024 default, not 512: reasoning models (e.g. Kimi K2.6/K2.7) spend most of the
+          // budget on hidden reasoning_content before ever reaching the final answer — a
+          // 500-token budget on a trivial factual question used 89 completion tokens and a
+          // 50-token budget produced empty output (finish_reason: "length", cut off mid-reasoning).
+          max_tokens: Number(q.max_tokens) || 1024,
+        }) as any;
+        // Response shape varies by model family — same fallback chain used elsewhere
+        // in this codebase (tools.ts) for @cf/* chat completions. String()-wrapped:
+        // confirmed live (2026-07-13, LoCoMo eval) that .content can come back as a
+        // non-string (e.g. structured content parts) for some responses — coerce here
+        // so callers always get a string, not an object that crashes their .trim()/.match().
+        const text = String(result?.response ?? result?.choices?.[0]?.message?.content ?? '');
+        return new Response(JSON.stringify({ model: q.model, text, _raw: q.debug === true ? result : undefined }), { headers: JSON_HEADERS });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
+      }
+    }
+
+    // Bench-only forced-spawn store — LoCoMo merge-ablation. Deliberately bypasses the
+    // Kalman-merge/dedup candidate search entirely (storage.ts's storeMemory), replicating
+    // only the "spawn a new row" shape (D1 insert, FTS5, Vectorize upsert) so every chunk
+    // is guaranteed a distinct, unmerged row — the counterfactual for measuring what merge
+    // costs in literal recall on this corpus. Known, disclosed gap vs the real store path:
+    // skips entity extraction (extractAndLinkEntities) and the sigma_history baseline
+    // insert — both are separate mechanisms from merge, add cost/scope, and the ablation's
+    // question is specifically about merge, not entity-graph or belief-drift behavior.
+    if (url.pathname === '/bench/store-nomerge') {
+      const q = body ?? {};
+      if (typeof q.text !== 'string' || !q.text.trim()) {
+        return new Response(JSON.stringify({ error: 'text (string) is required' }), { status: 400, headers: JSON_HEADERS });
+      }
+      try {
+        const domain = q.domain ?? 'general';
+        const memoryType = q.memory_type ?? 'episodic';
+        const project = q.project ?? 'default';
+        const mu = await embed(q.text, env);
+        const sigma = initialSigma(domain, Number(q.emotional_intensity) || 0, mu.length);
+        const now = Math.floor(Date.now() / 1000);
+        const memId = crypto.randomUUID();
+        await env.DB.batch([
+          env.DB.prepare(`
+            INSERT INTO memories
+              (id, text, sigma_diagonal, timestamp, last_accessed,
+               access_count, memory_type, domain, emotional_intensity, project, valid_from, cluster_id)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NULL)
+          `).bind(memId, q.text, serializeSigma(sigma), now, now, memoryType, domain, Number(q.emotional_intensity) || 0, project, now),
+          env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`).bind(memId, q.text, project),
+        ]);
+        await env.VECTORIZE.upsert([{ id: memId, values: Array.from(mu), metadata: { domain, memory_type: memoryType, project } }]);
+        return new Response(JSON.stringify({ action: 'spawned', id: memId }), { headers: JSON_HEADERS });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
       }
