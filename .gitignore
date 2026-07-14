@@ -6,3 +6,6 @@ wrangler.toml
 memories/
 __probe__.json
 gaussian-backup-*.sql
+bench/locomo/data/
+bench/locomo/results-*.json
+bench/locomo/.progress-*.json
