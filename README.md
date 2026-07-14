@@ -10,6 +10,23 @@ The system automatically captures what you worked on, what decisions you made, a
 
 The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't touched in weeks fade out. A precise technical query only matches memories you've actively reinforced; a vague exploratory question casts wider.
 
+### How it compares
+
+[Vercel's eve](https://vercel.com/eve) is a different category of tool, not a direct competitor — it's an open-source framework for building durable backend *agents* (sessions, tool calls, sandboxed code execution, Slack/Discord/GitHub channels), not a memory layer. Its docs don't describe any persistent cross-session memory — "durable sessions" means a single run can pause and resume across a deploy or crash, not that facts persist and get recalled weeks later. It's also not an editor integration; it deploys as its own backend service via the `eve` CLI, billed through whatever mix of Vercel Functions/Workflows/Sandbox/AI Gateway usage your agent generates, with no flat price. Genuinely complementary, not comparable row-by-row.
+
+Mem0 and Zep are the real direct competitors — both are memory layers with editor/SDK integrations and public pricing:
+
+| | Gaussian Memory | Mem0 | Zep |
+|---|---|---|---|
+| Persistent cross-session memory | Yes | Yes | Yes |
+| Confidence / staleness modeling | Bayesian σ per memory — continuously sharpens with reinforcement, decays unused, widens on contradiction | Not documented in the OSS README or product docs | Temporal validity windows (`valid_from`/`valid_to`) on graph edges, not a continuous confidence score |
+| Contradiction handling | Status-flip + negation phrasing classes, auto-resolves which side supersedes | Not documented | Graphiti resolves conflicting facts via temporal edge invalidation on its knowledge graph |
+| Hosting | BYOC — deploys to your own Cloudflare account, always | Apache 2.0, self-hostable core (pip/npm + Docker Compose); best-in-class ranking is "proprietary optimizations not available in the open-source SDK," exclusive to the managed platform | Graphiti core is Apache 2.0, self-hostable; Zep's hosted platform is cloud-only, BYOC only offered on the Enterprise tier |
+| Cost | ~$0/month on Cloudflare's free tier for normal use | Free tier (10K memories, 1K retrievals/mo), then $19–249+/mo, custom above that | Free tier (10K credits/mo), then $104/mo (Flex), $312/mo (Flex Plus), custom above that |
+| Editor / client integration | Claude Code, Cursor, OpenCode, Zed — native MCP server, any MCP-compatible client works out of the box | Claude Code, Cursor, Windsurf, OpenCode via published "agent skills," not a native protocol | API/SDK for building your own agent's memory — no native editor plugin |
+
+Sources: [Mem0 pricing](https://mem0.ai/pricing), [mem0ai/mem0 on GitHub](https://github.com/mem0ai/mem0), [Zep pricing](https://www.getzep.com/pricing), [getzep/graphiti on GitHub](https://github.com/getzep/graphiti). Checked 2026-07-14 — verify current terms before relying on this for a purchasing decision, pricing pages change.
+
 ## Quick start
 
 **Requirements:** Node.js 18+, a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works).
@@ -283,6 +300,27 @@ When two memories are close enough — measured via **Bhattacharyya distance** b
 11. Process entity extraction queue (50/run)
 
 ## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Clients["MCP Clients"]
+        CC[Claude Code]
+        CU[Cursor]
+        OC[OpenCode]
+        ZD[Zed]
+    end
+
+    Clients -->|MCP / JSON-RPC 2.0| W[["Cloudflare Worker<br/>(MCP server, all logic at edge)"]]
+
+    W --> AI[Workers AI<br/>BGE embeddings · Llama 3.2 / 3.3]
+    W --> DB[(D1<br/>memories + FTS5 keyword index)]
+    W --> VEC[(Vectorize<br/>memory embeddings)]
+    W --> MC[(MICRO_VECTORIZE<br/>dedup / diversity clusters)]
+    W --> KVS[(KV<br/>hot tier + identity cache)]
+
+    CRON[Cron Trigger<br/>nightly 6am UTC] --> W
+    W --> R2[(R2<br/>cold archive, σ&gt;1.5 &amp; 90d+)]
+```
 
 | Component | Role |
 |---|---|
