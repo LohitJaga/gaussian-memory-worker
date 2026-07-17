@@ -4,6 +4,24 @@ import {
   initialSigma, deserializeSigma, serializeSigma,
   kalmanMerge, shouldMerge, meanSigma,
 } from './gaussian';
+import { callAI, QuotaExceededError } from './ai';
+
+// Live-deployment migration: pending_ingest doesn't exist on already-deployed D1 databases.
+// CREATE TABLE IF NOT EXISTS is natively idempotent (unlike ALTER TABLE ADD COLUMN, which SQLite
+// has no IF NOT EXISTS form for — see ensureDomainColumns in domain.ts for that pattern), so no
+// try/catch-and-swallow dance is needed here, just a plain guarded call before first use.
+export async function ensurePendingIngestTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS pending_ingest (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      project TEXT NOT NULL DEFAULT 'default',
+      domain TEXT,
+      created_at INTEGER NOT NULL
+    )`
+  ).run().catch(() => {});
+}
 
 const HOT_KEY = 'hot:recent_ids';
 const HOT_TTL = 86400; // 24h
@@ -20,7 +38,13 @@ const RECENT_EMBEDDINGS_KEY = 'recent:store_embeddings';
 const RECENT_EMBEDDINGS_TTL = 600; // 10 min — comfortably past the documented lag
 const RECENT_EMBEDDINGS_MAX = 50;
 
-interface RecentEmbedding { id: string; mu: number[]; domain: string; ts: number }
+// project (2026-07-17): carried so storeMemory's merge-candidate check can stay
+// project-scoped even for the Vectorize-lag window this cache exists to cover —
+// without it, a paraphrase stored minutes apart under a DIFFERENT project could
+// become a merge candidate here after the main Vectorize search was scoped.
+// Optional only for decode compatibility with entries written before the field
+// existed; those age out within RECENT_EMBEDDINGS_TTL and never match any project.
+interface RecentEmbedding { id: string; mu: number[]; domain: string; ts: number; project?: string }
 
 async function recentEmbeddingsGet(env: Env): Promise<RecentEmbedding[]> {
   try {
@@ -29,10 +53,10 @@ async function recentEmbeddingsGet(env: Env): Promise<RecentEmbedding[]> {
   } catch { return []; }
 }
 
-async function recentEmbeddingsAdd(id: string, mu: Float32Array, domain: string, env: Env): Promise<void> {
+async function recentEmbeddingsAdd(id: string, mu: Float32Array, domain: string, project: string, env: Env): Promise<void> {
   try {
     const existing = await recentEmbeddingsGet(env);
-    const updated = [{ id, mu: Array.from(mu), domain, ts: Math.floor(Date.now() / 1000) }, ...existing]
+    const updated = [{ id, mu: Array.from(mu), domain, project, ts: Math.floor(Date.now() / 1000) }, ...existing]
       .slice(0, RECENT_EMBEDDINGS_MAX);
     await env.KV.put(RECENT_EMBEDDINGS_KEY, JSON.stringify(updated), { expirationTtl: RECENT_EMBEDDINGS_TTL });
   } catch {}
@@ -87,7 +111,7 @@ export async function processPendingEntityQueue(env: Env): Promise<void> {
     await env.KV.put('pending_entity_queue', JSON.stringify(queue));
     const now = Math.floor(Date.now() / 1000);
     for (const item of batch) {
-      const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+      const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
         messages: [
           { role: 'system', content: `Extract named entities. Return ONLY a JSON array of "type:name" strings. Max 4. Types: tool, project, concept, parameter, person. Return [] if none. Example: ["tool:GLM-4.7-flash","concept:spreading activation"]` },
           { role: 'user', content: item.text },
@@ -205,6 +229,70 @@ export function normalizeForExactMatch(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+// Pure merge-candidate selection for storeMemory — extracted (2026-07-17) so the
+// same-project eligibility invariant is unit-testable without a D1/Vectorize harness.
+// Invariants owned here:
+//  - PROJECT: only rows whose D1 project equals the storing project are eligible merge
+//    winners. The merge UPDATE overwrites the winner's text/domain/vector but never its
+//    D1 `project` column, so a cross-project winner silently teleports content across a
+//    project boundary (and strands the row from project-scoped cleanup — see the
+//    Vectorize-query block comment in storeMemory). The upstream candidate sources are
+//    already project-filtered; this guard makes the invariant hold no matter how a
+//    candidate got into the list.
+//
+//    Deliberately STRICT AND SYMMETRIC — 'default' gets no special treatment in either
+//    direction. An asymmetric rule (named store may absorb a default row, default store
+//    stays narrow) was evaluated and rejected 2026-07-17 against live data:
+//    (1) synthetic/eval corpora are themselves named projects ('locomo-eval'), so
+//        named→default merge permission re-opens the exact incident this fix closed —
+//        destructive benchmark writes into the default bucket, 46% of the corpus;
+//    (2) the measured duplication pattern is cwd-noise, not "generic fact restated in
+//        its own project": the same fact shows up under default + multiple named
+//        projects (project tags follow the session's working directory, not content),
+//        so named↔named restatement is as common as default↔named and the asymmetric
+//        rule wouldn't fix the dominant case anyway;
+//    (3) the default copy of a restated fact is the only copy other projects can see
+//        (named-context reads are own+default — projectScopeClause, retrieval.ts), so
+//        "absorbing" it destructively rewrites the one globally-visible copy.
+//    The duplication this strictness allows is handled non-destructively where it
+//    belongs: retrieval-time dedupBySimilarity collapses near-dup restatements at
+//    injection, memory_dedupe handles exact text.
+//  - CLUSTER: cross-cluster dedup keeps a looser ceiling (0.90) for session summaries
+//    (same content tagged per-cluster — collapse at the source instead of spawning 6-10
+//    rows that later flood retrieval) and a strict one (0.97) otherwise. Reads
+//    cluster_id from D1 rows, not Vectorize metadata — cluster_id isn't written to
+//    Vectorize at all (see microcluster.ts), and D1 is read-after-write consistent.
+export interface MergeCandidateRow { sigma_diagonal: string; text: string; cluster_id: string | null; project: string }
+export function selectMergeCandidate(
+  matches: { id: string; score?: number }[],
+  rowMap: Map<string, MergeCandidateRow>,
+  project: string,
+  clusterId: string | null,
+  memoryType: string,
+): { bestId: string | null; bestSigma: Float32Array | null } {
+  let bestId: string | null = null;
+  let bestDist = Infinity;
+  let bestSigma: Float32Array | null = null;
+
+  for (const match of matches) {
+    const row = rowMap.get(match.id);
+    if (!row) continue;
+    if (row.project !== project) continue;
+
+    const score = match.score ?? 0;
+    const crossClusterCeil = memoryType === 'session' ? 0.90 : 0.97;
+    if (row.cluster_id && clusterId && row.cluster_id !== clusterId && score < crossClusterCeil) continue;
+
+    const approxDist = 0.5 * (1 - score);
+    if (approxDist < bestDist) {
+      bestDist = approxDist;
+      bestId = match.id;
+      bestSigma = deserializeSigma(row.sigma_diagonal);
+    }
+  }
+  return { bestId, bestSigma };
+}
+
 export async function storeMemory(
   text: string, memoryType: string, domain: string,
   emotionalIntensity: number, env: Env,
@@ -212,16 +300,37 @@ export async function storeMemory(
   project: string = 'default',
   clusterId: string | null = null
 ): Promise<{ action: string; id: string; conflict_candidates?: Array<{ id: string; text: string; score: number }> }> {
-  const mu = precomputedMu ?? await embed(text, env);
+  let mu: Float32Array;
+  try {
+    mu = precomputedMu ?? await embed(text, env);
+  } catch (e) {
+    if (!(e instanceof QuotaExceededError)) throw e;
+    // Workers AI daily quota exhausted mid-embed — don't drop the write. Queue it to
+    // pending_ingest (NOT the memories table: a vectorless row here would need merge/dedup,
+    // contradiction detection, domain classification, and microcluster assignment all taught to
+    // tolerate a missing embedding, none of which they do today) and let the nightly
+    // drainPendingIngest cron step (tools.ts) run it through this exact same function again,
+    // for real, once quota resets at 00:00 UTC.
+    await ensurePendingIngestTable(env);
+    const id = crypto.randomUUID();
+    const now = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO pending_ingest (id, kind, payload, project, domain, created_at) VALUES (?, 'fact', ?, ?, ?, ?)`
+    ).bind(id, text, project, domain, now).run();
+    return { action: 'queued_pending', id };
+  }
   const dim = mu.length;
   const sigma = initialSigma(domain, emotionalIntensity, dim);
   const now = Math.floor(Date.now() / 1000);
 
   // D1 exact-text check before Vectorize — Vectorize has 2-5 min propagation lag so
   // a second ingest of the same text would spawn a duplicate before Vectorize indexes it.
+  // Project-scoped (2026-07-17): unscoped, this returned 'merged' against another
+  // project's row, so the fact silently ended up existing ONLY in that other project —
+  // a real cross-project leak for the caller, who stored into theirs and got nothing.
   const exactRow = await env.DB.prepare(
-    `SELECT id, sigma_diagonal FROM memories WHERE text = ? LIMIT 1`
-  ).bind(text).first<{ id: string; sigma_diagonal: string }>().catch(() => null);
+    `SELECT id, sigma_diagonal FROM memories WHERE text = ? AND project = ? LIMIT 1`
+  ).bind(text, project).first<{ id: string; sigma_diagonal: string }>().catch(() => null);
   if (exactRow) {
     const existingSigma = deserializeSigma(exactRow.sigma_diagonal);
     const [, newSigma] = kalmanMerge(mu, existingSigma, mu, existingSigma);
@@ -238,9 +347,23 @@ export async function storeMemory(
   // sequentially (as an earlier version of this function did) was pure added latency on the
   // write hot path (storeMemory fires on every memory_store/auto_store/extract_and_store call,
   // including the PostToolUse hook on every Bash/Write in Claude Code sessions).
+  //
+  // Project-scoped as of 2026-07-17 (strict, including 'default' — a store may only merge
+  // into rows of its OWN project): this query was globally unscoped, so a store under one
+  // project could select a merge winner from ANY project — and the merge UPDATE below
+  // overwrites the winner's text/domain/vector while leaving its D1 `project` column
+  // untouched. Concrete hazard traced during the LoCoMo post-mortem (2026-07-16): a
+  // benchmark chunk (project='locomo-eval') merging into a real default-project memory
+  // would have destroyed its content while stranding the row from the project-scoped
+  // cleanup; the reverse direction would have routed a real memory's content into a row
+  // the cleanup then deleted. The project metadata index this filter needs exists and
+  // covers the full corpus (re-upserted, confirmed live 2026-07-10 — see retrieval.ts's
+  // projectScopeClause block). Contradiction DETECTION below deliberately keeps its
+  // wider view (FTS5 candidates are not project-filtered): it only sets a flag, never
+  // rewrites content, and cross-project contradictions are real signal.
   const ftsQuery = buildKeywordQuery(text);
   const [results, ftsRows, recentEmbeddings] = await Promise.all([
-    env.VECTORIZE.query(Array.from(mu), { topK: 10, returnValues: false, returnMetadata: 'indexed' }),
+    env.VECTORIZE.query(Array.from(mu), { topK: 10, returnValues: false, returnMetadata: 'indexed', filter: { project } }),
     ftsQuery.length > 0
       ? env.DB.prepare(`SELECT id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT 10`)
           .bind(ftsQuery).all<{ id: string }>().catch(() => ({ results: [] as { id: string }[] }))
@@ -257,7 +380,9 @@ export async function storeMemory(
   // Bhattacharyya/shouldMerge logic below, this only fixes candidate recall.
   const recentMuArr = Array.from(mu);
   const recentCandidates = recentEmbeddings
-    .filter(r => r.ts > now - RECENT_EMBEDDINGS_TTL)
+    // Same strict project scope as the Vectorize query above — entries written before
+    // the cache carried a project never match and age out within the TTL.
+    .filter(r => r.ts > now - RECENT_EMBEDDINGS_TTL && r.project === project)
     .map(r => ({ id: r.id, score: dotProduct(recentMuArr, r.mu), metadata: { domain: r.domain } }))
     .filter(r => r.score > 0.5);
 
@@ -290,24 +415,26 @@ export async function storeMemory(
     : [];
   const contradictionMatches = [...matches, ...ftsCandidates];
 
-  let bestId: string | null = null;
-  let bestDist = Infinity;
-  let bestSigma: Float32Array | null = null;
-
-  // Batch fetch all candidate rows in one D1 query instead of N sequential selects
+  // Batch fetch all candidate rows in one D1 query instead of N sequential selects.
+  // `project` is fetched so the merge paths below can enforce same-project eligibility
+  // even for rows that entered rowMap via the (deliberately unscoped) FTS5 arm.
   const candidateIds = [...matchIds, ...ftsOnlyIds];
   const placeholders = candidateIds.map(() => '?').join(',');
   const rows = candidateIds.length > 0
     ? await env.DB.prepare(
-        `SELECT id, sigma_diagonal, text, cluster_id FROM memories WHERE id IN (${placeholders})`
-      ).bind(...candidateIds).all<{ id: string; sigma_diagonal: string; text: string; cluster_id: string | null }>()
+        `SELECT id, sigma_diagonal, text, cluster_id, project FROM memories WHERE id IN (${placeholders})`
+      ).bind(...candidateIds).all<{ id: string; sigma_diagonal: string; text: string; cluster_id: string | null; project: string }>()
     : { results: [] };
   const rowMap = new Map(rows.results.map(r => [r.id, r]));
 
   // Graphiti-style fast path: exact normalized match skips Bhattacharyya entirely.
   // Catches same-text re-ingestion with trivial surface differences (case, punctuation).
+  // Same-project only — rowMap includes FTS5-sourced rows from other projects (kept for
+  // contradiction detection), which must not become merge targets (see the block comment
+  // on the Vectorize query above).
   const normalizedNew = normalizeForExactMatch(text);
   for (const row of rows.results) {
+    if (row.project !== project) continue;
     if (normalizeForExactMatch(row.text) === normalizedNew) {
       const existingSigma = deserializeSigma(row.sigma_diagonal);
       const [, newSigma] = kalmanMerge(mu, existingSigma, mu, existingSigma);
@@ -322,28 +449,7 @@ export async function storeMemory(
     }
   }
 
-  for (const match of matches) {
-    const row = rowMap.get(match.id);
-    if (!row) continue;
-
-    // Cross-cluster dedup: merge near-identical memories regardless of cluster. Session
-    // summaries are the same content tagged per-cluster, so use a looser ceiling (0.90)
-    // for them to collapse the per-cluster duplicates at the source instead of spawning
-    // 6-10 rows that later flood retrieval. Reads cluster_id from D1 (rowMap), not
-    // Vectorize match metadata — cluster_id isn't written to Vectorize metadata at all
-    // (see microcluster.ts), and D1 is read-after-write consistent unlike Vectorize.
-    const crossClusterCeil = memoryType === 'session' ? 0.90 : 0.97;
-    if (row.cluster_id && clusterId && row.cluster_id !== clusterId && match.score < crossClusterCeil) continue;
-
-    const existingSigma = deserializeSigma(row.sigma_diagonal);
-    const approxDist = 0.5 * (1 - match.score);
-
-    if (approxDist < bestDist) {
-      bestDist = approxDist;
-      bestId = match.id;
-      bestSigma = existingSigma;
-    }
-  }
+  const { bestId, bestSigma } = selectMergeCandidate(matches, rowMap, project, clusterId, memoryType);
 
   // Contradiction check: scans ALL candidates independently (Vectorize + recent-cache + FTS5
   // keyword matches above), not just the merge-selected bestId. Three bugs found 2026-07-07
@@ -371,18 +477,23 @@ export async function storeMemory(
   if (contradictionId && contradictionText) {
     await env.DB.prepare('UPDATE memories SET contradiction_flag = 1 WHERE id = ?')
       .bind(contradictionId).run();
-    // Fall through to spawn with contradiction_flag set
+    // Fall through to spawn WITHOUT contradiction_flag set — only the older/existing side
+    // (contradictionId, above) gets flagged. The new memory is presumptively the current,
+    // correct information and shouldn't eat the retrieval penalty (contradictionFactor=0.3
+    // in retrieval.ts) for the ~24h until the nightly auto-judge cron resolves the pair.
+    // Confirmed live 2026-07-15: hardcoding 1 here suppressed a same-day backfilled
+    // correction alongside the stale memory it was replacing, right when it mattered most.
     const id = crypto.randomUUID();
     await env.DB.prepare(`
       INSERT INTO memories
         (id, text, sigma_diagonal, timestamp, last_accessed,
          access_count, memory_type, domain, emotional_intensity, contradiction_flag, project, valid_from, cluster_id)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 0, ?, ?, ?)
     `).bind(id, text, serializeSigma(sigma), now, now, memoryType, domain, emotionalIntensity, project, now, clusterId).run();
     await env.DB.prepare(`INSERT INTO memories_fts (id, text, project) VALUES (?, ?, ?)`)
       .bind(id, text, project).run().catch(() => {});
     await env.VECTORIZE.upsert([{ id, values: Array.from(mu), metadata: { domain, memory_type: memoryType, project } }]);
-    await recentEmbeddingsAdd(id, mu, domain, env); // visible to merge-check immediately, unlike Vectorize
+    await recentEmbeddingsAdd(id, mu, domain, project, env); // visible to merge-check immediately, unlike Vectorize
     await extractAndLinkEntities(id, text, env); // awaited — KV write must complete
     // Record initial σ — baseline for belief drift tracking
     await env.DB.prepare(
@@ -451,7 +562,7 @@ export async function storeMemory(
       values: Array.from(mu),
       metadata: { domain, memory_type: memoryType, project },
     }]),
-    recentEmbeddingsAdd(id, mu, domain, env), // visible to merge-check immediately, unlike Vectorize
+    recentEmbeddingsAdd(id, mu, domain, project, env), // visible to merge-check immediately, unlike Vectorize
     extractAndLinkEntities(id, text, env), // awaited — KV write must complete
   ]);
 

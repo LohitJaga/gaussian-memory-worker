@@ -26,6 +26,17 @@ What actually shows up in context, injected automatically:
 
 RAG retrieves chunks from a static document store, and a chunk means whatever it meant when you indexed it, forever. This system tracks confidence: facts you keep confirming get sharper, facts you haven't touched in months fade out, and a new fact that contradicts an old one gets flagged and resolved instead of handed back as two equally-weighted chunks for you to sort out. RAG over your codebase or docs solves a different problem. This is memory of what you decided and why.
 
+## Features
+
+- Persistent memory across sessions, devices, and editors, all backed by the same D1/Vectorize store
+- Confidence scoring per memory: sharpens with reinforcement, decays when ignored, gets discarded once it fades too far
+- Hybrid retrieval — cosine similarity, BM25 keyword search, recency, and access frequency, fused and confidence-weighted
+- Automatic capture of decisions, code diffs, and session summaries without asking
+- Contradiction detection: a new fact that conflicts with an old one gets flagged and resolved instead of silently duplicated
+- Entity graph and spreading activation surface related memories even when the wording doesn't match
+- One MCP server for Claude Code, Cursor, OpenCode, and Zed — same tools, same behavior everywhere
+- Self-hosted on your own Cloudflare account, no managed service, ~$0/month on the free tier
+
 ## Quick start
 
 **Requirements:** Node.js 18+, a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works).

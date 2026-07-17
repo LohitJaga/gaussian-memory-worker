@@ -92,3 +92,26 @@ CREATE TABLE IF NOT EXISTS memory_entities (
 CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
 
 CREATE INDEX IF NOT EXISTS idx_memories_valid_to ON memories(valid_to) WHERE valid_to IS NOT NULL;
+
+-- Quota-degraded write queue: rows land here instead of `memories` when a Workers AI daily quota
+-- exhaustion (QuotaExceededError, see src/ai.ts) interrupts storeMemory's embed() call or
+-- memory_extract_and_store's extraction call. Deliberately a separate table, not memories-table
+-- columns (e.g. needs_reembed/needs_extraction) — a quota-degraded write skips embedding AND
+-- domain classification AND merge/contradiction detection AND microcluster assignment, so a
+-- placeholder row in `memories` would need every one of those systems taught to tolerate a
+-- vectorless/undomained/unclustered row. A separate table instead lets the nightly
+-- drainPendingIngest cron step (tools.ts) run each row through the exact same real
+-- storeMemory()/memory_extract_and_store() path a live call uses, once quota resets — no
+-- partial-state invariants for the rest of the system to special-case.
+-- Added via ensurePendingIngestTable()'s CREATE TABLE IF NOT EXISTS (storage.ts) for existing
+-- deployments; declared here too so fresh installs get it without a migration step.
+CREATE TABLE IF NOT EXISTS pending_ingest (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,          -- 'raw_log' | 'fact'
+  payload TEXT NOT NULL,       -- raw session log text (raw_log) or a single fact's text (fact)
+  project TEXT NOT NULL DEFAULT 'default',
+  domain TEXT,                 -- meaningful for kind='fact' only; NULL for 'raw_log' (re-extracted fresh, domain isn't known yet)
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_ingest_created ON pending_ingest(created_at);

@@ -844,17 +844,35 @@ export async function retrieve(
   // query's specificity requirement. Always keep at least 2 results to prevent empty injection.
   const finalTop = sigmaGate(topDeduped, querySigmaVal, 2);
 
-  // Sigma-aware exemption (2026-07-13): a low-rank member of an on-topic cluster that
-  // has actually earned high confidence via repeated Kalman reinforcement shouldn't be
-  // dropped by the diversity cap just because it ranked 4th — count-based position is
-  // not evidence of correctness. Reuses the guarantee-slot exemption mechanism instead
-  // of inventing a new one. Threshold 0.35 = sharpenSigma's own worst-case floor
-  // (sparse domains, domainSize<5, bottom out at 0.35 — see gaussian.ts:65); anything at
-  // or below that has sharpened to full convergence for its domain, not just "somewhat
-  // reinforced" — so the cutoff doesn't unfairly favor memories from larger domains
-  // (whose floor is lower, 0.15-0.25) over ones from small/sparse domains.
+  // Sigma-aware exemption (2026-07-13, BOUNDED 2026-07-17): a low-rank member of an
+  // on-topic cluster that has actually earned high confidence via repeated Kalman
+  // reinforcement shouldn't be dropped by the diversity cap just because it ranked 4th —
+  // count-based position is not evidence of correctness. Reuses the guarantee-slot
+  // exemption mechanism instead of inventing a new one. Threshold 0.35 = sharpenSigma's
+  // own worst-case floor (sparse domains, domainSize<5, bottom out at 0.35 — see
+  // gaussian.ts:65).
+  //
+  // Why bounded: the original unbounded form exempted EVERY candidate at or below the
+  // ceiling — and because retrieve() itself sharpens sigma on each access (see the
+  // write-back below), the most-retrieved half of the corpus converges under 0.35
+  // (measured 2026-07-16: 2,406/4,898 memories under 0.3). Traced live: a vague top_k=8
+  // query returned 21 rows with all 21 exempt — the diversity cap pruned nothing,
+  // including 5 session summaries against a nominal cap of 2. So the exemption is now
+  // (a) capped at 2 candidates, matching the guarantee-slot budget — the motivating
+  // case (q38) needed exactly one slot — and (b) gated on scoring within 10% of the
+  // set's top hit, so only a genuinely competitive candidate can bypass the cap, not
+  // the low-sigma long tail that merely cleared the adaptive floor.
   const SIGMA_EXEMPT_CEILING = 0.35;
-  const sigmaExemptIds = new Set(finalTop.filter(c => meanSigma(c.sigma) <= SIGMA_EXEMPT_CEILING).map(c => c.id));
+  const SIGMA_EXEMPT_MAX = 2;
+  const SIGMA_EXEMPT_SCORE_MARGIN = 0.9;
+  const topHitScore = finalTop.reduce((mx, c) => Math.max(mx, c.score), 0);
+  const sigmaExemptIds = new Set(
+    finalTop
+      .filter(c => meanSigma(c.sigma) <= SIGMA_EXEMPT_CEILING && c.score >= topHitScore * SIGMA_EXEMPT_SCORE_MARGIN)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, SIGMA_EXEMPT_MAX)
+      .map(c => c.id)
+  );
   const capExemptIds = new Set([...guaranteedInjectedIds, ...sigmaExemptIds]);
 
   // Diversity cap: prevent same type/micro-cluster from flooding results.

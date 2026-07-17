@@ -1,5 +1,5 @@
 import type { Env } from './types';
-import { TOOLS, handleToolCall } from './tools';
+import { TOOLS, handleToolCall, drainPendingIngest } from './tools';
 import { embed } from './embed';
 import { initialSigma, serializeSigma } from './gaussian';
 import {
@@ -9,6 +9,7 @@ import {
 } from './cron';
 import { processPendingEntityQueue } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
+import { callAI } from './ai';
 
 export type { Env };
 
@@ -164,7 +165,7 @@ export default {
         return new Response(JSON.stringify({ error: 'messages (non-empty array) is required' }), { status: 400, headers: JSON_HEADERS });
       }
       try {
-        const result = await env.AI.run(q.model as any, {
+        const result = await callAI(env, q.model, {
           messages: q.messages,
           // 1024 default, not 512: reasoning models (e.g. Kimi K2.6/K2.7) spend most of the
           // budget on hidden reasoning_content before ever reaching the final answer — a
@@ -277,6 +278,12 @@ export default {
     await run('synthesizeIdentity', () => synthesizeIdentityProfile(env));
     await run('memoryJudge', () => handleToolCall('memory_judge', {}, env));
     await run('entityQueue', () => processPendingEntityQueue(env));
+    // Runs LAST, deliberately: drains quota-degraded writes (pending_ingest, see src/ai.ts +
+    // storage.ts's storeMemory) through the real store/extraction path now that every earlier
+    // AI-using step above has already had first claim on today's (freshly-reset-at-00:00-UTC)
+    // neuron budget. Capped per run (see PENDING_INGEST_DRAIN_CAP in tools.ts) so a large
+    // backlog can't itself burn through the whole day's quota in one cron tick.
+    await run('drainPendingIngest', () => drainPendingIngest(env));
   },
 };
 

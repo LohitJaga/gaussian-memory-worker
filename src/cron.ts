@@ -1,10 +1,11 @@
 import type { Env } from './types';
-import { batchEmbed, dotProduct } from './embed';
+import { batchEmbed } from './embed';
 import {
-  ensureDomainColumns, classifyBatchDomains, refreshDomainSummary,
+  ensureDomainColumns, classifyBatchDomains, refreshDomainSummary, singletonRemapTarget,
 } from './domain';
 import { applyBatchAssignments } from './rebuild';
 import { decaySigma, deserializeSigma, serializeSigma, meanSigma } from './gaussian';
+import { callAI } from './ai';
 
 export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -264,12 +265,12 @@ export async function cleanupSingletons(env: Env, minCount = 3): Promise<string>
 
     for (let i = 0; i < batch.length; i++) {
       const mu = Array.from(mus[i]);
-      let bestDomain = anchoredParsed[0].name;
-      let bestSim = -1;
-      for (const anchor of anchoredParsed) {
-        const sim = dotProduct(mu, anchor.centroid);
-        if (sim > bestSim) { bestSim = sim; bestDomain = anchor.name; }
-      }
+      // Floor-guarded (2026-07-17): was a raw argmax with no similarity floor — the
+      // same no-floor force-merge bug fixed in the remap path on 2026-07-02/05 but
+      // never here. Unrelated content now lands in 'general' (retried nightly by the
+      // batch classifier) instead of being glued onto the nearest anchor regardless
+      // of fit. See singletonRemapTarget (domain.ts) for the full rationale.
+      const bestDomain = singletonRemapTarget(mu, anchoredParsed.map(a => ({ name: a.name, emb: a.centroid })));
       d1Updates.push(
         env.DB.prepare('UPDATE memories SET domain = ? WHERE id = ?').bind(bestDomain, batch[i].id)
       );
@@ -323,7 +324,7 @@ export async function synthesizeIdentityProfile(env: Env): Promise<void> {
   const facts = (rows.results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+  const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
     messages: [
       {
         role: 'system',
@@ -366,7 +367,7 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
     const batch = cold.slice(i, i + BATCH);
     const summaries = await Promise.all(batch.map(async row => {
       try {
-        const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+        const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
           messages: [
             { role: 'system', content: 'Summarize the following memory in one concise sentence. Return only the sentence.' },
             { role: 'user', content: row.text },
