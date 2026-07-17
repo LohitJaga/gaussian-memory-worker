@@ -1,18 +1,30 @@
 # Gaussian Memory
 
+[![CI](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml/badge.svg)](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly (~$0/month on the free tier for most users).
 
 ## What it does
 
-The system automatically captures what you worked on, what decisions you made, and what's still open, then injects the relevant context at the start of each session before you ask.
+The system automatically captures what you worked on, what decisions you made, and what's still open. A hook fires on every prompt you send, not just the first one of a session, and injects relevant context back in before the model answers. It runs three queries in parallel (your actual prompt, recent decisions for the current project, and your working conventions/preferences), merges and score-filters the results, and caps what gets injected so it stays a small top-up instead of a wall of text.
 
-The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't touched in weeks fade out. A precise technical query only matches memories you've actively reinforced; a vague exploratory question casts wider.
+The difference from other memory systems is that every memory carries its own confidence score, and that score moves over time. Reinforce a belief and its confidence climbs. Leave it untouched for weeks and it fades.
+
+What actually shows up in context, injected automatically:
+
+```
+[0.94] (auth-service ↑/decision) ● Replaced Redis with D1 for session storage — zero egress fees, edge-native
+[0.81] (auth-service →/procedural) ● JWT migration still incomplete — old sessions not yet cut over
+```
+
+`[0.94]` is that memory's relevance to your current prompt, ranked by the retrieval pipeline described below. `(auth-service ↑/decision)` is the project, a confidence trend arrow (`↑` rising, `→` stable, `↓` fading), and the memory type (`decision`, `episodic`, `semantic`, `procedural`, `session`).
 
 ### Why not just RAG?
 
-RAG searches a static document store — a chunk means whatever it meant when you indexed it. This is closer to how a person remembers things: facts you keep confirming get sharper (σ drops), facts you haven't touched in months fade out, and if you say something that contradicts an old memory, it gets flagged and resolved instead of just handing you both chunks and letting you sort it out. It's not a replacement for RAG over your codebase or docs — it's memory of what you decided and why, which is a different problem than search.
+RAG retrieves chunks from a static document store, and a chunk means whatever it meant when you indexed it, forever. This system tracks confidence: facts you keep confirming get sharper, facts you haven't touched in months fade out, and a new fact that contradicts an old one gets flagged and resolved instead of handed back as two equally-weighted chunks for you to sort out. RAG over your codebase or docs solves a different problem. This is memory of what you decided and why.
 
 ## Quick start
 
@@ -48,9 +60,7 @@ On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as S
 
 ## Cloudflare plan
 
-Workers AI has a 10,000 neuron/day limit on the free plan. Two sessions/day with the nightly cron runs around 2,000–2,500 neurons. The 10,000/day free limit is not a concern for normal use.
-
-The one exception is `memory_rebuild_domains(targeted=false)` — a full rebuild. Grouping itself is pure embedding math (no LLM cost at all); Llama 3.3 70B is only called once per resulting group to generate a name, so cost scales with how many distinct topics you have, not how many memories. Still resumable and safe to run incrementally; no need to run it often since day-to-day tagging doesn't depend on it.
+Workers AI has a 10,000 neuron/day limit on the free plan. Two sessions/day with the nightly cron runs around 2,000–2,500 neurons, so normal use won't hit the limit. The one thing that can is a full domain rebuild (`memory_rebuild_domains` with `targeted=false`, covered under [MCP tools](#mcp-tools) below); it's resumable and doesn't need to run often.
 
 ## Seed your memory (recommended)
 
@@ -87,9 +97,11 @@ Each bullet or paragraph is stored as a memory. The section header is prepended 
 ## Hook setup
 
 ### Claude Code
-Configured automatically by `npx gaussian-memory init`. Nothing to do.
 
-Manual setup if needed: copy the hook scripts and add them to `~/.claude/settings.json`:
+<details>
+<summary>Configured automatically by <code>init</code> — expand for manual setup</summary>
+
+Copy the hook scripts and add them to `~/.claude/settings.json`:
 ```bash
 cp hooks/gaussian-*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/gaussian-*.sh
@@ -107,8 +119,12 @@ chmod +x ~/.claude/hooks/gaussian-*.sh
 
 > **Windows:** Use WSL. Run `npx gaussian-memory init` inside the WSL shell and add env vars to your WSL shell profile.
 
+</details>
+
 ### OpenCode
-Configured automatically by `npx gaussian-memory init` if `~/opencode.json` is detected. Nothing to do.
+
+<details>
+<summary>Configured automatically by <code>init</code> if <code>~/opencode.json</code> is detected — expand for manual setup and what you get</summary>
 
 Manual setup: add to `~/opencode.json`:
 
@@ -138,8 +154,12 @@ cp hooks/opencode-gaussian-memory.mjs ~/.opencode/gaussian-memory.mjs
 - **Session-end extraction** — `session.idle` and `session.compacted` hooks trigger `memory_extract_and_store` on the full session transcript.
 - **Cross-editor memory** — Claude Code and OpenCode share the same D1/Vectorize backend. Context stored in one editor surfaces in the other.
 
+</details>
+
 ### Cursor
-Configured automatically by `npx gaussian-memory init` if `~/.cursor` is detected. Nothing to do.
+
+<details>
+<summary>Configured automatically by <code>init</code> if <code>~/.cursor</code> is detected — expand for manual setup and what you get</summary>
 
 Manual setup: create or edit `~/.cursor/mcp.json`:
 
@@ -185,9 +205,14 @@ chmod +x ~/.cursor/hooks/gaussian-store.sh
 - **Auto-store** — `sessionEnd` hook extracts and stores memories when you close a conversation.
 - **Auto-inject** — not available yet. Cursor's `sessionStart` hook supports an `additional_context` output field that would enable this, but injection is currently broken upstream ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). When they fix it, Cursor will have full parity with Claude Code.
 
+</details>
+
 ### Zed
 
-`init` auto-configures Zed if `~/.config/zed/` exists. It merges a `context_servers` entry into `~/.config/zed/settings.json`:
+<details>
+<summary><code>init</code> auto-configures Zed if <code>~/.config/zed/</code> exists — expand for details</summary>
+
+It merges a `context_servers` entry into `~/.config/zed/settings.json`:
 
 ```json
 {
@@ -202,11 +227,16 @@ chmod +x ~/.cursor/hooks/gaussian-store.sh
 
 Restart Zed and the memory tools are available in the assistant.
 
+</details>
+
 ### Other MCP-compatible editors
 
-Any editor that supports remote HTTP MCP servers should work for tool calls: Windsurf, Continue.dev, VS Code (MCP extension), etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint — no SSE or OAuth required.
+<details>
+<summary>Any editor with remote HTTP MCP support should work for tool calls — expand for config</summary>
 
-`init` also writes a universal `~/.mcp.json` using the emerging MCP standard format. Some editors pick this up automatically; for others, copy it into your editor's own MCP config:
+Windsurf, Continue.dev, VS Code (MCP extension), etc. The worker is a plain JSON-RPC 2.0 HTTP endpoint, no SSE or OAuth required.
+
+`init` also writes a universal `~/.mcp.json` following the MCP spec's standard config shape. Some editors pick this up automatically; for others, copy it into your editor's own MCP config:
 
 ```json
 {
@@ -224,6 +254,8 @@ Any editor that supports remote HTTP MCP servers should work for tool calls: Win
 
 Auto-inject and auto-store depend on each editor's hook system and aren't verified beyond Claude Code, OpenCode, and Cursor. If you get it working in another editor, PRs welcome.
 
+</details>
+
 ## Backup
 
 Export your D1 memory store to a local SQL file at any time:
@@ -234,48 +266,51 @@ npx gaussian-memory backup
 
 Writes a timestamped `.sql` file in the current directory. Run before migrations or destructive cron operations.
 
-## Known gaps
+## Testing
 
-**Cursor: auto-inject not working.** Cursor's `sessionStart` hook supports an `additional_context` return field designed for exactly this — inject retrieved memories before the first message. It's broken in the current Cursor release ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). Until it's fixed, you can call `memory_retrieve` manually at the start of a session, or rely on the model to do it proactively since the tools are registered.
+```bash
+npm test           # unit tests: gaussian math, clustering, domain classification, retrieval, storage, AI quota handling
+npm run test:e2e   # end-to-end test against a live worker
+npm run lint       # biome
+npm run typecheck  # tsc --noEmit
+```
 
-**OpenCode: tool output capture not working.** The plugin implements `tool.execute.after` but it's never triggered in OpenCode v1.16.2 (issue [#25918](https://github.com/anomalyco/opencode/issues/25918) — declared but not wired up in the runtime). Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff; OpenCode can't do this yet. Conversation content is still captured via `chat.input`/`chat.message` hooks.
-
-**pi.dev: not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
-
-**Personal CLI tools: not applicable.** Gaussian Memory is designed for AI agent workflows. Automatic capture only fires when an MCP-connected agent (Claude Code, etc.) is running your session. Work done directly in the terminal without an agent (shell scripts, CLI tools, manual commands) won't be captured unless you call the MCP tools explicitly.
+All four run on every push and PR to `main` via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 
 ## How it works
 
-### The σ model
+### Confidence scoring
 
-Every memory stores a confidence value σ ∈ [0, ∞):
-- **Stored:** σ = 0.5 (uncertain, newly observed)
-- **Retrieved:** σ decreases (sharpens): you confirmed this was relevant
-- **Ignored:** σ increases nightly via exponential decay
-- **Pruned:** σ > 2.0, decayed past usefulness
+Every memory carries a confidence score:
+- **Stored:** starts at medium confidence — newly observed, unproven
+- **Retrieved:** confidence rises, since being pulled up and used is evidence it mattered
+- **Ignored:** confidence fades nightly via exponential decay
+- **Pruned:** once confidence fades far enough, the memory is discarded as no longer useful
 
 ### Retrieval
 
-Base score is a weighted combination of **cosine similarity** (0.50), **BM25 keyword match** (0.15), **recency** (0.22), and **access frequency** (0.13), normalized within each retrieval batch. BM25 is a first-class signal — a memory that keyword-matches precisely surfaces even with a mediocre vector score. This base is then modulated by a **Bhattacharyya multiplier** — the key differentiator.
+Base score is a weighted combination of **cosine similarity** (0.50), **BM25 keyword match** (0.15), **recency** (0.27), and **access frequency** (0.08), normalized within each retrieval batch. A memory that keyword-matches precisely can surface even with a mediocre vector score, since BM25 is a first-class signal, not a tiebreaker. Vector search and FTS5 keyword search run in parallel and get fused via reciprocal-rank fusion before scoring. A **Bhattacharyya multiplier** then adjusts that base score up or down.
 
-The Bhattacharyya multiplier compares the query's confidence against each memory's σ. A precise technical query (low σ) amplifies memories with similarly low σ — sharp, well-reinforced facts. A vague exploratory query (high σ) allows uncertain memories through. This is what makes retrieval context-sensitive rather than purely semantic.
+The multiplier compares how confident the query itself sounds against how confident each memory is. A precise technical query amplifies memories that are similarly high-confidence: sharp, well-reinforced facts. A vague exploratory query lets lower-confidence memories through too. Capitalized or named terms in the query read as more precise; their absence reads as more vague, regardless of query length. That query-to-memory confidence match is what keeps retrieval from being purely semantic.
+
+Beyond the base score, retrieval also runs entity-graph boosting (shared named entities between memories), spreading activation (top-3 hits become anchors, a 2-hop BFS pulls in their neighbors), and cluster cohesion bonuses (memories that keep co-occurring with shared entities score as a group). None of this requires an LLM call at query time. It's pure vector/SQL math, so retrieval latency doesn't scale with corpus size the way an LLM-in-the-loop approach would.
 
 After scoring:
-- **Temporal validity filter:** memories with `valid_to` set (superseded by a newer version) are excluded before scoring — expired facts never surface
+- **Temporal validity filter:** memories with `valid_to` set (superseded by a newer version) are excluded before scoring, so expired facts never surface
 - **Spreading activation:** top-3 hits become anchors; neighboring memories in the entity graph score a secondary boost
 - **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
-- **σ tiebreaker:** equal-scoring memories resolve in favor of the sharper one (lower σ = more reinforced)
+- **Confidence tiebreaker:** equal-scoring memories resolve in favor of the more confident one
 - **Threshold retrieval:** all memories above a score floor are returned, not a fixed top-k
 
 ### Merging
 
-When two memories are close enough — measured via **Bhattacharyya distance** between their confidence distributions, not raw cosine similarity — they merge via **Kalman update** rather than duplicating. The threshold is tighter for memories the system considers the same topic (same `cluster_id`) than for memories it considers unrelated, so genuine cross-topic duplicates still collapse without accidentally merging distinct facts that happen to share wording. The merged uncertainty is the optimal combination of both. This is why the system doesn't accumulate dozens of near-identical facts over time.
+Closeness is measured via **Bhattacharyya distance** between two memories' confidence distributions, not raw cosine similarity. Memories close enough by that measure merge via **Kalman update** instead of sitting as duplicates. The threshold is tighter for memories the system already considers the same topic (same `cluster_id`) than for ones it considers unrelated, so genuine cross-topic duplicates still collapse without accidentally merging distinct facts that happen to share wording. Merging two independent observations of the same fact produces higher combined confidence than either had alone, which keeps the corpus from accumulating dozens of near-identical facts over time.
 
 ### Nightly cron (6am UTC)
 
 1. Prune cold low-quality memories (episodic, < 80 chars, age > 30 days, never accessed)
-2. Consolidate cold memories (σ > 1.5, age > 90 days) — compress via Llama to R2, delete from D1/Vectorize to reclaim space
-3. Decay all σ values — FSRS-inspired stability weighting: frequently accessed memories resist forgetting (`stability = 1 + log(access_count + 1)`, effective decay rate `0.02 / stability`)
+2. Consolidate low-confidence memories (age > 30 days, not session/decision type): compress via Llama to R2, delete from D1/Vectorize to reclaim space
+3. Decay all confidence scores, using FSRS-inspired stability weighting: frequently accessed memories resist forgetting (`stability = 1 + log(access_count + 1)`, effective decay rate `0.02 / stability`)
 4. Deduplicate recent memories (cosine > 0.90)
 5. Deduplicate cold memories (cosine > 0.93, oldest-first)
 6. Collapse singleton domains
@@ -284,6 +319,7 @@ When two memories are close enough — measured via **Bhattacharyya distance** b
 9. Synthesize identity profile from semantic memories → push to KV
 10. Auto-judge memories flagged as contradictions (supersedes/conflicts_with/extends/compatible)
 11. Process entity extraction queue (50/run)
+12. Drain writes that got deferred earlier when Workers AI's daily neuron quota ran out, now that every other AI-using step above has had first claim on today's budget
 
 ## Architecture
 
@@ -305,38 +341,29 @@ flowchart LR
     W --> KVS[(KV<br/>hot tier + identity cache)]
 
     CRON[Cron Trigger<br/>nightly 6am UTC] --> W
-    W --> R2[(R2<br/>cold archive, σ&gt;1.5 &amp; 90d+)]
+    W --> R2[(R2<br/>cold archive, low-confidence &amp; 30d+)]
 ```
 
 | Component | Role |
 |---|---|
 | Cloudflare Workers | MCP server (HTTP/JSON-RPC 2.0), all logic runs at edge |
-| D1 (SQLite) | Memory store: text, σ diagonal, domain, `cluster_id`, type, access metadata, σ history, micro-cluster centroids |
+| D1 (SQLite) | Memory store: text, confidence score, domain, `cluster_id`, type, access metadata, confidence history, micro-cluster centroids |
 | Vectorize | Two indexes — dense vector search over memories (768D BGE-base-en-v1.5), and a second index of micro-cluster centroids for the internal dedup/diversity signal |
 | FTS5 virtual table | Full-text keyword search, fused with Vectorize via RRF (k=60) |
 | Workers AI | BGE embeddings; Llama 3.2 3B for lightweight synthesis/summarization; Llama 3.3 70B for fact extraction, contradiction judgment, and domain/cluster naming |
 | KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
-| R2 | Cold storage for consolidated memories (σ > 1.5, age > 90 days) |
+| R2 | Cold storage for consolidated low-confidence memories (age > 30 days) |
 | Cron | Nightly maintenance: consolidation, decay, dedup, entity processing, identity synthesis |
 
-## How it compares
+## Known gaps
 
-[Vercel's eve](https://vercel.com/eve) is a different category of tool, not a direct competitor — it's an open-source framework for building durable backend *agents* (sessions, tool calls, sandboxed code execution, Slack/Discord/GitHub channels), not a memory layer. Genuinely complementary rather than something to put in a table next to this.
+**Cursor: auto-inject not working.** Broken upstream in the current Cursor release, see [Hook setup → Cursor](#cursor) for the details and the forum thread. Until it's fixed, call `memory_retrieve` manually at the start of a session, or rely on the model to do it proactively since the tools are registered.
 
-Mem0, Zep, and Supermemory are the real direct competitors — all three are memory layers with editor/SDK integrations and public pricing:
+**OpenCode: tool output capture not working.** The plugin implements `tool.execute.after` but it's never triggered in OpenCode v1.16.2 (issue [#25918](https://github.com/anomalyco/opencode/issues/25918) — declared but not wired up in the runtime). Claude Code's `PostToolUse` hook captures every file edit and bash command as a semantic diff; OpenCode can't do this yet. Conversation content is still captured via `chat.input`/`chat.message` hooks.
 
-| | Gaussian Memory | Mem0 | Zep | Supermemory |
-|---|---|---|---|---|
-| Persistent cross-session memory | Yes | Yes | Yes | Yes |
-| Confidence / staleness modeling | Bayesian σ per memory — continuously sharpens with reinforcement, decays unused, widens on contradiction | Not documented in the OSS README or product docs | Temporal validity windows (`valid_from`/`valid_to`) on graph edges, not a continuous confidence score | Rule-based expiration ("temporary facts expire after the date passes") — not a continuous per-memory score |
-| Contradiction handling | Status-flip + negation phrasing classes, auto-resolves which side supersedes | Not documented | Graphiti resolves conflicting facts via temporal edge invalidation on its knowledge graph | "Resolved automatically" per the README — exact mechanism not documented beyond that |
-| Hosting | BYOC to your own Cloudflare account — the only deployment model, nothing held back behind a paid cloud tier | Apache 2.0, self-hostable core (pip/npm + Docker Compose); best-in-class ranking is "proprietary optimizations not available in the open-source SDK," exclusive to the managed platform | Graphiti core is Apache 2.0, self-hostable; Zep's hosted platform is cloud-only, BYOC only offered on the Enterprise tier | MIT, genuinely full local operation (`supermemory-server` binary, local embeddings, works fully offline with Ollama) — self-hosting isn't gated to a paid tier for the open-source core |
-| Cost | ~$0/month on Cloudflare's free tier for normal use | Free tier (10K memories, 1K retrievals/mo), then $19–249+/mo, custom above that | Free tier (10K credits/mo), then $104/mo (Flex), $312/mo (Flex Plus), custom above that | Free tier ($5 usage included), then $19–399+/mo for the managed cloud; running the MIT-licensed binary yourself is free at any tier |
-| Editor / client integration | Claude Code, Cursor, OpenCode, Zed — one MCP server, identical tool surface and behavior for every client | Claude Code, Cursor, Windsurf, OpenCode via published "agent skills," not a native protocol | API/SDK for building your own agent's memory — no native editor plugin | Open-source native MCP server — Claude Code, Cursor, Windsurf, VS Code, OpenCode |
+**pi.dev: not supported.** Pi explicitly has no built-in MCP support and requires a custom TypeScript extension. No config to provide yet.
 
-A couple things worth calling out beyond the table: the σ confidence score is a live number that moves with every reinforcement or contradiction, where the others either don't document a per-memory confidence signal or use a coarser rule (Zep's validity windows, Supermemory's expiration dates). And self-hosting here isn't a tier you unlock — BYOC to your own Cloudflare account is the entire product, there's no managed version sitting behind it that you're missing out on.
-
-Sources: [Mem0 pricing](https://mem0.ai/pricing), [mem0ai/mem0 on GitHub](https://github.com/mem0ai/mem0), [Zep pricing](https://www.getzep.com/pricing), [getzep/graphiti on GitHub](https://github.com/getzep/graphiti), [Supermemory pricing](https://supermemory.ai/pricing), [supermemoryai/supermemory on GitHub](https://github.com/supermemoryai/supermemory). Checked 2026-07-14; pricing pages change, so verify before deciding anything on this.
+**Personal CLI tools: not applicable.** Gaussian Memory is designed for AI agent workflows. Automatic capture only fires when an MCP-connected agent (Claude Code, etc.) is running your session. Work done directly in the terminal without an agent (shell scripts, CLI tools, manual commands) won't be captured unless you call the MCP tools explicitly.
 
 ## MCP tools
 
@@ -363,23 +390,23 @@ These tools are called by the AI agent, not by you directly. In your harness (Cl
 |---|---|
 | `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
 | `memory_list` | List all memories, optionally filtered by domain |
-| `memory_timeline` | Chronological σ trajectory per domain |
+| `memory_timeline` | Chronological confidence trajectory per domain |
 | `memory_belief_drift` | Show how confidence in a memory has changed over time |
-| `memory_belief_drift_backfill` | Reconstruct σ history for existing memories from access metadata |
+| `memory_belief_drift_backfill` | Reconstruct confidence history for existing memories from access metadata |
 
 ### Maintenance
 
 | Tool | Description |
 |---|---|
 | `memory_decay` | Manual decay pass |
-| `memory_stats` | Total count, σ distribution, domain breakdown, access heat |
+| `memory_stats` | Total count, confidence distribution, domain breakdown, access heat |
 | `memory_orphan_check` | Detect D1 memories missing Vectorize vectors. `repair=true` re-embeds. |
-| `memory_rebuild_domains` | Default fixes only unanchored memories against existing domains. `targeted=false` does a full deterministic rebuild: clusters embeddings first (order-independent, no LLM), then names each resulting cluster once. Resumable; pass `dry_run=true` to preview domain counts before committing |
+| `memory_rebuild_domains` | Default (`targeted=true`) fixes only unanchored memories against existing domains. `targeted=false` does a full deterministic rebuild: clusters embeddings first (order-independent, no LLM), then names each resulting cluster once, wiping and replacing domain_anchors at commit. Resumable; pass `dry_run=true` to preview domain counts before committing |
 | `memory_cleanup_singletons` | Merge domains with fewer than N memories into nearest anchor |
 | `memory_retag_projects` | LLM-based project re-tagging for the default memory pool |
 | `memory_build_entities` | Retroactive entity extraction for entity graph traversal |
 | `memory_process_entity_queue` | Flush the pending entity-extraction queue deferred at store time |
-| `memory_judge` | LLM verdict on two memories: supersedes / conflicts_with / extends / compatible |
+| `memory_judge` | LLM verdict on a memory against its nearest neighbors: supersedes / conflicts_with / extends / compatible. Pass `memory_id` to judge one; omit to auto-judge everything currently flagged as a contradiction |
 
 ### Identity
 
@@ -390,11 +417,13 @@ These tools are called by the AI agent, not by you directly. In your harness (Cl
 
 ## Belief drift
 
-Every memory logs σ snapshots over time. You can query how your confidence in a belief evolved:
+Every memory logs a confidence snapshot over time. You can query how your confidence in a belief evolved:
 
 ```
 memory_belief_drift(query="architecture decision")
 ```
+
+This tool prints the raw internal score as σ (lower σ means higher confidence, so it's tracking uncertainty, not confidence, under the hood). This is a different number from the `[0.94]`-style score shown in the [injected-context example](#what-it-does) above, which ranks relevance to a specific query rather than confidence in the memory itself. `Δ` below is signed so that a positive number always means confidence increased, even though the raw σ value went down to get there:
 
 ```
 ● Chose edge deployment — zero maintenance, lower latency
@@ -414,7 +443,7 @@ src/index.ts              MCP server, routing, cron handler, /viz galaxy visuali
 src/tools.ts              All 26 tool handlers
 src/retrieval.ts          Hybrid retrieval scoring, spreading activation, entity graph, temporal pipeline
 src/storage.ts            Store, merge, dedup, entity extraction queue
-src/gaussian.ts           Bhattacharyya, Kalman merge, σ decay/sharpen math
+src/gaussian.ts           Bhattacharyya, Kalman merge, confidence decay/sharpen math
 src/cron.ts               Nightly maintenance jobs
 src/domain.ts             Named/capped domain taxonomy: real-time classification, batch fixups
 src/cluster.ts            Deterministic embedding clustering (leader pass + average-linkage merge)
