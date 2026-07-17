@@ -10,60 +10,41 @@ The system automatically captures what you worked on, what decisions you made, a
 
 The difference from other memory systems is that memories have a **confidence level (σ)** that changes over time. Beliefs you keep reinforcing become sharp and surface reliably. Things you haven't touched in weeks fade out. A precise technical query only matches memories you've actively reinforced; a vague exploratory question casts wider.
 
-### How it compares
+### Why not just RAG?
 
-[Vercel's eve](https://vercel.com/eve) is a different category of tool, not a direct competitor — it's an open-source framework for building durable backend *agents* (sessions, tool calls, sandboxed code execution, Slack/Discord/GitHub channels), not a memory layer. Its docs don't describe any persistent cross-session memory — "durable sessions" means a single run can pause and resume across a deploy or crash, not that facts persist and get recalled weeks later. It's also not an editor integration; it deploys as its own backend service via the `eve` CLI, billed through whatever mix of Vercel Functions/Workflows/Sandbox/AI Gateway usage your agent generates, with no flat price. Genuinely complementary, not comparable row-by-row.
-
-Mem0, Zep, and Supermemory are the real direct competitors — all three are memory layers with editor/SDK integrations and public pricing:
-
-| | Gaussian Memory | Mem0 | Zep | Supermemory |
-|---|---|---|---|---|
-| Persistent cross-session memory | Yes | Yes | Yes | Yes |
-| Confidence / staleness modeling | Bayesian σ per memory — continuously sharpens with reinforcement, decays unused, widens on contradiction | Not documented in the OSS README or product docs | Temporal validity windows (`valid_from`/`valid_to`) on graph edges, not a continuous confidence score | Rule-based expiration ("temporary facts expire after the date passes") — not a continuous per-memory score |
-| Contradiction handling | Status-flip + negation phrasing classes, auto-resolves which side supersedes | Not documented | Graphiti resolves conflicting facts via temporal edge invalidation on its knowledge graph | "Resolved automatically" per the README — exact mechanism not documented beyond that |
-| Hosting | BYOC to your own Cloudflare account — the only deployment model, nothing is held back behind a paid cloud tier | Apache 2.0, self-hostable core (pip/npm + Docker Compose); best-in-class ranking is "proprietary optimizations not available in the open-source SDK," exclusive to the managed platform | Graphiti core is Apache 2.0, self-hostable; Zep's hosted platform is cloud-only, BYOC only offered on the Enterprise tier | MIT, genuinely full local operation (`supermemory-server` binary, local embeddings, works fully offline with Ollama) — self-hosting isn't gated to a paid tier for the open-source core |
-| Cost | ~$0/month on Cloudflare's free tier for normal use | Free tier (10K memories, 1K retrievals/mo), then $19–249+/mo, custom above that | Free tier (10K credits/mo), then $104/mo (Flex), $312/mo (Flex Plus), custom above that | Free tier ($5 usage included), then $19–399+/mo for the managed cloud; running the MIT-licensed binary yourself is free at any tier — the paid "self-hosted deployment" tiers are Supermemory *managing* a self-hosted instance for you, not a gate on the open-source software |
-| Editor / client integration | Claude Code, Cursor, OpenCode, Zed — one MCP server, identical tool surface and behavior for every client | Claude Code, Cursor, Windsurf, OpenCode via published "agent skills," not a native protocol | API/SDK for building your own agent's memory — no native editor plugin | Open-source native MCP server — Claude Code, Cursor, Windsurf, VS Code, OpenCode |
-
-**What's actually different, not just a feature-flag difference:**
-- **One MCP server, one behavior.** Every client (Claude Code, Cursor, OpenCode, Zed) talks to the exact same JSON-RPC tool surface — there's no per-editor "skill" reimplementation that can drift in prompting or quality between tools, the way Mem0's per-editor skills structurally can.
-- **Confidence is continuous, not a rule.** The other three either don't document a per-memory confidence signal, use discrete validity windows (Zep), or rule-based expiration (Supermemory). Gaussian Memory's σ is a live number that moves with every reinforcement or contradiction — it's the only one of the four modeling *how sure the system should be*, not just *whether a fact is still current*.
-- **Self-hosting isn't a tier, it's the only option.** Mem0 gates its best ranking behind the managed cloud; Supermemory gates self-hosted deployment behind its $399/mo Scale plan. Gaussian Memory has no managed-cloud alternative to unlock — BYOC to your own Cloudflare account is the entire product, so there's no better version of it you're missing by self-hosting.
-
-Sources: [Mem0 pricing](https://mem0.ai/pricing), [mem0ai/mem0 on GitHub](https://github.com/mem0ai/mem0), [Zep pricing](https://www.getzep.com/pricing), [getzep/graphiti on GitHub](https://github.com/getzep/graphiti), [Supermemory pricing](https://supermemory.ai/pricing), [supermemoryai/supermemory on GitHub](https://github.com/supermemoryai/supermemory). Checked 2026-07-14 — verify current terms before relying on this for a purchasing decision, pricing pages change.
+RAG searches a static document store — a chunk means whatever it meant when you indexed it. This is closer to how a person remembers things: facts you keep confirming get sharper (σ drops), facts you haven't touched in months fade out, and if you say something that contradicts an old memory, it gets flagged and resolved instead of just handing you both chunks and letting you sort it out. It's not a replacement for RAG over your codebase or docs — it's memory of what you decided and why, which is a different problem than search.
 
 ## Quick start
 
 **Requirements:** Node.js 18+, a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works).
 
-**Step 0 — authenticate with Cloudflare (one time):**
 ```bash
 npm install -g wrangler
 wrangler login
-```
 
-**Step 1 — deploy:**
-```bash
 git clone https://github.com/LohitJaga/gaussian-memory-worker
 cd gaussian-memory-worker
 npm install
 npx gaussian-memory init
 ```
 
-`init` handles everything:
+Reload your shell (`source ~/.zshrc` or open a new terminal), restart your harness, and it's live.
+
+<details>
+<summary>What <code>init</code> actually does</summary>
+
 - Creates D1 database, Vectorize index, and KV namespace in your Cloudflare account
 - Patches `wrangler.toml` with your resource IDs
 - Runs D1 schema migrations
 - Deploys the worker
 - Generates and sets an `AUTH_TOKEN` secret
-- Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600)
-- Auto-installs and configures Claude Code hooks if `~/.claude` exists
-
-That's it. `init` auto-appends `source ~/.gaussian-memory-env` to your `~/.zshrc` or `~/.bashrc`, writes the auth token to `~/.claude/mcp.json`, and prompts before installing hook scripts.
-
-Reload your shell (`source ~/.zshrc` or open a new terminal), then restart Claude Code and it's live.
+- Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600), and auto-appends `source ~/.gaussian-memory-env` to your `~/.zshrc` or `~/.bashrc`
+- Writes the auth token to `~/.claude/mcp.json`
+- Auto-installs and configures hooks for Claude Code, OpenCode, Cursor, and Zed if it detects them on your machine (prompts before installing anything)
 
 On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as System Environment Variables instead.
+
+</details>
 
 ## Cloudflare plan
 
@@ -338,24 +319,58 @@ flowchart LR
 | R2 | Cold storage for consolidated memories (σ > 1.5, age > 90 days) |
 | Cron | Nightly maintenance: consolidation, decay, dedup, entity processing, identity synthesis |
 
+## How it compares
+
+[Vercel's eve](https://vercel.com/eve) is a different category of tool, not a direct competitor — it's an open-source framework for building durable backend *agents* (sessions, tool calls, sandboxed code execution, Slack/Discord/GitHub channels), not a memory layer. Genuinely complementary rather than something to put in a table next to this.
+
+Mem0, Zep, and Supermemory are the real direct competitors — all three are memory layers with editor/SDK integrations and public pricing:
+
+| | Gaussian Memory | Mem0 | Zep | Supermemory |
+|---|---|---|---|---|
+| Persistent cross-session memory | Yes | Yes | Yes | Yes |
+| Confidence / staleness modeling | Bayesian σ per memory — continuously sharpens with reinforcement, decays unused, widens on contradiction | Not documented in the OSS README or product docs | Temporal validity windows (`valid_from`/`valid_to`) on graph edges, not a continuous confidence score | Rule-based expiration ("temporary facts expire after the date passes") — not a continuous per-memory score |
+| Contradiction handling | Status-flip + negation phrasing classes, auto-resolves which side supersedes | Not documented | Graphiti resolves conflicting facts via temporal edge invalidation on its knowledge graph | "Resolved automatically" per the README — exact mechanism not documented beyond that |
+| Hosting | BYOC to your own Cloudflare account — the only deployment model, nothing held back behind a paid cloud tier | Apache 2.0, self-hostable core (pip/npm + Docker Compose); best-in-class ranking is "proprietary optimizations not available in the open-source SDK," exclusive to the managed platform | Graphiti core is Apache 2.0, self-hostable; Zep's hosted platform is cloud-only, BYOC only offered on the Enterprise tier | MIT, genuinely full local operation (`supermemory-server` binary, local embeddings, works fully offline with Ollama) — self-hosting isn't gated to a paid tier for the open-source core |
+| Cost | ~$0/month on Cloudflare's free tier for normal use | Free tier (10K memories, 1K retrievals/mo), then $19–249+/mo, custom above that | Free tier (10K credits/mo), then $104/mo (Flex), $312/mo (Flex Plus), custom above that | Free tier ($5 usage included), then $19–399+/mo for the managed cloud; running the MIT-licensed binary yourself is free at any tier |
+| Editor / client integration | Claude Code, Cursor, OpenCode, Zed — one MCP server, identical tool surface and behavior for every client | Claude Code, Cursor, Windsurf, OpenCode via published "agent skills," not a native protocol | API/SDK for building your own agent's memory — no native editor plugin | Open-source native MCP server — Claude Code, Cursor, Windsurf, VS Code, OpenCode |
+
+A couple things worth calling out beyond the table: the σ confidence score is a live number that moves with every reinforcement or contradiction, where the others either don't document a per-memory confidence signal or use a coarser rule (Zep's validity windows, Supermemory's expiration dates). And self-hosting here isn't a tier you unlock — BYOC to your own Cloudflare account is the entire product, there's no managed version sitting behind it that you're missing out on.
+
+Sources: [Mem0 pricing](https://mem0.ai/pricing), [mem0ai/mem0 on GitHub](https://github.com/mem0ai/mem0), [Zep pricing](https://www.getzep.com/pricing), [getzep/graphiti on GitHub](https://github.com/getzep/graphiti), [Supermemory pricing](https://supermemory.ai/pricing), [supermemoryai/supermemory on GitHub](https://github.com/supermemoryai/supermemory). Checked 2026-07-14; pricing pages change, so verify before deciding anything on this.
+
 ## MCP tools
 
-These tools are called by the AI agent, not by you directly. In Claude Code (or any MCP-connected agent), you ask the agent to store or retrieve something and it calls the tool on your behalf. You can also trigger them explicitly: "retrieve memories about X" or "store that I decided Y", and the agent will call the appropriate tool. For scripted or headless use, the worker is a plain JSON-RPC 2.0 HTTP endpoint you can hit with curl.
+These tools are called by the AI agent, not by you directly. In your harness (Claude Code, Cursor, OpenCode, Zed, or any MCP client), you ask it to store or retrieve something and it calls the tool on your behalf. You can also trigger them explicitly: "retrieve memories about X" or "store that I decided Y", and the agent will call the appropriate tool. For scripted or headless use, the worker is a plain JSON-RPC 2.0 HTTP endpoint you can hit with curl.
+
+### Storage
 
 | Tool | Description |
 |---|---|
 | `memory_store` | Store with explicit domain, type, and optional `topic_key` for upsert |
 | `memory_auto_store` | Store with automatic domain and type inference |
 | `memory_store_decision` | Store a structured decision trail (decision/context/alternatives/outcome) as `memory_type=decision` |
-| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
+| `memory_store_diff` | Store semantic meaning of a code diff or command output |
 | `memory_extract_and_store` | LLM-based fact extraction from a raw session log |
 | `memory_capture_passive` | Parse structured notes with Key Learnings / Decisions / Problems Solved headers |
-| `memory_store_diff` | Store semantic meaning of a code diff or command output |
 | `memory_update` | Re-embed and update an existing memory |
 | `memory_delete` | Delete by ID |
 | `memory_bulk_delete` | Delete memories by text pattern and/or exact project match |
 | `memory_dedupe` | One-shot cleanup of exact-text duplicate backlogs — keeps the most-reinforced row per group. `dry_run=true` previews counts |
+
+### Retrieval
+
+| Tool | Description |
+|---|---|
+| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
 | `memory_list` | List all memories, optionally filtered by domain |
+| `memory_timeline` | Chronological σ trajectory per domain |
+| `memory_belief_drift` | Show how confidence in a memory has changed over time |
+| `memory_belief_drift_backfill` | Reconstruct σ history for existing memories from access metadata |
+
+### Maintenance
+
+| Tool | Description |
+|---|---|
 | `memory_decay` | Manual decay pass |
 | `memory_stats` | Total count, σ distribution, domain breakdown, access heat |
 | `memory_orphan_check` | Detect D1 memories missing Vectorize vectors. `repair=true` re-embeds. |
@@ -365,9 +380,11 @@ These tools are called by the AI agent, not by you directly. In Claude Code (or 
 | `memory_build_entities` | Retroactive entity extraction for entity graph traversal |
 | `memory_process_entity_queue` | Flush the pending entity-extraction queue deferred at store time |
 | `memory_judge` | LLM verdict on two memories: supersedes / conflicts_with / extends / compatible |
-| `memory_timeline` | Chronological σ trajectory per domain |
-| `memory_belief_drift` | Show how confidence in a memory has changed over time |
-| `memory_belief_drift_backfill` | Reconstruct σ history for existing memories from access metadata |
+
+### Identity
+
+| Tool | Description |
+|---|---|
 | `identity_profile_get` | Fetch synthesized identity profile from KV |
 | `identity_profile_set` | Push identity profile to KV for cross-device sync |
 
