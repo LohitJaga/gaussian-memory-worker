@@ -1,4 +1,5 @@
 import { dotProduct, embed } from './embed';
+import { callAI } from './ai';
 import type { Env } from './types';
 
 export const DOMAIN_CAP = 50;
@@ -77,6 +78,21 @@ export function bestAnchor(mu: number[], anchors: Anchor[]): { name: string; sim
   return bestName ? { name: bestName, sim: bestSim } : null;
 }
 
+// Floor-guarded reassignment target for cleanupSingletons (cron.ts) — pure so the
+// no-force-merge invariant is unit-testable. Historically the singleton cleanup used a
+// raw argmax with NO similarity floor: any memory in a sub-minCount domain was glued
+// onto whichever anchored domain was nearest by cosine, however unrelated — the exact
+// failure pattern ANCHOR_FLOOR_SIM was introduced to stop in the remap path (fixed
+// there 2026-07-02/05, but never here). Below the floor the memory goes to 'general',
+// the designated holding pen the nightly classifyBatchDomains cron retries with the
+// LLM — NOT back to its singleton name, whose anchor cleanupSingletons deletes
+// unconditionally (keeping the name would re-flag the same rows as singletons every
+// night, re-embedding them forever without progress).
+export function singletonRemapTarget(mu: number[], anchored: Anchor[]): string {
+  const best = bestAnchor(mu, anchored);
+  return best && best.sim >= ANCHOR_FLOOR_SIM ? best.name : 'general';
+}
+
 const NAMING_RULES = `Domain names must name a PROJECT, TOOL, PERSON, or SUBJECT — not a generic activity.
 GOOD: "acme-web-app", "cs101-coursework", "job-search", "react-portfolio-site"
 BAD: "data-preprocessing", "homework-submission", "exam-preparation", "file-management"
@@ -112,6 +128,32 @@ export async function ensureDomainColumns(env: Env): Promise<void> {
   } catch {}
 }
 
+// Pure decision core for classifyDomainForStore's handling of the LLM's answer —
+// extracted (2026-07-17) so the similarity-floor invariant is unit-testable without a
+// D1/AI harness. The invariant this owns: an LLM pick that names an EXISTING anchor is
+// only accepted if this memory actually sits within ANCHOR_FLOOR_SIM of that anchor.
+// Before this, any existing-anchor name was accepted unconditionally — the floor only
+// guarded the fallback branch — so at DOMAIN_CAP (prompt says "pick one even loosely")
+// the classifier force-filed memories into topically unrelated domains with no
+// geometric sanity check at all (confirmed live 2026-07-16: README-editing memories in
+// py-mu-pdf-project, a military-news fact in job-schedule).
+export function resolveLlmDomainChoice(
+  choice: string | null, anchors: Anchor[], muArr: number[], atCap: boolean, fallback: string
+): { domain: string; mintNew: boolean } {
+  if (!choice) return { domain: fallback, mintNew: false };
+  if (choice === 'general') return { domain: 'general', mintNew: false };
+  const chosen = anchors.find(a => a.name === choice);
+  if (chosen) {
+    // In-candidate-list picks always clear this (the candidate list is floor-filtered);
+    // this catches off-list picks of some other existing anchor the LLM free-associated.
+    return dotProduct(muArr, chosen.emb) >= ANCHOR_FLOOR_SIM
+      ? { domain: choice, mintNew: false }
+      : { domain: fallback, mintNew: false };
+  }
+  if (atCap) return { domain: fallback, mintNew: false };
+  return { domain: choice, mintNew: true };
+}
+
 // Primary real-time classifier. Deterministic nearest-anchor assignment first
 // (BIRCH-style one-pass), LLM only for the ambiguous band below the accept
 // threshold — so the common case has zero sampling variance and zero LLM cost.
@@ -137,7 +179,7 @@ export async function classifyDomainForStore(text: string, env: Env, precomputed
     // same reasoning as tools.ts's enrichment/GLM-gate calls: an unguarded AI call
     // here can run long enough for the Workers runtime to cancel the whole request.
     const result = await Promise.race([
-      env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+      callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
         messages: [
           {
             role: 'system',
@@ -159,17 +201,15 @@ Return ONLY valid JSON with no explanation: {"domain":"domain-name-here"}`,
     ]) as any;
 
     const choice = parseJsonName(result, 'domain');
-    if (!choice) return fallback;
-    if (choice === 'general') return 'general';
-    if (anchors.some(a => a.name === choice)) return choice;
-    if (atCap) return fallback;
+    const resolved = resolveLlmDomainChoice(choice, anchors, muArr, atCap, fallback);
+    if (!resolved.mintNew) return resolved.domain;
     // Genuinely novel content: seed a new anchor at this memory's embedding.
     // OR IGNORE, not OR REPLACE: on a name collision with an existing anchor,
     // REPLACE wiped its centroid embedding, memory_count, and last_summarized_count.
     await env.DB.prepare(
       'INSERT OR IGNORE INTO domain_anchors (name, embedding) VALUES (?, ?)'
-    ).bind(choice, JSON.stringify(muArr)).run();
-    return choice;
+    ).bind(resolved.domain, JSON.stringify(muArr)).run();
+    return resolved.domain;
   } catch {
     return fallback;
   }
@@ -212,7 +252,7 @@ export async function classifyBatchDomains(
     const group = pending.slice(g, g + GROUP);
     const numbered = group.map((idx, j) => `${j + 1}. ${texts[idx].slice(0, 400)}`).join('\n');
     try {
-      const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+      const result = await callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
         messages: [
           {
             role: 'system',
@@ -246,7 +286,7 @@ export async function classifyBatchDomains(
 export async function nameCluster(sampleTexts: string[], takenNames: string[], env: Env): Promise<string | null> {
   const numbered = sampleTexts.map((t, i) => `${i + 1}. ${t.slice(0, 300)}`).join('\n');
   try {
-    const result = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+    const result = await callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
       messages: [
         {
           role: 'system',
@@ -332,7 +372,7 @@ export async function refreshDomainSummary(domainName: string, newCount: number,
   const facts = ((fallback ?? rows).results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+  const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
     messages: [
       { role: 'system', content: `Summarize what this person knows, does, or prefers specifically in the "${domainName}" domain. Focus only on what distinguishes this domain from others. 2 sentences, specific and factual. No speculation or preamble.` },
       { role: 'user', content: facts },

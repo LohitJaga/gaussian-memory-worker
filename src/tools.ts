@@ -3,10 +3,18 @@ import { embed, batchEmbed, dotProduct } from './embed';
 import { classifyDomainForStore, updateDomainCentroid } from './domain';
 import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
-import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery } from './storage';
+import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
 import { updateDecay, cleanupSingletons } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
+import { callAI, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
+
+// Rows drained from pending_ingest per nightly cron run (last step in index.ts's scheduled()).
+// Deliberately capped and tunable in one place: quota resets fresh at 00:00 UTC but cron runs at
+// 06:00 after ~11 other AI-using steps already had first claim on the day's budget — an uncapped
+// drain of a large backlog could burn through what's left in one run and starve same-day live
+// traffic. 50 is a starting point, not a measured value; raise if the backlog reliably outpaces it.
+export const PENDING_INGEST_DRAIN_CAP = 50;
 
 export const TOOLS = [
   {
@@ -369,7 +377,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       if (args.context) {
         try {
           const enrichResult = await Promise.race([
-            env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+            callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
               messages: [
                 {
                   role: 'system',
@@ -490,7 +498,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       let gateResult: any;
       try {
         gateResult = await Promise.race([
-          env.AI.run('@cf/zai-org/glm-4.7-flash' as any, {
+          callAI(env, '@cf/zai-org/glm-4.7-flash', {
             messages: [
               {
                 role: 'system',
@@ -520,7 +528,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
       // Ask Llama to describe the change semantically in one sentence
       // Llama 3.1 8B for diff description — GLM fails on short/minimal diffs (returns {})
-      const descResult = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+      const descResult = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
         messages: [
           {
             role: 'system',
@@ -594,15 +602,24 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           && results[0].score > 0.85
           && (results[0].score - results[1].score) < 0.04) {
         const blendInput = results.slice(0, 3).map(r => r.text).join('\n');
-        const blend = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
-          messages: [
-            { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
-            { role: 'user', content: blendInput },
-          ],
-          max_tokens: 100,
-        }) as any;
-        const blended = (blend?.response ?? blend?.choices?.[0]?.message?.content ?? '').trim();
-        if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
+        // Deviation from the literal spec (which only named storeMemory's embed() call and
+        // memory_extract_and_store's extraction call for quota handling): this call had NO
+        // try/catch before this refactor, so on a QuotaExceededError it would throw out of the
+        // whole memory_retrieve case, failing retrieval entirely over an optional
+        // nice-to-have (synthesis) — a real result, not a hypothetical, once every AI.run()
+        // call site starts observing the shared cooldown. Degrading to "no synthesis preamble"
+        // (same as the non-synthesize path) instead.
+        try {
+          const blend = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+            messages: [
+              { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
+              { role: 'user', content: blendInput },
+            ],
+            max_tokens: 100,
+          }) as any;
+          const blended = (blend?.response ?? blend?.choices?.[0]?.message?.content ?? '').trim();
+          if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
+        } catch {}
       }
 
       return preamble + results.map(fmt).join('\n');
@@ -1065,7 +1082,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           if (existing) continue;
 
           // LLM verdict — Llama 3.3 70B for reliability
-          const judgeResult = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
+          const judgeResult = await callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
             messages: [
               {
                 role: 'system',
@@ -1289,13 +1306,29 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
         .join(' | ')
         .slice(0, 60000); // GLM has 131K context — was 4000 for Llama 3.1 8B, now captures full sessions
 
+      interface ExtractedFact { text: string; type?: string }
+      let facts: ExtractedFact[] = [];
+      let cleanFacts: ExtractedFact[];
+      let factMus: Float32Array[];
+
       // Llama 3.3 70B for extraction — GLM fails on complex multi-object JSON with long prompts.
       // Extraction runs once per session end so cost vs Llama 3.1 8B is negligible.
-      const extraction = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast' as any, {
-        messages: [
-          {
-            role: 'system',
-            content: `Extract facts from this session log for long-term memory. Today: ${new Date().toISOString().slice(0, 10)}. Resolve relative dates to ISO 8601.
+      //
+      // Extraction call AND the batchEmbed call below are both wrapped here (not just
+      // extraction) — a QuotaExceededError from either leaves this session's facts nowhere:
+      // extraction succeeding but the immediately-following batchEmbed then hitting an
+      // exhausted quota would otherwise throw uncaught and discard whatever extraction already
+      // produced. Falling back to re-queuing the whole raw log is slightly wasteful (re-extracts
+      // facts that may have already embedded successfully in a partial batch) but never lossy —
+      // storeMemory's own exact-text/near-duplicate merge logic collapses any re-extracted
+      // duplicates against whatever partial set a future retry did land, so the only real cost is
+      // one extra LLM call on the retry, not corrupted or missing data.
+      try {
+        const extraction = await callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+          messages: [
+            {
+              role: 'system',
+              content: `Extract facts from this session log for long-term memory. Today: ${new Date().toISOString().slice(0, 10)}. Resolve relative dates to ISO 8601.
 
 EXTRACT (up to 12 total, prioritized):
 1. Decisions — exact technology/approach chosen and WHY. Format transitions as "Switched X → Y because Z" (e.g. "Switched GLM → Llama-3.1-8b because GLM exhausts token budget before emitting content")
@@ -1315,56 +1348,63 @@ SKIP: vague intent (Wants to/Is considering/Is planning/Is trying/Is working on/
 
 Return ONLY valid JSON array:
 [{"text":"Chose Cloudflare D1 over PlanetScale — zero egress fees, edge-native","type":"episodic"},{"text":"Switched GLM-4.7-flash → Llama-3.1-8b for batch classification because GLM exhausts token budget on reasoning_content before emitting final content, causing timeouts","type":"episodic"},{"text":"Prefers concise responses without emojis","type":"procedural"}]`,
-          },
-          { role: 'user', content: `<session_log>${filteredLog}</session_log>` },
-        ],
-        max_tokens: 800,
-        temperature: 0,
-      }) as any;
+            },
+            { role: 'user', content: `<session_log>${filteredLog}</session_log>` },
+          ],
+          max_tokens: 800,
+          temperature: 0,
+        }) as any;
 
-      interface ExtractedFact { text: string; type?: string }
-      let facts: ExtractedFact[] = [];
-      const rawVal = extraction?.response ?? extraction?.choices?.[0]?.message?.content ?? '';
-      const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
-      try {
-        const match = raw.match(/\[[\s\S]*\]/);
-        if (match) {
-          const parsed = JSON.parse(match[0]);
-          // Handle both object array and legacy string array
-          facts = parsed.map((f: any) =>
-            typeof f === 'string' ? { text: f } : f
-          );
+        const rawVal = extraction?.response ?? extraction?.choices?.[0]?.message?.content ?? '';
+        const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
+        try {
+          const match = raw.match(/\[[\s\S]*\]/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            // Handle both object array and legacy string array
+            facts = parsed.map((f: any) =>
+              typeof f === 'string' ? { text: f } : f
+            );
+          }
+        } catch {}
+
+        if (!facts.length) {
+          facts = raw.split('\n')
+            .map((l: string) => l.replace(/^[-*\d.)\s]+/, '').trim())
+            .filter((l: string) =>
+              l.length > 25 &&
+              !l.startsWith('{') &&
+              !l.startsWith('[') &&
+              !/^here are/i.test(l) &&
+              !/^extracted/i.test(l) &&
+              !/^json/i.test(l)
+            )
+            .map((t: string) => ({ text: t }));
         }
-      } catch {}
 
-      if (!facts.length) {
-        facts = raw.split('\n')
-          .map((l: string) => l.replace(/^[-*\d.)\s]+/, '').trim())
-          .filter((l: string) =>
-            l.length > 25 &&
-            !l.startsWith('{') &&
-            !l.startsWith('[') &&
-            !/^here are/i.test(l) &&
-            !/^extracted/i.test(l) &&
-            !/^json/i.test(l)
-          )
-          .map((t: string) => ({ text: t }));
+        // Filter out obvious garbage before embedding
+        cleanFacts = facts.slice(0, 12).filter(f => {
+          const t = (f.text ?? '').trim();
+          if (t.length < 20) return false;
+          if (t.startsWith('{') || t.startsWith('[')) return false;
+          if (/^here are/i.test(t) || /^extracted/i.test(t)) return false;
+          if (t.split(' ').length < 4) return false;
+          return true;
+        });
+
+        factMus = await batchEmbed(cleanFacts.map(f => f.text ?? ''), env);
+      } catch (e) {
+        if (!(e instanceof QuotaExceededError)) throw e;
+        await ensurePendingIngestTable(env);
+        const id = crypto.randomUUID();
+        await env.DB.prepare(
+          `INSERT INTO pending_ingest (id, kind, payload, project, domain, created_at) VALUES (?, 'raw_log', ?, ?, NULL, ?)`
+        ).bind(id, rawLog, args.project ?? 'default', Math.floor(Date.now() / 1000)).run();
+        return `QUEUED (quota exceeded): raw log queued for extraction on next nightly drain (pending_ingest id=${id.slice(0, 8)})`;
       }
-
-      // Filter out obvious garbage before embedding
-      const cleanFacts = facts.slice(0, 12).filter(f => {
-        const t = (f.text ?? '').trim();
-        if (t.length < 20) return false;
-        if (t.startsWith('{') || t.startsWith('[')) return false;
-        if (/^here are/i.test(t) || /^extracted/i.test(t)) return false;
-        if (t.split(' ').length < 4) return false;
-        return true;
-      });
 
       let stored = 0;
       const storedMus: Float32Array[] = [];  // intra-batch dedup
-
-      const factMus = await batchEmbed(cleanFacts.map(f => f.text ?? ''), env);
 
       for (let i = 0; i < cleanFacts.length; i++) {
         const fact = cleanFacts[i];
@@ -1448,24 +1488,31 @@ Return ONLY valid JSON array:
 
       // Archive each matched memory to R2 before hard-delete, same shape/convention as
       // cron.ts consolidateColdMemories. Archival failures never block the delete.
-      await Promise.all(matched.map(async row => {
-        try {
-          const payload = JSON.stringify({
-            id: row.id,
-            original_text: row.text,
-            compressed_text: row.text,
-            domain: row.domain,
-            memory_type: row.memory_type,
-            archived_at: Math.floor(Date.now() / 1000),
-            original_timestamp: row.timestamp,
-          });
-          await env.R2.put(`memories/${row.id}.json`, payload, {
-            httpMetadata: { contentType: 'application/json' },
-          });
-        } catch (err) {
-          console.error(`memory_bulk_delete: R2 archive failed for ${row.id}`, err);
-        }
-      }));
+      // Chunked to 25 concurrent puts — an unbounded Promise.all over the full matched
+      // set blows past Workers subrequest/wall-time limits once matched count reaches
+      // the hundreds (confirmed live: a 2356-row bulk_delete never completed at 25 chunk
+      // size batches cleanly instead).
+      for (let i = 0; i < matched.length; i += 25) {
+        const chunk = matched.slice(i, i + 25);
+        await Promise.all(chunk.map(async row => {
+          try {
+            const payload = JSON.stringify({
+              id: row.id,
+              original_text: row.text,
+              compressed_text: row.text,
+              domain: row.domain,
+              memory_type: row.memory_type,
+              archived_at: Math.floor(Date.now() / 1000),
+              original_timestamp: row.timestamp,
+            });
+            await env.R2.put(`memories/${row.id}.json`, payload, {
+              httpMetadata: { contentType: 'application/json' },
+            });
+          } catch (err) {
+            console.error(`memory_bulk_delete: R2 archive failed for ${row.id}`, err);
+          }
+        }));
+      }
 
       for (let i = 0; i < ids.length; i += 100) {
         const chunk = ids.slice(i, i + 100);
@@ -1571,7 +1618,7 @@ Return ONLY a JSON array: ["type:canonical_name", ...]. Return [] if no clear en
 Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
 
       async function extractOne(text: string): Promise<{ raw: string; entities: string[]; parseError: string }> {
-        const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+        const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: text.slice(0, 300) },
@@ -1688,7 +1735,7 @@ Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
 
       const projectList = PROJECTS.map(p => `- ${p}`).join('\n');
       const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 120)}`).join('\n');
-      const result = await env.AI.run('@cf/meta/llama-3.2-3b-instruct' as any, {
+      const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
         messages: [
           {
             role: 'system',
@@ -1751,4 +1798,65 @@ Return: ["project-name", "project-name", ...]`,
     default:
       return `Unknown tool: ${name}`;
   }
+}
+
+// Nightly cron step (wired in index.ts's scheduled(), deliberately LAST — see comment there).
+// Drains pending_ingest — writes that were deferred instead of dropped when a Workers AI daily
+// quota exhaustion interrupted storeMemory()'s embed() call or memory_extract_and_store()'s
+// extraction call (see storage.ts's storeMemory and the memory_extract_and_store case above) —
+// through the exact same real store/extraction path a live call uses, now that quota has (or may
+// have) reset at 00:00 UTC.
+//
+// Capped to maxRows per run and stops the moment it detects quota is out again — checked both
+// before AND after each row, since storeMemory()/memory_extract_and_store() swallow
+// QuotaExceededError internally (they catch it themselves to requeue, per their own quota
+// handling) rather than throwing it back out to this loop. Checking the KV cooldown flag directly
+// is therefore the reliable signal here, not a try/catch around the call — a defensive
+// instanceof QuotaExceededError catch is kept too in case some future call path in the chain
+// doesn't swallow it, but the cooldown-flag check is what actually fires in practice.
+export async function drainPendingIngest(env: Env, maxRows: number = PENDING_INGEST_DRAIN_CAP): Promise<{ processed: number; remaining: number; stoppedOnQuota: boolean }> {
+  await ensurePendingIngestTable(env);
+
+  const rows = await env.DB.prepare(
+    `SELECT id, kind, payload, project, domain FROM pending_ingest ORDER BY created_at ASC LIMIT ?`
+  ).bind(maxRows).all<{ id: string; kind: string; payload: string; project: string; domain: string | null }>();
+
+  const batch = rows.results ?? [];
+  let processed = 0;
+  let stoppedOnQuota = false;
+
+  for (const row of batch) {
+    try {
+      const cooldownBefore = await env.KV.get(QUOTA_COOLDOWN_KV_KEY).catch(() => null);
+      if (cooldownBefore) { stoppedOnQuota = true; break; }
+
+      if (row.kind === 'fact') {
+        const { memory_type, emotional_intensity } = inferTypeAndIntensity(row.payload);
+        await storeMemory(row.payload, memory_type, row.domain ?? 'general', emotional_intensity, env, undefined, row.project ?? 'default');
+      } else {
+        // Same code path (this exact handler) a live memory_extract_and_store call uses — full
+        // pre-filter + extraction + per-fact store, not a separate/duplicated implementation.
+        await handleToolCall('memory_extract_and_store', { log_text: row.payload, project: row.project ?? 'default' }, env);
+      }
+
+      // Row's content is now durably somewhere — either stored as a real memory, or (if quota
+      // ran out mid-call) re-queued as a FRESH pending_ingest row by storeMemory's/
+      // memory_extract_and_store's own QuotaExceededError catch. Either way this original row is
+      // done; delete it so it isn't reprocessed (and, in the requeue case, doesn't duplicate).
+      await env.DB.prepare('DELETE FROM pending_ingest WHERE id = ?').bind(row.id).run();
+
+      const cooldownAfter = await env.KV.get(QUOTA_COOLDOWN_KV_KEY).catch(() => null);
+      if (cooldownAfter) { stoppedOnQuota = true; break; }
+      processed++;
+    } catch (e) {
+      if (e instanceof QuotaExceededError) { stoppedOnQuota = true; break; }
+      // Non-quota failure on this one row — log and leave it queued for the next run rather than
+      // losing it or wedging the whole drain over one bad row (matches this codebase's existing
+      // per-item tolerance, e.g. cron.ts's consolidateColdMemories R2-put catch).
+      console.error('[drainPendingIngest] row failed, left queued:', row.id, e);
+    }
+  }
+
+  const remainingRow = await env.DB.prepare('SELECT COUNT(*) as n FROM pending_ingest').first<{ n: number }>();
+  return { processed, remaining: remainingRow?.n ?? 0, stoppedOnQuota };
 }

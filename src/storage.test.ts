@@ -257,3 +257,94 @@ describe('normalizeForExactMatch', () => {
     expect(normalizeForExactMatch('Commit f542266 pushed')).toBe('commit f542266 pushed');
   });
 });
+
+// ── selectMergeCandidate (project-scoped merge eligibility, 2026-07-17) ────
+
+import { selectMergeCandidate } from './storage';
+import { serializeSigma, initialSigma } from './gaussian';
+
+describe('selectMergeCandidate', () => {
+  const sig = serializeSigma(initialSigma('default', 0, 4));
+  const row = (project: string, cluster_id: string | null = null) =>
+    ({ sigma_diagonal: sig, text: 'x', cluster_id, project });
+
+  it('selects the closest same-project candidate', () => {
+    const rowMap = new Map([
+      ['m1', row('default')],
+      ['m2', row('default')],
+    ]);
+    const r = selectMergeCandidate(
+      [{ id: 'm1', score: 0.92 }, { id: 'm2', score: 0.98 }],
+      rowMap, 'default', null, 'episodic'
+    );
+    expect(r.bestId).toBe('m2');
+    expect(r.bestSigma).not.toBeNull();
+  });
+
+  it('FIXED: a cross-project candidate is never a merge winner, even when it is the closest', () => {
+    // Pre-fix the LoCoMo-shaped hazard: project='locomo-eval' chunk at cosine 0.99
+    // beat a same-project candidate and the merge UPDATE then overwrote the winner's
+    // text/domain/vector while its D1 project column stayed untouched.
+    const rowMap = new Map([
+      ['theirs', row('locomo-eval')],
+      ['ours', row('default')],
+    ]);
+    const r = selectMergeCandidate(
+      [{ id: 'theirs', score: 0.99 }, { id: 'ours', score: 0.90 }],
+      rowMap, 'default', null, 'episodic'
+    );
+    expect(r.bestId).toBe('ours');
+  });
+
+  it('returns no candidate when every match belongs to another project', () => {
+    const rowMap = new Map([['theirs', row('locomo-eval')]]);
+    const r = selectMergeCandidate([{ id: 'theirs', score: 0.99 }], rowMap, 'default', null, 'episodic');
+    expect(r).toEqual({ bestId: null, bestSigma: null });
+  });
+
+  it('project scoping is exact — "default" stores do not merge into named-project rows either', () => {
+    const rowMap = new Map([['proj', row('gaussian-memory-worker')]]);
+    const r = selectMergeCandidate([{ id: 'proj', score: 0.99 }], rowMap, 'default', null, 'episodic');
+    expect(r.bestId).toBeNull();
+  });
+
+  it('DECISION (2026-07-17): a named-project store does not absorb a default row — the asymmetric ' +
+     'named-into-default rule was evaluated and rejected', () => {
+    // This is the direction an asymmetric rule would have allowed, and it is the exact
+    // incident vector: 'locomo-eval' is a named project, so named→default permission
+    // hands synthetic corpora destructive write access to the default bucket (46% of
+    // the corpus). Restatement duplication is accepted here and collapsed
+    // non-destructively at retrieval (dedupBySimilarity).
+    const rowMap = new Map([['globalfact', row('default')]]);
+    const r = selectMergeCandidate([{ id: 'globalfact', score: 0.99 }], rowMap, 'locomo-eval', null, 'episodic');
+    expect(r.bestId).toBeNull();
+  });
+
+  it('DECISION (2026-07-17): no named↔named merging — the measured duplication pattern is ' +
+     'cwd-noise across arbitrary named projects, which no default-special rule would fix', () => {
+    // Live data: the same fact stored under loreal-internship AND leetcode-practice
+    // (project tags follow the session's working directory, not content). Merging
+    // across named projects would move content between buckets other projects cannot
+    // see into (named-context reads are own+default only).
+    const rowMap = new Map([['theirs', row('leetcode-practice')]]);
+    const r = selectMergeCandidate([{ id: 'theirs', score: 0.99 }], rowMap, 'loreal-internship', null, 'episodic');
+    expect(r.bestId).toBeNull();
+  });
+
+  it('keeps the strict cross-cluster ceiling (0.97) for non-session types', () => {
+    const rowMap = new Map([['m1', row('default', 'cluster-a')]]);
+    const r = selectMergeCandidate([{ id: 'm1', score: 0.95 }], rowMap, 'default', 'cluster-b', 'episodic');
+    expect(r.bestId).toBeNull(); // 0.95 < 0.97, different cluster → not a candidate
+  });
+
+  it('keeps the looser cross-cluster ceiling (0.90) for session summaries', () => {
+    const rowMap = new Map([['m1', row('default', 'cluster-a')]]);
+    const r = selectMergeCandidate([{ id: 'm1', score: 0.95 }], rowMap, 'default', 'cluster-b', 'session');
+    expect(r.bestId).toBe('m1'); // 0.95 >= 0.90 → session summaries still collapse across clusters
+  });
+
+  it('ignores matches with no fetched row', () => {
+    const r = selectMergeCandidate([{ id: 'ghost', score: 0.99 }], new Map(), 'default', null, 'episodic');
+    expect(r.bestId).toBeNull();
+  });
+});
