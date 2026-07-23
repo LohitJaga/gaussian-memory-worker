@@ -1,8 +1,14 @@
 {
   "generated_by": "bench/tools/derive_id_groups.mjs",
-  "generated_at": "2026-07-09T20:33:14.977Z",
+  "generated_at": "2026-07-23T18:24:22.841Z",
   "note": "Maps each gold query to units: one group per match_text, with the gold_ids whose live D1 text answers it. Containment assignment when possible, token-overlap fallback otherwise (fallbacks + missing ids listed in stderr at generation time). Frozen gold files untouched.",
-  "missing_ids": [],
+  "missing_ids": [
+    "23869ee3-addc-467c-b5b2-d512e15825c3",
+    "48ccda8f-b267-4e83-a7de-006c19df2118",
+    "c985a5b9-f7ed-40fa-8859-0b8b808d2e83",
+    "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc",
+    "2dc50727-00fa-44c9-b38e-d85495126ad3"
+  ],
   "queries": {
     "q01": {
       "groups": [
@@ -124,14 +130,13 @@
           "match_text": "augmentation layers for all 5 workflows",
           "ids": [
             "721f6171-7ff7-4dc8-a01b-fed044ddeb39",
-            "c7dbffce-c8e1-42d0-aff7-2d1021539bff"
+            "c7dbffce-c8e1-42d0-aff7-2d1021539bff",
+            "23869ee3-addc-467c-b5b2-d512e15825c3"
           ]
         },
         {
           "match_text": "augmentation approach because it improves all wo",
-          "ids": [
-            "23869ee3-addc-467c-b5b2-d512e15825c3"
-          ]
+          "ids": []
         }
       ]
     },
@@ -305,14 +310,13 @@
         {
           "match_text": "chose cloudflare d1 over planetscale",
           "ids": [
-            "56ab6cee-d7e8-48ee-b7bc-846b8af28aec"
+            "56ab6cee-d7e8-48ee-b7bc-846b8af28aec",
+            "c985a5b9-f7ed-40fa-8859-0b8b808d2e83"
           ]
         },
         {
           "match_text": "vectorize-backed ann lookup",
-          "ids": [
-            "c985a5b9-f7ed-40fa-8859-0b8b808d2e83"
-          ]
+          "ids": []
         }
       ]
     },
@@ -353,14 +357,13 @@
         {
           "match_text": "domain rebuild instability",
           "ids": [
-            "850ca374-3a64-4a37-bc10-4907a6dc4f30"
+            "850ca374-3a64-4a37-bc10-4907a6dc4f30",
+            "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"
           ]
         },
         {
           "match_text": "domain rebuild from unstable to stable",
-          "ids": [
-            "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"
-          ]
+          "ids": []
         }
       ]
     },
@@ -375,7 +378,6 @@
         {
           "match_text": "integration will still need to happen even if agi",
           "ids": [
-            "2dc50727-00fa-44c9-b38e-d85495126ad3",
             "de0447d8-ac4d-401b-8bc5-a1153a184892"
           ]
         }
@@ -453,14 +455,13 @@
         {
           "match_text": "domain rebuild instability",
           "ids": [
-            "850ca374-3a64-4a37-bc10-4907a6dc4f30"
+            "850ca374-3a64-4a37-bc10-4907a6dc4f30",
+            "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"
           ]
         },
         {
           "match_text": "domain rebuild from unstable to stable",
-          "ids": [
-            "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"
-          ]
+          "ids": []
         }
       ]
     },

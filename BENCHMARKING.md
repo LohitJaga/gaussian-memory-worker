@@ -573,6 +573,61 @@ misses" list (q33/q42/q43/q44) plus q36:
 
 ---
 
+## Session log — 2026-07-23 (later): full re-run after corpus-wide dedup cleanup
+
+Same-day follow-up to the register-miss session above. After the q36 fix, ran
+`memory_find_duplicate_clusters` (new tool, see git log) across every domain with
+5+ memories in duplicate clusters (all except `personal-life-style`, held back for
+separate review) and manually deleted 837 near-duplicate memories via
+`memory_delete` (R2-archived, each judged individually — contradictions, evolving
+decisions, and topically-similar-but-factually-distinct content were preserved).
+Corpus dropped from the low-thousands to a meaningfully smaller, cleaner base.
+
+**Gold-integrity casualty, found before re-running the benchmark**: 5 of the 42
+distinct gold ids referenced across the three frozen gold files got swept up as
+duplicates and deleted (`23869ee3`, `48ccda8f`, `c985a5b9`, `ab8b3eba`, `2dc50727`
+— all judged as genuine restatements at the time, correctly, since duplicate
+judgment doesn't know a row is gold-tagged). Regenerated `bench/gold/id_groups.json`
+via the existing `bench/tools/derive_id_groups.mjs` (re-runnable by design, frozen
+`retrieval_gold.*.json` files untouched) — needed `CI=true` in the environment to
+stop a new wrangler CLI banner ("Cloudflare agent skills are available...") from
+polluting the `--json` stdout the script parses.
+
+Net effect: **3 units are now permanently unscoreable as real misses** — not a
+retrieval defect, a benchmark artifact. Each deleted id's fact survives in the
+corpus via a kept sibling, but the sibling's exact wording doesn't literally
+contain the frozen `match_text` substring, so neither id-matching nor the
+text-fallback can credit it:
+- q10 unit "augmentation approach because it improves all workflows" (main set)
+- q28 unit "vectorize-backed ann lookup" (multihop set)
+- q31 / q39 unit "domain rebuild from unstable to stable" (multihop + vague sets,
+  same underlying fact, same original id)
+
+(A 4th casualty, q32's "ai timelines are way off" unit, still scores fine —
+its dead id happened to land in the frozen gold's first `match_text` group, and
+the surviving sibling's text still contains that literal substring.) Did not
+hand-edit the frozen gold files to route around this — same convention this repo
+already uses for bad-gold cases (q40/q42) — flagging honestly instead. Re-authoring
+those 3 units against their surviving sibling ids is fair game for a future
+session if the recall hit is worth closing.
+
+**Results** (frozen trials, ID-first unit matching, k=8 — the standard comparison
+point):
+
+| set | gaussian recall | vs `baa71a2` (2026-07-17) | note |
+|---|---|---|---|
+| main+multihop (29 q) | **0.85** | 0.85 (unchanged) | cleanup removed noise, not signal — recall held exactly |
+| vague (12 q) | **0.79** | 0.71 (+0.08) | q36 fix is the main driver |
+
+Full k=4/8/16/24 frontier, main+multihop: recall 0.80/0.85/0.82/0.82, gaussian
+tokens 5.7x/3.5x/2.7x/1.6x baseline. Vague: recall 0.71/0.79/0.79/0.79, tokens
+12.9x/7.1x/4.9x/3.1x baseline. Both sets still show the same top_k=16/24 pattern
+flagged in prior sessions (gaussian's token cost advantage shrinks as k grows,
+recall plateaus) — untouched by tonight's work, still open per the "Still open"
+list further up.
+
+---
+
 # Part 2 — Landscape Research (reference, compiled June 15, 2026)
 
 ---
