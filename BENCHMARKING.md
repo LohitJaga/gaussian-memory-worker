@@ -527,6 +527,52 @@ of today's work touched these.
 
 ---
 
+## Session log — 2026-07-23: register-miss follow-up, live-verified against `baa71a2`
+
+The recall numbers in the 2026-07-09 sessions above (0.68–0.79 main+multihop,
+0.42–0.58 vague) are **stale** — superseded by `baa71a2` (2026-07-17, "Fix retrieval
+regression: unbounded sigma-exempt diversity cap"), which bounded the unbounded
+sigma-exempt diversity cap from 2026-07-13 that had let the most-retrieved half of
+the corpus become permanently cap-exempt. Frozen ablation from that commit: recall
+**0.85 (main+multihop) / 0.71 (vague)**, tokens *down* (main+multihop p50 1010→944,
+vague p50 1307→1083). This document wasn't updated at commit time; noting it here
+so the numbers above aren't taken as current.
+
+Re-ran `bench/tools/probe_register.mjs` against the live worker for the "Remaining
+misses" list (q33/q42/q43/q44) plus q36:
+
+- **q33, q42: already fixed** — both hit live now. Not a code fix; the gold set was
+  re-authored to v2 (`retrieval_gold.vague.json`, 2026-07-09 evening session) after
+  the close-read audit found the originals were bad gold, not real misses.
+- **q36: real bug, now fixed** — traced with the register probe: gold *was*
+  cosine-reachable (baseline rank 24, cosine=0.653) but gaussian's final output
+  dropped it anyway. Root cause: the live corpus had accumulated ~24 near-duplicate
+  "struggling with/aiming to complete N LeetCode problems" episodic memories across
+  5+ domains and 4+ projects (captured over 2026-05-16 through 2026-07-09, mostly
+  auto-store from casual conversation), all scoring high enough to fill every
+  candidate slot ahead of the one specific goal-fact memory. Confirmed via direct D1
+  query these were never deduped (`revision_count=0` on all, 10+ distinct
+  `cluster_id`s) — and under `baa71a2`'s same-project merge scoping, memories stored
+  under different `project` values are now structurally unmergeable by the cron even
+  if it ran again. This is a corpus-hygiene problem, not a retrieval bug: no ranking
+  change would fix it without risking the same kind of single-query overfit that
+  `baa71a2` itself had to clean up. Fixed with a one-time manual cleanup (24 memories
+  deleted via `memory_delete`, R2-archived first, confirmed against the user's actual
+  current goal before deleting anything): 7 near-duplicate sentiment captures from a
+  2026-05-26 session, plus 17 superseded goal-number restatements (abandoned targets
+  180/250/500/"1k-2k", plus repeat captures of the same "20/150 done" moment) from
+  2026-05-26/27. Kept: the current goal (150 by August, `f387472b`), the detailed
+  2026-06-22 cadence plan (`536295f2`), the most recent progress marker
+  (`d4511402`), and all working-style/feedback/personal-venting content. Re-verified
+  live post-cleanup: gold now hits at gaussian rank 2 (`probe_register.mjs --ids
+  q36`).
+- **q43, q44: confirmed still open, genuine register misses** — not cosine-reachable
+  even at baseline depth 100. No corpus cleanup or ranking change touches this; still
+  needs query/memory register normalization at embed time or a keyword-OR FTS
+  candidate source, per the "Still open" item 2 above.
+
+---
+
 # Part 2 — Landscape Research (reference, compiled June 15, 2026)
 
 ---

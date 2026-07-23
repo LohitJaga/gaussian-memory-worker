@@ -106,7 +106,11 @@ but don't re-research from scratch, the plan already exists.
       param, not just unit tests. Deployed + verified: 10/10 e2e pass, and ~30% faster (41s vs ~62-70s)
       since strict scoping means a smaller candidate pool to dedupe against.
 - [ ] Token savings per call from caching (the resume-point metric)
-- [ ] Retrieval quality on a labeled query set
+- [x] Retrieval quality on a labeled query set — running since 2026-07-08 via
+      `bench/ablation.mjs` against `bench/gold/retrieval_gold.{v1,vague,multihop}.json`
+      (67 queries total). Current (post-`baa71a2`, 2026-07-17): recall 0.85
+      main+multihop / 0.71 vague. See BENCHMARKING.md's 2026-07-23 session log for the
+      latest register-miss follow-up (q33/q42/q36 fixed, q43/q44 still open).
 - [ ] Identity coherence — 50 queries, LLM-judge whether injected context is coherent
 - [ ] Association fidelity — 100 annotated pairs, BFS precision/recall
 - [ ] Contradiction surface rate (lower = better)
