@@ -57,10 +57,16 @@ Investigated 2026-06-18. `memory_sigma_history` has ZERO `decay`/`prune` events 
       `~/.gaussian-memory-env`, Claude Code + Zed hook auto-config). Git history shows 2 rounds of
       "fix init crash on fresh clone" — exercised against fresh clones, not just the original deploy.
 - [ ] Verify a fresh end-to-end install works on a genuinely separate stranger's Cloudflare account
-      (fresh-clone testing so far has been on your own account/machine — not the same test)
-- [ ] README: thesis + Bayesian/Gaussian differentiator present ("What it does" section) — still
-      missing an architecture diagram and a competitor table (vs eve/Mem0)
-- [ ] One-line pitch + 1–2 hard numbers (see Benchmarking) so it's not forgettable
+      (fresh-clone testing so far has been on your own account/machine — not the same test). Needs
+      a second Cloudflare account to actually exercise — not something a coding session can do alone.
+- [x] README: thesis + differentiator present ("What it does" + "Why not just RAG?"), architecture
+      diagram present (Mermaid flowchart + component table, commit `51b3cc2`). Competitor
+      comparison table was added (`51b3cc2`/`279cdd5`) then **deliberately removed** in `0be2a28`
+      ("cut AI-cadence tells" — read as too marketing-y next to the rest of the README's grounded
+      tone) — this checkbox was stale, not actually missing.
+- [x] One-line pitch + hard numbers — added 2026-07-23: intro now states 87%/83% recall
+      (main+multihop/vague, k=8) vs 67%/58% baseline, with the honest token-cost tradeoff (3.6–7.5x),
+      sourced from the frozen benchmark. See BENCHMARKING.md's 2026-07-23 session logs for the run.
 
 ### Benchmarking (need numbers for README/blog)
 Research already done — see `BENCHMARKING.md` (compiled 2026-06-15): which public benchmarks exist
