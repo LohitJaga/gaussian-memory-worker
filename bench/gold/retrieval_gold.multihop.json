@@ -19,8 +19,8 @@
       "match_texts": ["architecture with 5 ai agents", "augmentation layers for all 5 workflows"], "note": "5-agent design + augmentation layer, distinct facets" },
 
     { "id": "q31", "category": "multihop", "query": "how did I deal with the domain rebuild instability",
-      "gold_ids": ["850ca374-3a64-4a37-bc10-4907a6dc4f30", "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"],
-      "match_texts": ["domain rebuild instability", "domain rebuild from unstable to stable"], "note": "problem statement + fix, distinct memories" },
+      "gold_ids": ["850ca374-3a64-4a37-bc10-4907a6dc4f30", "f2fc5a51-d93b-4b54-8c73-e9394482c603"],
+      "match_texts": ["domain rebuild instability", "domain rebuild status from unstable to current"], "note": "problem statement + fix, distinct memories. v2 (2026-07-23): original fix-unit id ab8b3eba was already gone from D1 before this session's cleanup (pre-existing gold rot, not caused by it) -- re-pointed to f2fc5a51, a live memory carrying the same fact ('Changed domain rebuild status from unstable to current, exact, and done because user confirmed the fix')." },
 
     { "id": "q32", "category": "multihop", "query": "what are my views on AI timelines and the need for integration",
       "gold_ids": ["2dc50727-00fa-44c9-b38e-d85495126ad3", "de0447d8-ac4d-401b-8bc5-a1153a184892"],

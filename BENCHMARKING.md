@@ -584,40 +584,48 @@ decisions, and topically-similar-but-factually-distinct content were preserved).
 Corpus dropped from the low-thousands to a meaningfully smaller, cleaner base.
 
 **Gold-integrity casualty, found before re-running the benchmark**: 5 of the 42
-distinct gold ids referenced across the three frozen gold files got swept up as
-duplicates and deleted (`23869ee3`, `48ccda8f`, `c985a5b9`, `ab8b3eba`, `2dc50727`
-— all judged as genuine restatements at the time, correctly, since duplicate
-judgment doesn't know a row is gold-tagged). Regenerated `bench/gold/id_groups.json`
-via the existing `bench/tools/derive_id_groups.mjs` (re-runnable by design, frozen
-`retrieval_gold.*.json` files untouched) — needed `CI=true` in the environment to
-stop a new wrangler CLI banner ("Cloudflare agent skills are available...") from
-polluting the `--json` stdout the script parses.
+distinct gold ids referenced across the three frozen gold files were missing from
+live D1. Checked which of tonight's delete batches actually caused each — only 3
+(`23869ee3`, `48ccda8f`, `2dc50727`) were swept up by tonight's cleanup (correctly,
+by the same judgment applied everywhere else — duplicate detection has no way to
+know a row is gold-tagged); the other 2 (`c985a5b9`, `ab8b3eba`) were already gone
+from D1 before this session started — pre-existing gold rot this session surfaced,
+not caused. Regenerated `bench/gold/id_groups.json` via the existing
+`bench/tools/derive_id_groups.mjs` (re-runnable by design) — needed `CI=true` in
+the environment to stop a new wrangler CLI banner ("Cloudflare agent skills are
+available...") from polluting the `--json` stdout the script parses.
 
-Net effect: **3 units are now permanently unscoreable as real misses** — not a
-retrieval defect, a benchmark artifact. Each deleted id's fact survives in the
-corpus via a kept sibling, but the sibling's exact wording doesn't literally
-contain the frozen `match_text` substring, so neither id-matching nor the
-text-fallback can credit it:
-- q10 unit "augmentation approach because it improves all workflows" (main set)
-- q28 unit "vectorize-backed ann lookup" (multihop set)
-- q31 / q39 unit "domain rebuild from unstable to stable" (multihop + vague sets,
-  same underlying fact, same original id)
+Of the 4 units left unscoreable by this, one (`ab8b3eba`, shared by q31 and q39's
+"domain rebuild from unstable to stable" unit) had a clean surviving match —
+`f2fc5a51`: "Changed domain rebuild status from unstable to current, exact, and
+done because user confirmed the fix". Re-pointed q31/q39's gold_ids + match_texts
+to it (v2 note added in both gold files, same convention as the existing q33/q42
+re-authoring) and regenerated id_groups.json again — confirmed both queries now
+score 2/2 for gaussian and baseline.
 
-(A 4th casualty, q32's "ai timelines are way off" unit, still scores fine —
-its dead id happened to land in the frozen gold's first `match_text` group, and
-the surviving sibling's text still contains that literal substring.) Did not
-hand-edit the frozen gold files to route around this — same convention this repo
-already uses for bad-gold cases (q40/q42) — flagging honestly instead. Re-authoring
-those 3 units against their surviving sibling ids is fair game for a future
-session if the recall hit is worth closing.
+**2 units remain permanently unscoreable** — not a retrieval defect, a benchmark
+artifact, and deliberately not force-fixed with a weak match:
+- q10 unit "augmentation approach because it improves all workflows" (main set) —
+  searched loreal-account-project for a survivor; closest candidate (`708be274`)
+  is about roadmap timing, a different fact. Nothing captures this specific framing
+  anymore.
+- q28 unit "vectorize-backed ann lookup" (multihop set) — searched broadly across
+  `gaussian-memory`/`benchmark-project` for "Vectorize" + ANN-adjacent terms;
+  nothing survives. This id was already gone pre-session, so this gap predates
+  tonight's cleanup entirely.
+
+(q32's "ai timelines are way off" unit, also missing its original id, still scores
+fine — the dead id happened to land in the frozen gold's first `match_text` group,
+and the surviving sibling's text still contains that literal substring, so it was
+never actually broken.)
 
 **Results** (frozen trials, ID-first unit matching, k=8 — the standard comparison
-point):
+point), after the q31/q39 gold fix:
 
 | set | gaussian recall | vs `baa71a2` (2026-07-17) | note |
 |---|---|---|---|
-| main+multihop (29 q) | **0.85** | 0.85 (unchanged) | cleanup removed noise, not signal — recall held exactly |
-| vague (12 q) | **0.79** | 0.71 (+0.08) | q36 fix is the main driver |
+| main+multihop (29 q) | **0.87** | 0.85 (+0.02) | cleanup removed noise, q31 gold fix recovered the rest |
+| vague (12 q) | **0.83** | 0.71 (+0.12) | q36 fix + q39 gold fix are the drivers |
 
 Full k=4/8/16/24 frontier, main+multihop: recall 0.80/0.85/0.82/0.82, gaussian
 tokens 5.7x/3.5x/2.7x/1.6x baseline. Vague: recall 0.71/0.79/0.79/0.79, tokens

@@ -27,8 +27,8 @@
       "match_texts": ["oauth 2.0 client id for desktop app for color wow", "oauth consent screen with app name 'color wow agents'"], "note": "vague ref to OAuth setup cluster" },
 
     { "id": "q39", "category": "vague", "query": "that domain rebuild bug, we fix it?",
-      "gold_ids": ["850ca374-3a64-4a37-bc10-4907a6dc4f30", "ab8b3eba-4c13-4c6c-a2a3-46b7b1862cdc"],
-      "match_texts": ["domain rebuild instability", "domain rebuild from unstable to stable"], "note": "vague ref to the domain-rebuild fix" },
+      "gold_ids": ["850ca374-3a64-4a37-bc10-4907a6dc4f30", "f2fc5a51-d93b-4b54-8c73-e9394482c603"],
+      "match_texts": ["domain rebuild instability", "domain rebuild status from unstable to current"], "note": "vague ref to the domain-rebuild fix. v2 (2026-07-23): original fix-unit id ab8b3eba was already gone from D1 before this session's cleanup (pre-existing gold rot, not caused by it) -- re-pointed to f2fc5a51, a live memory carrying the same fact." },
 
     { "id": "q40", "category": "vague", "query": "how do we differ from mem0 again",
       "gold_ids": ["6e9be4c0-49ca-477c-93e4-3996d9deb3a9"],
