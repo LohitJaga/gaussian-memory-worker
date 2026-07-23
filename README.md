@@ -7,6 +7,8 @@ Persistent memory for AI coding assistants. Works across sessions, devices, and 
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly (~$0/month on the free tier for most users).
 
+**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store — see [BENCHMARKING.md](BENCHMARKING.md) for methodology): **87% recall** on direct/multi-hop queries and **83%** on vague, loosely-worded ones, vs **67%** and **58%** for plain top-K cosine search at the same `top_k`. That gain isn't free — Gaussian Memory spends 3.6–7.5x more tokens per query to get there, since it injects more context per retrieval, not just ranks better. Full frontier (recall and token cost across `top_k` 4/8/16/24) is in BENCHMARKING.md; this is the honest number, not the flattering one.
+
 ## What it does
 
 The system automatically captures what you worked on, what decisions you made, and what's still open. A hook fires on every prompt you send, not just the first one of a session, and injects relevant context back in before the model answers. It runs three queries in parallel (your actual prompt, recent decisions for the current project, and your working conventions/preferences), merges and score-filters the results, and caps what gets injected so it stays a small top-up instead of a wall of text.
