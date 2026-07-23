@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   RRF_K, rrfMerge, minMaxNormalize, normalizeCosineBatch, tokenize, jaccardSimilarity,
-  dedupBySimilarity, sigmaGate, applyDiversityCap, DEDUP_COS, projectScopeClause,
+  dedupBySimilarity, groupSimilarByCosine, sigmaGate, applyDiversityCap, DEDUP_COS, projectScopeClause,
 } from './retrieval';
 
 // Map.get() is typed as T | undefined; these tests assert the key was just inserted,
@@ -218,6 +218,69 @@ describe('dedupBySimilarity', () => {
     expect(strict).toHaveLength(2);
     const loose = dedupBySimilarity(list, DEDUP_COS, 0.7); // 0.75 > 0.7 -> dup
     expect(loose).toHaveLength(1);
+  });
+});
+
+// ── groupSimilarByCosine ─────────────────────────────────────────────────
+
+describe('groupSimilarByCosine', () => {
+  it('groups near-identical vectors into a cluster, excludes unrelated items', () => {
+    const items = [
+      { id: 'a', vector: [1, 0, 0] },
+      { id: 'b', vector: [0.99, 0.01, 0] }, // cosine > 0.85 vs a
+      { id: 'c', vector: [0, 1, 0] }, // unrelated
+    ];
+    const clusters = groupSimilarByCosine(items);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].map(x => x.id).sort()).toEqual(['a', 'b']);
+  });
+
+  it('does not return singleton groups', () => {
+    const items = [
+      { id: 'a', vector: [1, 0] },
+      { id: 'b', vector: [0, 1] },
+      { id: 'c', vector: [0.7, 0.7] },
+    ];
+    expect(groupSimilarByCosine(items)).toEqual([]);
+  });
+
+  it('transitively merges a chain of near-duplicates into one cluster', () => {
+    // a~b (cos high), b~c (cos high), a~c lower but still connected via b
+    const items = [
+      { id: 'a', vector: [1, 0, 0] },
+      { id: 'b', vector: [0.95, 0.31, 0] },
+      { id: 'c', vector: [0.85, 0.53, 0] },
+    ];
+    const clusters = groupSimilarByCosine(items, 0.85);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].map(x => x.id).sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('respects a custom threshold', () => {
+    const items = [
+      { id: 'a', vector: [1, 0, 0] },
+      { id: 'b', vector: [0.9, 0.436, 0] }, // cosine ~0.9
+    ];
+    expect(groupSimilarByCosine(items, 0.95)).toEqual([]);
+    expect(groupSimilarByCosine(items, 0.85)).toHaveLength(1);
+  });
+
+  it('handles an empty list', () => {
+    expect(groupSimilarByCosine([])).toEqual([]);
+  });
+
+  it('can produce multiple independent clusters', () => {
+    const items = [
+      { id: 'a', vector: [1, 0, 0] },
+      { id: 'b', vector: [0.99, 0.01, 0] },
+      { id: 'c', vector: [0, 1, 0] },
+      { id: 'd', vector: [0, 0.99, 0.01] },
+      { id: 'e', vector: [0, 0, 1] }, // unrelated singleton, excluded
+    ];
+    const clusters = groupSimilarByCosine(items).map(c => c.map(x => x.id).sort());
+    expect(clusters).toHaveLength(2);
+    expect(clusters).toContainEqual(['a', 'b']);
+    expect(clusters).toContainEqual(['c', 'd']);
   });
 });
 

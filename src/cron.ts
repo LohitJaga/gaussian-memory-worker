@@ -6,6 +6,7 @@ import {
 import { applyBatchAssignments } from './rebuild';
 import { decaySigma, deserializeSigma, serializeSigma, meanSigma } from './gaussian';
 import { callAI } from './ai';
+import { groupSimilarByCosine, DEDUP_COS } from './retrieval';
 
 export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -291,6 +292,87 @@ export async function cleanupSingletons(env: Env, minCount = 3): Promise<string>
 
   const remaining = await env.DB.prepare('SELECT COUNT(*) as n FROM domain_anchors').first<{ n: number }>();
   return `Cleaned ${singletonNames.length} singleton domains, reassigned ${totalReassigned} memories. Domains remaining: ${remaining?.n ?? 0}.`;
+}
+
+// Read-only report of near-duplicate memory clusters (cosine similarity, DEDUP_COS —
+// same threshold retrieval-time dedupBySimilarity already uses to suppress restatements
+// at injection). Deliberately does NOT merge or delete anything: the design rationale
+// above selectMergeCandidate (storage.ts) explains why corpus-wide auto-consolidation
+// across projects is unsafe (project tags follow session cwd, not content — "same fact,
+// different project" is the normal case, not an anomaly; auto-deleting a same-content
+// row could destroy the only globally-visible default-project copy). A human reviews
+// the clusters this returns and acts via memory_delete/memory_bulk_delete.
+//
+// Scoped per-domain (not corpus-wide) to keep the O(n^2) pairwise cosine pass bounded —
+// same reasoning as cleanupSingletons' per-domain batching above. Without a `domain`
+// filter, scans every domain but only returns per-domain summary counts (not full
+// cluster detail) so output size doesn't scale with corpus size; pass `domain` to get
+// the full id/project/text listing for one domain.
+const DUP_SCAN_DOMAIN_CAP = 500; // guard against a pathological single-domain O(n^2) blowup
+
+export interface DuplicateClusterRow {
+  id: string; project: string; access_count: number; text: string;
+}
+
+export async function findDuplicateClusters(
+  env: Env,
+  opts: { domain?: string; threshold?: number; minClusterSize?: number } = {}
+): Promise<string> {
+  const threshold = opts.threshold ?? DEDUP_COS;
+  const minClusterSize = Math.max(2, opts.minClusterSize ?? 2);
+
+  const domainCounts = opts.domain
+    ? await env.DB.prepare('SELECT domain, COUNT(*) as cnt FROM memories WHERE domain = ? GROUP BY domain')
+        .bind(opts.domain).all<{ domain: string; cnt: number }>()
+    : await env.DB.prepare('SELECT domain, COUNT(*) as cnt FROM memories GROUP BY domain')
+        .all<{ domain: string; cnt: number }>();
+
+  const domains = (domainCounts.results ?? []).filter(d => d.cnt >= minClusterSize);
+  if (domains.length === 0) return opts.domain ? `No domain "${opts.domain}" with >= ${minClusterSize} memories.` : 'No domains with duplicate-eligible memory counts.';
+
+  const summaryLines: string[] = [];
+  const detailSections: string[] = [];
+
+  for (const d of domains) {
+    const rows = (await env.DB.prepare(
+      'SELECT id, text, project, access_count FROM memories WHERE domain = ? ORDER BY access_count DESC LIMIT ?'
+    ).bind(d.domain, DUP_SCAN_DOMAIN_CAP).all<DuplicateClusterRow>()).results ?? [];
+    if (rows.length < minClusterSize) continue;
+
+    const vectors = new Map<string, number[]>();
+    for (let i = 0; i < rows.length; i += 20) { // Vectorize.getByIds caps at 20 ids/call
+      const chunk = rows.slice(i, i + 20).map(r => r.id);
+      const vecs = await env.VECTORIZE.getByIds(chunk);
+      for (const v of vecs ?? []) vectors.set(v.id, Array.from(v.values as number[]));
+    }
+
+    const items = rows
+      .filter(r => vectors.has(r.id))
+      .map(r => ({ ...r, vector: vectors.get(r.id) as number[] }));
+    const clusters = groupSimilarByCosine(items, threshold).filter(c => c.length >= minClusterSize);
+    if (clusters.length === 0) continue;
+
+    const dupRowCount = clusters.reduce((s, c) => s + c.length, 0);
+    const truncNote = rows.length >= DUP_SCAN_DOMAIN_CAP ? ` (scan capped at ${DUP_SCAN_DOMAIN_CAP} rows, domain has ${d.cnt})` : '';
+    summaryLines.push(`${d.domain}: ${clusters.length} cluster(s), ${dupRowCount} memories involved${truncNote}`);
+
+    if (opts.domain) {
+      const lines = [`\n=== ${d.domain} — ${clusters.length} cluster(s), threshold=${threshold} ===`];
+      clusters.forEach((c, ci) => {
+        lines.push(`\nCluster ${ci + 1} (${c.length} memories):`);
+        for (const m of c) {
+          lines.push(`  [${m.id.slice(0, 8)}] proj=${m.project} acc=${m.access_count}  "${m.text.slice(0, 90)}"`);
+        }
+      });
+      detailSections.push(lines.join('\n'));
+    }
+  }
+
+  if (summaryLines.length === 0) return `No duplicate clusters found above threshold=${threshold}.`;
+
+  const header = `Duplicate scan (threshold=${threshold}, min cluster size=${minClusterSize}):\n\n${summaryLines.join('\n')}`;
+  if (opts.domain) return `${header}\n${detailSections.join('\n')}`;
+  return `${header}\n\nRe-run with a specific "domain" to see full id/project/text detail for that domain's clusters. This tool is read-only — review the clusters, then use memory_delete/memory_bulk_delete to act.`;
 }
 
 export async function refreshStaleDomainSummaries(env: Env): Promise<void> {

@@ -113,6 +113,46 @@ export function dedupBySimilarity<T extends { text: string; vector: number[] }>(
   return out;
 }
 
+// Batch/offline counterpart to dedupBySimilarity: instead of suppressing later
+// duplicates during a single retrieve(), groups a whole item set into clusters of
+// near-duplicates (transitively connected via >=threshold cosine edges) for human
+// review. Used by memory_find_duplicate_clusters (cron.ts) — read-only reporting
+// only, no merge/delete decision is made here. Deliberately NOT wired into any
+// automatic corpus mutation — see the cross-project merge-eligibility rationale
+// above selectMergeCandidate (storage.ts): silently collapsing near-duplicate
+// restatements across projects/domains at write time already caused a real
+// incident (fixed in baa71a2), and the same risk applies to a corpus-wide
+// automatic sweep. This function only clusters; a human decides what (if
+// anything) gets deleted via memory_delete/memory_bulk_delete.
+export function groupSimilarByCosine<T extends { vector: number[] }>(
+  items: T[], threshold = DEDUP_COS
+): T[][] {
+  const n = items.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (x: number): number => {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (dotProduct(items[i].vector, items[j].vector) > threshold) union(i, j);
+    }
+  }
+
+  const groups = new Map<number, T[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)?.push(items[i]);
+  }
+  return Array.from(groups.values()).filter(g => g.length > 1);
+}
+
 // σ hard gate: specific queries only surface memories whose confidence meets the
 // query's specificity requirement. Ceiling scales with querySigmaVal so vague queries
 // stay permissive. Always keeps at least a minimum number of results (never empty).

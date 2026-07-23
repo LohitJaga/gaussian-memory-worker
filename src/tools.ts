@@ -5,7 +5,7 @@ import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster
 import { rebuildDomainsStep } from './rebuild';
 import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
-import { updateDecay, cleanupSingletons } from './cron';
+import { updateDecay, cleanupSingletons, findDuplicateClusters } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
 import { callAI, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
 
@@ -220,6 +220,18 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: { min_count: { type: 'number', description: 'Domains with fewer than this many memories are singletons. Default 3.' } },
+    },
+  },
+  {
+    name: 'memory_find_duplicate_clusters',
+    description: 'Read-only report of near-duplicate memory clusters within a domain (cosine similarity above threshold, default 0.85 — same threshold retrieval-time dedup already uses). Unlike memory_dedupe (exact text only), this catches semantically-restated near-duplicates that differ in wording. Deliberately does NOT delete or merge anything — near-duplicates commonly span multiple projects (project tags follow session cwd, not content), and auto-consolidating across projects risks destroying the only globally-visible copy of a fact. Review the clusters this returns, then act with memory_delete/memory_bulk_delete. Without `domain`, scans every domain but returns only per-domain summary counts; pass `domain` for full id/project/text detail on one domain.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Scope to one domain and get full cluster detail (id/project/access_count/text). Omit for a cross-domain summary (counts only).' },
+        threshold: { type: 'number', description: 'Cosine similarity threshold for grouping. Default 0.85 (same as retrieval-time dedup).' },
+        min_cluster_size: { type: 'number', description: 'Minimum memories in a group to report as a cluster. Default 2.' },
+      },
     },
   },
   {
@@ -1582,6 +1594,14 @@ Return ONLY valid JSON array:
     case 'memory_cleanup_singletons': {
       const minCount = (args.min_count as number) ?? 3;
       return await cleanupSingletons(env, minCount);
+    }
+
+    case 'memory_find_duplicate_clusters': {
+      return await findDuplicateClusters(env, {
+        domain: args.domain as string | undefined,
+        threshold: args.threshold as number | undefined,
+        minClusterSize: args.min_cluster_size as number | undefined,
+      });
     }
 
     case 'memory_build_entities': {
