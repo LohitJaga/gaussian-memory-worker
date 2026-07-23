@@ -6,6 +6,7 @@ import {
   pruneJunkMemories, updateDecay, deduplicateRecentMemories,
   deduplicateColdMemories, cleanupSingletons, refreshStaleDomainSummaries,
   cronRebuildBatch, synthesizeIdentityProfile, consolidateColdMemories,
+  cacheDuplicateReport,
 } from './cron';
 import { processPendingEntityQueue } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
@@ -273,6 +274,7 @@ export default {
     await run('dedupeRecent', () => deduplicateRecentMemories(env));
     await run('dedupeCold', () => deduplicateColdMemories(env));
     await run('cleanupSingletons', () => cleanupSingletons(env, 3));
+    await run('duplicateReport', () => cacheDuplicateReport(env));
     await run('refreshDomains', () => refreshStaleDomainSummaries(env));
     await run('cronRebuild', () => cronRebuildBatch(env, 2000, 10 * 60 * 1000));
     await run('synthesizeIdentity', () => synthesizeIdentityProfile(env));

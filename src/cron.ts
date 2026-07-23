@@ -310,16 +310,30 @@ export async function cleanupSingletons(env: Env, minCount = 3): Promise<string>
 // the full id/project/text listing for one domain.
 const DUP_SCAN_DOMAIN_CAP = 500; // guard against a pathological single-domain O(n^2) blowup
 
+// Cache-aside for the cross-domain summary only (never the per-domain detail path —
+// that's what a human is about to act on via memory_delete, so it must reflect the
+// current corpus, not a stale nightly snapshot). Populated by the 'duplicateReport'
+// cron step below at default threshold/minClusterSize; a caller using non-default
+// params always gets a live scan since the cache can't serve arbitrary parameters.
+const DUP_REPORT_CACHE_KEY = 'cache:duplicate_report';
+const DUP_REPORT_CACHE_TTL = 26 * 3600; // slightly over 24h so a delayed cron run doesn't create a gap
+
 export interface DuplicateClusterRow {
   id: string; project: string; access_count: number; text: string;
 }
 
 export async function findDuplicateClusters(
   env: Env,
-  opts: { domain?: string; threshold?: number; minClusterSize?: number } = {}
+  opts: { domain?: string; threshold?: number; minClusterSize?: number; fresh?: boolean } = {}
 ): Promise<string> {
   const threshold = opts.threshold ?? DEDUP_COS;
   const minClusterSize = Math.max(2, opts.minClusterSize ?? 2);
+  const isDefaultSummaryQuery = !opts.domain && threshold === DEDUP_COS && minClusterSize === 2;
+
+  if (isDefaultSummaryQuery && !opts.fresh) {
+    const cached = await env.KV.get(DUP_REPORT_CACHE_KEY).catch(() => null);
+    if (cached) return cached;
+  }
 
   const domainCounts = opts.domain
     ? await env.DB.prepare('SELECT domain, COUNT(*) as cnt FROM memories WHERE domain = ? GROUP BY domain')
@@ -368,11 +382,26 @@ export async function findDuplicateClusters(
     }
   }
 
-  if (summaryLines.length === 0) return `No duplicate clusters found above threshold=${threshold}.`;
+  if (summaryLines.length === 0) {
+    const empty = `No duplicate clusters found above threshold=${threshold}.`;
+    if (isDefaultSummaryQuery) await env.KV.put(DUP_REPORT_CACHE_KEY, empty, { expirationTtl: DUP_REPORT_CACHE_TTL }).catch(() => {});
+    return empty;
+  }
 
   const header = `Duplicate scan (threshold=${threshold}, min cluster size=${minClusterSize}):\n\n${summaryLines.join('\n')}`;
   if (opts.domain) return `${header}\n${detailSections.join('\n')}`;
-  return `${header}\n\nRe-run with a specific "domain" to see full id/project/text detail for that domain's clusters. This tool is read-only — review the clusters, then use memory_delete/memory_bulk_delete to act.`;
+
+  const result = `${header}\n\nRe-run with a specific "domain" to see full id/project/text detail for that domain's clusters. This tool is read-only — review the clusters, then use memory_delete/memory_bulk_delete to act.`;
+  if (isDefaultSummaryQuery) await env.KV.put(DUP_REPORT_CACHE_KEY, result, { expirationTtl: DUP_REPORT_CACHE_TTL }).catch(() => {});
+  return result;
+}
+
+// Nightly cron entry point — populates the summary cache above so
+// memory_find_duplicate_clusters answers instantly instead of re-running the
+// per-domain O(n^2) pass on every call. Read-only, same as the tool itself;
+// this just keeps the "how bad is duplication right now" answer warm.
+export async function cacheDuplicateReport(env: Env): Promise<string> {
+  return findDuplicateClusters(env, { fresh: true });
 }
 
 export async function refreshStaleDomainSummaries(env: Env): Promise<void> {

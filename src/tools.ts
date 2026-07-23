@@ -224,13 +224,14 @@ export const TOOLS = [
   },
   {
     name: 'memory_find_duplicate_clusters',
-    description: 'Read-only report of near-duplicate memory clusters within a domain (cosine similarity above threshold, default 0.85 — same threshold retrieval-time dedup already uses). Unlike memory_dedupe (exact text only), this catches semantically-restated near-duplicates that differ in wording. Deliberately does NOT delete or merge anything — near-duplicates commonly span multiple projects (project tags follow session cwd, not content), and auto-consolidating across projects risks destroying the only globally-visible copy of a fact. Review the clusters this returns, then act with memory_delete/memory_bulk_delete. Without `domain`, scans every domain but returns only per-domain summary counts; pass `domain` for full id/project/text detail on one domain.',
+    description: 'Read-only report of near-duplicate memory clusters within a domain (cosine similarity above threshold, default 0.85 — same threshold retrieval-time dedup already uses). Unlike memory_dedupe (exact text only), this catches semantically-restated near-duplicates that differ in wording. Deliberately does NOT delete or merge anything — near-duplicates commonly span multiple projects (project tags follow session cwd, not content), and auto-consolidating across projects risks destroying the only globally-visible copy of a fact. Review the clusters this returns, then act with memory_delete/memory_bulk_delete. Without `domain`, returns a cross-domain summary (counts only) — this is served from a cache refreshed nightly by cron (up to ~26h stale; pass fresh=true to force a live scan). Passing `domain` always does a live scan, since that is the detail a human is about to act on.',
     inputSchema: {
       type: 'object',
       properties: {
-        domain: { type: 'string', description: 'Scope to one domain and get full cluster detail (id/project/access_count/text). Omit for a cross-domain summary (counts only).' },
-        threshold: { type: 'number', description: 'Cosine similarity threshold for grouping. Default 0.85 (same as retrieval-time dedup).' },
-        min_cluster_size: { type: 'number', description: 'Minimum memories in a group to report as a cluster. Default 2.' },
+        domain: { type: 'string', description: 'Scope to one domain and get full cluster detail (id/project/access_count/text). Omit for a cross-domain summary (counts only, cached).' },
+        threshold: { type: 'number', description: 'Cosine similarity threshold for grouping. Default 0.85 (same as retrieval-time dedup). Non-default value bypasses the cache.' },
+        min_cluster_size: { type: 'number', description: 'Minimum memories in a group to report as a cluster. Default 2. Non-default value bypasses the cache.' },
+        fresh: { type: 'boolean', description: 'Force a live scan instead of the cached nightly summary. Only relevant when domain is omitted (domain-scoped calls are always live). Default false.' },
       },
     },
   },
@@ -1601,6 +1602,7 @@ Return ONLY valid JSON array:
         domain: args.domain as string | undefined,
         threshold: args.threshold as number | undefined,
         minClusterSize: args.min_cluster_size as number | undefined,
+        fresh: args.fresh as boolean | undefined,
       });
     }
 
