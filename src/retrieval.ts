@@ -636,7 +636,20 @@ export async function retrieve(
     // surfaced repeatedly outrank newer, corrected ones (rich-get-richer); see isContradiction's
     // UNRESOLVED/RESOLVED class for the complementary fix at the retrieval-eligibility level.
     const baseScore = 0.50 * normCosine[i] + 0.15 * normBm25[i] + 0.27 * normRecency[i] + 0.08 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
-    const primaryScore = baseScore * Math.min(1.40, Math.max(0.70, bhattMultiplier));
+    // Density-bias dampener (2026-07-27): large `session`-type blobs have more surface area
+    // to match against than a small atomic decision/episodic fact, so they can win multihop
+    // queries on sheer size rather than precision (see BENCHMARKING.md session log 2026-07-27
+    // — q36/q39). NOTE: the apparent multihop gain from this (0.33→0.36) did NOT reproduce on
+    // a repeat run of identical code — this benchmark's access-count-driven noise floor at
+    // n=20 is bigger than this effect size, so treat this as theoretically-motivated and
+    // provably-harmless (no regression to exact/paraphrase across 3 deploys), NOT a confirmed
+    // fix. Widening to all memory_types was tried and reverted (measured regression: canceled
+    // out on long-but-correct gold answers too). Log-scaled and bounded: 0 penalty up to 500
+    // chars, capped at -15% past ~16,000.
+    const sessionLengthPenalty = row.memory_type === 'session' && row.text.length > 500
+      ? Math.min(0.15, 0.04 * Math.log2(row.text.length / 500))
+      : 0;
+    const primaryScore = baseScore * (1 - sessionLengthPenalty) * Math.min(1.40, Math.max(0.70, bhattMultiplier));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
