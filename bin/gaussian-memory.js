@@ -18,6 +18,13 @@ function ask(question) {
   return new Promise(r => rl.question(question, ans => { rl.close(); r(ans.trim()); }));
 }
 
+// execSync failures put the real reason in e.stdout/e.stderr, not e.message
+// (which is just "Command failed: <cmd>"). Print the real reason, truncated.
+function realError(e) {
+  const text = (e.stdout || e.stderr || e.message || '').toString().trim();
+  return text.slice(0, 300);
+}
+
 function post(url, token, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
@@ -132,13 +139,18 @@ async function init() {
   // D1
   process.stdout.write('  Creating D1 database... ');
   let d1Id;
+  const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/;
   try {
     const out = execSync('npx wrangler d1 create gaussian-memory 2>&1', { encoding: 'utf8' });
-    d1Id = out.match(/database_id\s*=\s*"([^"]+)"/)?.[1];
-    console.log(`done (${d1Id})`);
+    // Try the documented TOML-snippet format first, then fall back to any bare
+    // UUID in the output — wrangler's human-readable output format has changed
+    // between versions and D1 database IDs are always UUIDs regardless of formatting.
+    d1Id = out.match(/database_id\s*=\s*"([^"]+)"/)?.[1] || out.match(uuidPattern)?.[0];
+    if (d1Id) console.log(`done (${d1Id})`);
+    else { console.log('done, but could not parse the database ID from output:'); console.log('    ' + realError({ stdout: out })); }
   } catch (e) {
-    const m = e.stdout?.match(/database_id\s*=\s*"([^"]+)"/) || e.message?.match(/database_id\s*=\s*"([^"]+)"/);
-    d1Id = m?.[1];
+    const text = e.stdout || e.message || '';
+    d1Id = text.match(/database_id\s*=\s*"([^"]+)"/)?.[1] || text.match(uuidPattern)?.[0];
     if (!d1Id) {
       try {
         const list = execSync('npx wrangler d1 list 2>&1', { encoding: 'utf8' });
@@ -146,34 +158,37 @@ async function init() {
             || list.match(/gaussian-memory[^|]*│[^|]*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
       } catch {}
     }
-    console.log(d1Id ? `exists (${d1Id})` : 'failed — check wrangler auth');
+    if (d1Id) console.log(`exists (${d1Id})`);
+    else { console.log('failed — check wrangler auth'); console.log('    ' + realError(e)); }
   }
 
   // Vectorize
   process.stdout.write('  Creating Vectorize index... ');
   try {
-    execSync('npx wrangler vectorize create gaussian-memory-index --dimensions=768 --metric=cosine 2>&1', { stdio: 'pipe' });
+    execSync('npx wrangler vectorize create gaussian-memory-index --dimensions=768 --metric=cosine 2>&1', { encoding: 'utf8' });
     console.log('done');
-  } catch { console.log('exists or failed — continuing'); }
+  } catch (e) { console.log('exists or failed — continuing'); console.log('    ' + realError(e)); }
 
   // Vectorize — microcluster centroids (internal retrieval signal, separate from the
   // named/capped domain index above)
   process.stdout.write('  Creating microcluster Vectorize index... ');
   try {
-    execSync('npx wrangler vectorize create gaussian-memory-microclusters --dimensions=768 --metric=cosine 2>&1', { stdio: 'pipe' });
+    execSync('npx wrangler vectorize create gaussian-memory-microclusters --dimensions=768 --metric=cosine 2>&1', { encoding: 'utf8' });
     console.log('done');
-  } catch { console.log('exists or failed — continuing'); }
+  } catch (e) { console.log('exists or failed — continuing'); console.log('    ' + realError(e)); }
 
   // KV
   process.stdout.write('  Creating KV namespace... ');
   let kvId;
+  const kvIdPattern = /\b[0-9a-f]{32}\b/;
   try {
     const out = execSync('npx wrangler kv namespace create gaussian-memory-kv 2>&1', { encoding: 'utf8' });
-    kvId = out.match(/id\s*=\s*"([^"]+)"/)?.[1];
-    console.log(`done (${kvId})`);
+    kvId = out.match(/id\s*=\s*"([^"]+)"/)?.[1] || out.match(kvIdPattern)?.[0];
+    if (kvId) console.log(`done (${kvId})`);
+    else { console.log('done, but could not parse the namespace ID from output:'); console.log('    ' + realError({ stdout: out })); }
   } catch (e) {
-    const m = e.stdout?.match(/id\s*=\s*"([^"]+)"/) || e.message?.match(/id\s*=\s*"([^"]+)"/);
-    kvId = m?.[1];
+    const text = e.stdout || e.message || '';
+    kvId = text.match(/id\s*=\s*"([^"]+)"/)?.[1] || text.match(kvIdPattern)?.[0];
     if (!kvId) {
       try {
         const list = execSync('npx wrangler kv namespace list 2>&1', { encoding: 'utf8' });
@@ -181,15 +196,16 @@ async function init() {
         kvId = parsed.find(ns => ns.title?.includes('gaussian-memory-kv'))?.id;
       } catch {}
     }
-    console.log(kvId ? `exists (${kvId})` : 'failed — check wrangler auth');
+    if (kvId) console.log(`exists (${kvId})`);
+    else { console.log('failed — check wrangler auth'); console.log('    ' + realError(e)); }
   }
 
   // R2
   process.stdout.write('  Creating R2 bucket (cold storage)... ');
   try {
-    execSync('npx wrangler r2 bucket create gaussian-memory-cold 2>&1', { stdio: 'pipe' });
+    execSync('npx wrangler r2 bucket create gaussian-memory-cold 2>&1', { encoding: 'utf8' });
     console.log('done');
-  } catch { console.log('exists or failed — continuing'); }
+  } catch (e) { console.log('exists or failed — continuing'); console.log('    ' + realError(e)); }
 
   // Patch wrangler.toml (create from example if not present — wrangler.toml is gitignored)
   const tomlPath = path.join(__dirname, '..', 'wrangler.toml');
@@ -208,9 +224,9 @@ async function init() {
   // Run D1 schema
   process.stdout.write('  Running D1 schema migrations... ');
   try {
-    execSync('npx wrangler d1 execute gaussian-memory --remote --file=schema.sql 2>&1', { stdio: 'pipe' });
+    execSync('npx wrangler d1 execute gaussian-memory --remote --file=schema.sql 2>&1', { encoding: 'utf8', cwd: path.join(__dirname, '..') });
     console.log('done');
-  } catch { console.log('check schema.sql path'); }
+  } catch (e) { console.log('failed:'); console.log('    ' + realError(e)); }
 
   // Column migrations — safe to run on existing installs (ALTER TABLE errors = already exists)
   process.stdout.write('  Applying column migrations... ');
@@ -530,7 +546,8 @@ async function init() {
     console.log('\n(A universal copy was written to ~/.mcp.json — some editors pick this up automatically.)');
     console.log('━'.repeat(60));
   } catch (e) {
-    console.log('deploy failed:', e.message);
+    console.log('deploy failed:');
+    console.log(realError(e));
   }
 }
 
