@@ -343,7 +343,15 @@ async function init() {
   // not a reliable success signal here, so we check the captured output for
   // deploy-succeeded markers instead.
   process.stdout.write('\n  Deploying worker... ');
-  const deployResult = spawnSync('npx', ['wrangler', 'deploy'], { encoding: 'utf8' });
+  // Force a fallback terminal width via env — wrangler's post-deploy summary
+  // renderer reads process.stdout.columns for table width, which is
+  // undefined when piped/captured (no real TTY), and can throw instead of
+  // handling that gracefully. COLUMNS/LINES is the standard Node convention
+  // most CLI width-detection libraries check before giving up.
+  const deployResult = spawnSync('npx', ['wrangler', 'deploy'], {
+    encoding: 'utf8',
+    env: { ...process.env, COLUMNS: '80', LINES: '24' },
+  });
   const deployOut = (deployResult.stdout || '') + (deployResult.stderr || '');
   const deployed = deployResult.status === 0 || /Total Upload:/.test(deployOut) || /https:\/\/[^\s]+\.workers\.dev/.test(deployOut);
   if (deployed) {
