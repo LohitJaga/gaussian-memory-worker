@@ -163,11 +163,21 @@ async function init() {
   }
 
   // Vectorize
+  function vectorizeExists(name) {
+    try {
+      const list = execSync('npx wrangler vectorize list 2>&1', { encoding: 'utf8' });
+      return list.includes(name);
+    } catch { return false; }
+  }
+
   process.stdout.write('  Creating Vectorize index... ');
   try {
     execSync('npx wrangler vectorize create gaussian-memory-index --dimensions=768 --metric=cosine 2>&1', { encoding: 'utf8' });
     console.log('done');
-  } catch (e) { console.log('exists or failed — continuing'); console.log('    ' + realError(e)); }
+  } catch (e) {
+    if (vectorizeExists('gaussian-memory-index')) console.log('exists');
+    else { console.log('failed — continuing'); console.log('    ' + realError(e)); }
+  }
 
   // Vectorize — microcluster centroids (internal retrieval signal, separate from the
   // named/capped domain index above)
@@ -175,7 +185,10 @@ async function init() {
   try {
     execSync('npx wrangler vectorize create gaussian-memory-microclusters --dimensions=768 --metric=cosine 2>&1', { encoding: 'utf8' });
     console.log('done');
-  } catch (e) { console.log('exists or failed — continuing'); console.log('    ' + realError(e)); }
+  } catch (e) {
+    if (vectorizeExists('gaussian-memory-microclusters')) console.log('exists');
+    else { console.log('failed — continuing'); console.log('    ' + realError(e)); }
+  }
 
   // KV
   process.stdout.write('  Creating KV namespace... ');
@@ -219,8 +232,7 @@ async function init() {
       console.log('exists');
     } else {
       console.log('unavailable — continuing without cold-storage archival');
-      console.log('    ' + realError(e));
-      console.log('    (enable R2 later at dash.cloudflare.com, then re-run init to turn it on)');
+      console.log('    (R2 needs a one-time manual enable at dash.cloudflare.com — see README. Re-run init after enabling it to turn archival on.)');
     }
   }
 

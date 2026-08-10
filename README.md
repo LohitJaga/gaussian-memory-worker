@@ -53,6 +53,8 @@ npm install
 npx gaussian-memory init
 ```
 
+> On a brand-new Cloudflare account, R2 (used only for optional nightly cold-storage archival, not core retrieval) requires a one-time manual enable at [dash.cloudflare.com](https://dash.cloudflare.com) before the API will create a bucket. `init` detects this and skips archival gracefully if it's not enabled yet — everything else works normally. Enable R2 anytime later and re-run `init` to turn archival on.
+
 Reload your shell (`source ~/.zshrc` or open a new terminal), restart your harness, and it's live.
 
 <details>
