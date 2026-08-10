@@ -453,6 +453,12 @@ export async function synthesizeIdentityProfile(env: Env): Promise<void> {
 }
 
 export async function consolidateColdMemories(env: Env): Promise<{ archived: number }> {
+  // Without R2, there's nowhere to archive to — the R2?.put below would
+  // resolve to undefined instead of throwing, which would silently mark
+  // rows "archived" and hard-delete them from D1/Vectorize with no backup
+  // anywhere. Bail out before that can happen.
+  if (!env.R2) return { archived: 0 };
+
   const cutoff = Math.floor(Date.now() / 1000) - 30 * 86400; // older than 30 days
   const rows = await env.DB.prepare(`
     SELECT id, text, sigma_diagonal, domain, memory_type, timestamp

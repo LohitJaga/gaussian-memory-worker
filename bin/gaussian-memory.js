@@ -25,61 +25,6 @@ function realError(e) {
   return text.slice(0, 300);
 }
 
-// Minimal promisified HTTPS GET with a Bearer token, JSON response.
-function cfApiGet(pathname, token) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'api.cloudflare.com',
-      path: `/client/v4${pathname}`,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    }, res => {
-      let body = '';
-      res.on('data', chunk => { body += chunk; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(body)); }
-        catch (e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-// Fallback for when wrangler's own CLI output doesn't contain the deployed
-// URL (observed: it can crash rendering the post-deploy bindings table when
-// stdout isn't a TTY, which cuts off everything printed after it — including
-// the URL line). Bypasses the CLI entirely and asks Cloudflare's API
-// directly for the account's workers.dev subdomain, then constructs the URL
-// from that plus the known script name in wrangler.toml.
-async function resolveWorkerUrlViaApi(scriptName) {
-  const candidatePaths = [
-    path.join(process.env.HOME, 'Library', 'Preferences', '.wrangler', 'config', 'default.toml'),
-    path.join(process.env.HOME, '.wrangler', 'config', 'default.toml'),
-    path.join(process.env.HOME, '.config', '.wrangler', 'config', 'default.toml'),
-  ];
-  const configPath = candidatePaths.find(p => fs.existsSync(p));
-  if (!configPath) return null;
-
-  const config = fs.readFileSync(configPath, 'utf8');
-  const token = config.match(/oauth_token\s*=\s*"([^"]+)"/)?.[1];
-  if (!token) return null;
-
-  try {
-    const accounts = await cfApiGet('/accounts', token);
-    const accountId = accounts?.result?.[0]?.id;
-    if (!accountId) return null;
-
-    const subdomainRes = await cfApiGet(`/accounts/${accountId}/workers/subdomain`, token);
-    const subdomain = subdomainRes?.result?.subdomain;
-    if (!subdomain) return null;
-
-    return `https://${scriptName}.${subdomain}.workers.dev`;
-  } catch {
-    return null;
-  }
-}
-
 function post(url, token, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
@@ -301,11 +246,18 @@ async function init() {
     let toml = fs.readFileSync(tomlPath, 'utf8');
     if (d1Id) toml = toml.replace('YOUR_D1_DATABASE_ID', d1Id);
     if (kvId) toml = toml.replace('YOUR_KV_NAMESPACE_ID', kvId);
-    if (!r2Available) {
+    const hasR2Block = /\[\[r2_buckets\]\]/.test(toml);
+    if (!r2Available && hasR2Block) {
       // Strip the r2_buckets block entirely — deploying with a binding that
       // points at a bucket which doesn't exist fails the whole deploy, not
       // just the archival feature.
       toml = toml.replace(/\[\[r2_buckets\]\][^[]*?bucket_name = "gaussian-memory-cold"\n?/, '');
+    } else if (r2Available && !hasR2Block && fs.existsSync(examplePath)) {
+      // R2 wasn't available on a previous run (block got stripped) but is
+      // now — re-add it from the template so "enable R2 and re-run init"
+      // (per the README) actually does something instead of being a no-op.
+      const exampleR2Block = fs.readFileSync(examplePath, 'utf8').match(/\[\[r2_buckets\]\][^[]*?bucket_name = "gaussian-memory-cold"\n?/)?.[0];
+      if (exampleR2Block) toml = toml.trimEnd() + '\n\n' + exampleR2Block;
     }
     fs.writeFileSync(tomlPath, toml);
     console.log('\n  wrangler.toml updated with real IDs.');
@@ -336,12 +288,6 @@ async function init() {
   console.log('done');
 
   // Deploy
-  // Using spawnSync (not execSync) because wrangler can exit non-zero even
-  // after a successful deploy — observed case: it crashes rendering the
-  // post-deploy bindings table when stdout isn't a real TTY (piped/captured),
-  // *after* the Cloudflare API call already succeeded. Exit code alone is
-  // not a reliable success signal here, so we check the captured output for
-  // deploy-succeeded markers instead.
   // Root cause confirmed against a real fresh account: brand-new Cloudflare
   // accounts have no workers.dev subdomain yet, and wrangler interactively
   // asks (a) "register a workers.dev subdomain now?" then (b) what the
@@ -358,15 +304,15 @@ async function init() {
     stdio: ['inherit', 'pipe', 'pipe'],
   });
   const deployOut = (deployResult.stdout || '') + (deployResult.stderr || '');
-  const deployed = deployResult.status === 0 || /Total Upload:/.test(deployOut) || /https:\/\/[^\s]+\.workers\.dev/.test(deployOut);
+  // Don't use 'Total Upload:' as a success marker — it prints early, before
+  // the actual publish step, so a deploy that fails later would still read
+  // as successful. Exit code and/or a real workers.dev URL are the only
+  // markers that only appear once the deploy has actually completed.
+  const deployed = deployResult.status === 0 || /https:\/\/[^\s]+\.workers\.dev/.test(deployOut);
   if (deployed) {
     const out = deployOut;
-    let url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
-    if (!url) {
-      const scriptNameMatch = fs.readFileSync(path.join(__dirname, '..', 'wrangler.toml'), 'utf8').match(/^name\s*=\s*"([^"]+)"/m);
-      url = await resolveWorkerUrlViaApi(scriptNameMatch?.[1] || 'gaussian-memory');
-    }
-    console.log(url ? `deployed → ${url}` : 'deployed (URL could not be determined automatically)');
+    const url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
+    console.log(url ? `deployed → ${url}` : 'deployed (URL could not be determined automatically — check `npx wrangler deploy` output)');
 
     // AUTH_TOKEN
     console.log('\n  Setting AUTH_TOKEN secret...');
