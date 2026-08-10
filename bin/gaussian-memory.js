@@ -342,15 +342,20 @@ async function init() {
   // *after* the Cloudflare API call already succeeded. Exit code alone is
   // not a reliable success signal here, so we check the captured output for
   // deploy-succeeded markers instead.
-  process.stdout.write('\n  Deploying worker... ');
-  // Force a fallback terminal width via env — wrangler's post-deploy summary
-  // renderer reads process.stdout.columns for table width, which is
-  // undefined when piped/captured (no real TTY), and can throw instead of
-  // handling that gracefully. COLUMNS/LINES is the standard Node convention
-  // most CLI width-detection libraries check before giving up.
+  // Root cause confirmed against a real fresh account: brand-new Cloudflare
+  // accounts have no workers.dev subdomain yet, and wrangler interactively
+  // asks (a) "register a workers.dev subdomain now?" then (b) what the
+  // subdomain should be — a real, permanent, globally-unique choice, not
+  // something safe to silently auto-fill. With no stdin attached at all,
+  // that first prompt defaults to "no" — the worker still deploys, it just
+  // never gets a URL, which is why nothing was ever there for our
+  // output-parsing to find. Inherit stdin so the user answers this live
+  // (one-time, only on a brand-new account) while we still capture
+  // stdout/stderr for our own success/URL detection afterward.
+  console.log('\n  Deploying worker...');
   const deployResult = spawnSync('npx', ['wrangler', 'deploy'], {
     encoding: 'utf8',
-    env: { ...process.env, COLUMNS: '80', LINES: '24' },
+    stdio: ['inherit', 'pipe', 'pipe'],
   });
   const deployOut = (deployResult.stdout || '') + (deployResult.stderr || '');
   const deployed = deployResult.status === 0 || /Total Upload:/.test(deployOut) || /https:\/\/[^\s]+\.workers\.dev/.test(deployOut);
