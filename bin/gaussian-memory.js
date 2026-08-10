@@ -281,9 +281,18 @@ async function init() {
   console.log('done');
 
   // Deploy
+  // Using spawnSync (not execSync) because wrangler can exit non-zero even
+  // after a successful deploy — observed case: it crashes rendering the
+  // post-deploy bindings table when stdout isn't a real TTY (piped/captured),
+  // *after* the Cloudflare API call already succeeded. Exit code alone is
+  // not a reliable success signal here, so we check the captured output for
+  // deploy-succeeded markers instead.
   process.stdout.write('\n  Deploying worker... ');
-  try {
-    const out = execSync('npx wrangler deploy 2>&1', { encoding: 'utf8' });
+  const deployResult = spawnSync('npx', ['wrangler', 'deploy'], { encoding: 'utf8' });
+  const deployOut = (deployResult.stdout || '') + (deployResult.stderr || '');
+  const deployed = deployResult.status === 0 || /Total Upload:/.test(deployOut) || /https:\/\/[^\s]+\.workers\.dev/.test(deployOut);
+  if (deployed) {
+    const out = deployOut;
     const url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
     console.log(url ? `deployed → ${url}` : 'done');
 
@@ -580,9 +589,9 @@ async function init() {
     }, null, 2));
     console.log('\n(A universal copy was written to ~/.mcp.json — some editors pick this up automatically.)');
     console.log('━'.repeat(60));
-  } catch (e) {
-    console.log('deploy failed:');
-    console.log(realError(e));
+  } else {
+    console.log('failed:');
+    console.log('    ' + deployOut.trim().slice(0, 300));
   }
 }
 
