@@ -4,7 +4,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   MICRO_VECTORIZE: VectorizeIndex;
   KV: KVNamespace;
-  R2: R2Bucket;
+  R2?: R2Bucket;
   AUTH_TOKEN?: string;
   WORKER_URL?: string;
 }

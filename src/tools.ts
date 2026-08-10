@@ -1259,7 +1259,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
           archived_at: Math.floor(Date.now() / 1000),
           original_timestamp: row.timestamp,
         });
-        await env.R2.put(`memories/${args.id}.json`, payload, {
+        await env.R2?.put(`memories/${args.id}.json`, payload, {
           httpMetadata: { contentType: 'application/json' },
         });
       } catch (err) {
@@ -1518,7 +1518,7 @@ Return ONLY valid JSON array:
               archived_at: Math.floor(Date.now() / 1000),
               original_timestamp: row.timestamp,
             });
-            await env.R2.put(`memories/${row.id}.json`, payload, {
+            await env.R2?.put(`memories/${row.id}.json`, payload, {
               httpMetadata: { contentType: 'application/json' },
             });
           } catch (err) {

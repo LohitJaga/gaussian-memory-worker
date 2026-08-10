@@ -200,12 +200,29 @@ async function init() {
     else { console.log('failed — check wrangler auth'); console.log('    ' + realError(e)); }
   }
 
-  // R2
+  // R2 — optional. Only used for nightly cold-storage archival, not core
+  // retrieval, so a failure here should never block install or deploy.
+  // Cloudflare requires a one-time manual "enable R2" step in the dashboard
+  // (code 10042) before the API will create buckets, even on the free tier.
   process.stdout.write('  Creating R2 bucket (cold storage)... ');
+  let r2Available = false;
   try {
     execSync('npx wrangler r2 bucket create gaussian-memory-cold 2>&1', { encoding: 'utf8' });
     console.log('done');
-  } catch (e) { console.log('exists or failed — continuing'); console.log('    ' + realError(e)); }
+    r2Available = true;
+  } catch (e) {
+    try {
+      const list = execSync('npx wrangler r2 bucket list 2>&1', { encoding: 'utf8' });
+      r2Available = /gaussian-memory-cold/.test(list);
+    } catch {}
+    if (r2Available) {
+      console.log('exists');
+    } else {
+      console.log('unavailable — continuing without cold-storage archival');
+      console.log('    ' + realError(e));
+      console.log('    (enable R2 later at dash.cloudflare.com, then re-run init to turn it on)');
+    }
+  }
 
   // Patch wrangler.toml (create from example if not present — wrangler.toml is gitignored)
   const tomlPath = path.join(__dirname, '..', 'wrangler.toml');
@@ -213,10 +230,16 @@ async function init() {
   if (!fs.existsSync(tomlPath) && fs.existsSync(examplePath)) {
     fs.copyFileSync(examplePath, tomlPath);
   }
-  if (d1Id || kvId) {
+  {
     let toml = fs.readFileSync(tomlPath, 'utf8');
     if (d1Id) toml = toml.replace('YOUR_D1_DATABASE_ID', d1Id);
     if (kvId) toml = toml.replace('YOUR_KV_NAMESPACE_ID', kvId);
+    if (!r2Available) {
+      // Strip the r2_buckets block entirely — deploying with a binding that
+      // points at a bucket which doesn't exist fails the whole deploy, not
+      // just the archival feature.
+      toml = toml.replace(/\[\[r2_buckets\]\][^[]*?bucket_name = "gaussian-memory-cold"\n?/, '');
+    }
     fs.writeFileSync(tomlPath, toml);
     console.log('\n  wrangler.toml updated with real IDs.');
   }

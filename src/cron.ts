@@ -503,7 +503,7 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
         original_timestamp: row.timestamp,
       });
       try {
-        await env.R2.put(`memories/${row.id}.json`, payload, {
+        await env.R2?.put(`memories/${row.id}.json`, payload, {
           httpMetadata: { contentType: 'application/json' },
         });
         archived.push(row.id);
