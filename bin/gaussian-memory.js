@@ -25,6 +25,61 @@ function realError(e) {
   return text.slice(0, 300);
 }
 
+// Minimal promisified HTTPS GET with a Bearer token, JSON response.
+function cfApiGet(pathname, token) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.cloudflare.com',
+      path: `/client/v4${pathname}`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    }, res => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body)); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Fallback for when wrangler's own CLI output doesn't contain the deployed
+// URL (observed: it can crash rendering the post-deploy bindings table when
+// stdout isn't a TTY, which cuts off everything printed after it — including
+// the URL line). Bypasses the CLI entirely and asks Cloudflare's API
+// directly for the account's workers.dev subdomain, then constructs the URL
+// from that plus the known script name in wrangler.toml.
+async function resolveWorkerUrlViaApi(scriptName) {
+  const candidatePaths = [
+    path.join(process.env.HOME, 'Library', 'Preferences', '.wrangler', 'config', 'default.toml'),
+    path.join(process.env.HOME, '.wrangler', 'config', 'default.toml'),
+    path.join(process.env.HOME, '.config', '.wrangler', 'config', 'default.toml'),
+  ];
+  const configPath = candidatePaths.find(p => fs.existsSync(p));
+  if (!configPath) return null;
+
+  const config = fs.readFileSync(configPath, 'utf8');
+  const token = config.match(/oauth_token\s*=\s*"([^"]+)"/)?.[1];
+  if (!token) return null;
+
+  try {
+    const accounts = await cfApiGet('/accounts', token);
+    const accountId = accounts?.result?.[0]?.id;
+    if (!accountId) return null;
+
+    const subdomainRes = await cfApiGet(`/accounts/${accountId}/workers/subdomain`, token);
+    const subdomain = subdomainRes?.result?.subdomain;
+    if (!subdomain) return null;
+
+    return `https://${scriptName}.${subdomain}.workers.dev`;
+  } catch {
+    return null;
+  }
+}
+
 function post(url, token, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
@@ -293,8 +348,12 @@ async function init() {
   const deployed = deployResult.status === 0 || /Total Upload:/.test(deployOut) || /https:\/\/[^\s]+\.workers\.dev/.test(deployOut);
   if (deployed) {
     const out = deployOut;
-    const url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
-    console.log(url ? `deployed → ${url}` : 'done');
+    let url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
+    if (!url) {
+      const scriptNameMatch = fs.readFileSync(path.join(__dirname, '..', 'wrangler.toml'), 'utf8').match(/^name\s*=\s*"([^"]+)"/m);
+      url = await resolveWorkerUrlViaApi(scriptNameMatch?.[1] || 'gaussian-memory');
+    }
+    console.log(url ? `deployed → ${url}` : 'deployed (URL could not be determined automatically)');
 
     // AUTH_TOKEN
     console.log('\n  Setting AUTH_TOKEN secret...');
