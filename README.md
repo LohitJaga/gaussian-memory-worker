@@ -54,6 +54,8 @@ npx gaussian-memory init
 ```
 
 > On a brand-new Cloudflare account, R2 (used only for optional nightly cold-storage archival, not core retrieval) requires a one-time manual enable at [dash.cloudflare.com](https://dash.cloudflare.com) before the API will create a bucket. `init` detects this and skips archival gracefully if it's not enabled yet — everything else works normally. Enable R2 anytime later and re-run `init` to turn archival on.
+>
+> Also on a brand-new account, `init` will interactively ask you to pick a `workers.dev` subdomain during the deploy step — this is a one-time, permanent, Cloudflare-wide choice (your worker's URL will be `https://gaussian-memory.<your-subdomain>.workers.dev`), and only happens once, ever, per account.
 
 Reload your shell (`source ~/.zshrc` or open a new terminal), restart your harness, and it's live.
 
