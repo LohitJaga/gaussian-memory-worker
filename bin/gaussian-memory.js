@@ -392,7 +392,11 @@ async function init() {
         });
         const addResult = spawnSync('claude', [
           'mcp', 'add', '--transport', 'http', 'gaussian-memory', url,
-          '--header', `Authorization: Bearer ${token}`,
+          // Quote the header value: with shell:true the shell word-splits on the
+          // spaces in "Authorization: Bearer <token>" otherwise, mangling the --header
+          // arg (fails as `Invalid header format: "Bearer"`). cmd.exe and sh both strip
+          // the outer quotes, so this is correct on Windows, macOS, and Linux.
+          '--header', `"Authorization: Bearer ${token}"`,
           '-s', 'user',
         ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: true });
         if (addResult.status === 0) {
