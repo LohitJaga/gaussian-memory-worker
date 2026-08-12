@@ -15,6 +15,10 @@ function readJsonOrEmpty(p) {
 }
 
 function ask(question) {
+  // Non-interactive stdin (piped, redirected, CI, agent-driven install) — nothing will
+  // ever send readline a line, so waiting on it hangs forever. Resolve empty immediately
+  // instead; every call site already treats '' as "skip/use default".
+  if (!process.stdin.isTTY) return Promise.resolve('');
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise(r => rl.question(question, ans => { rl.close(); r(ans.trim()); }));
 }
@@ -559,7 +563,11 @@ async function init() {
       choices.forEach((c, i) => console.log(`    ${String.fromCharCode(97 + i)}) ${c.label}`));
       const raw = await ask('  > ');
       const idx = raw.trim().toLowerCase().charCodeAt(0) - 97;
-      if (idx < 0 || idx >= choices.length) return false;
+      // Number.isInteger(NaN) is false, unlike the old idx < 0 || idx >= choices.length
+      // check — NaN fails both comparisons, so it fell through instead of being rejected.
+      // charCodeAt(0) on an empty string (blank answer, or non-interactive stdin
+      // resolving '' via ask()) is exactly the case that produced NaN here.
+      if (!Number.isInteger(idx) || idx < 0 || idx >= choices.length) return false;
       const text = choices[idx].memory;
       try {
         await post(url, token, {
