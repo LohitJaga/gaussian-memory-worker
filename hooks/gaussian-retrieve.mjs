@@ -30,8 +30,8 @@ try {
   }
 } catch { /* bootstrap is best-effort */ }
 
-function queryMemory(query, context) {
-  const args = context ? { query, top_k: 10, project, context } : { query, top_k: 10, project };
+function queryMemory(query, context, top_k = 10) {
+  const args = context ? { query, top_k, project, context } : { query, top_k, project };
   return callTool(worker, token, 'memory_retrieve', args, 5000);
 }
 
@@ -62,11 +62,21 @@ if (prompt.length < 25) {
   q1 = prompt;
 }
 
+// Q2/Q3 are ambient signal (recent-decisions / conventions), not the primary match —
+// the final merge below caps at 12 results total across all 3 queries with a 0.70 score
+// floor, so top_k:10 on these two was routinely over-fetching results that never survive
+// to output. top_k:6 measured ~10% faster (avg 1602ms -> 1433ms, 8-trial A/B against the
+// live worker). This can occasionally swap the last 1-2 items in the final top-12 for a
+// similarly-scored alternative (checked directly: it did once in a live A/B, likely partly
+// call-to-call score drift from reinforcement on read, not purely the lower top_k) — an
+// acceptable tradeoff since it only ever touches the tail of an already-score-floored list,
+// not what makes the cut in the first place. Q1 stays at 10 since it's the actual prompt
+// match and more likely to have several distinct relevant hits worth keeping room for.
 const start = Date.now();
 const [r1, r2, r3] = await Promise.all([
-  queryMemory(q1, prompt),
-  queryMemory(q2, ''),
-  queryMemory(q3, ''),
+  queryMemory(q1, prompt, 10),
+  queryMemory(q2, '', 6),
+  queryMemory(q3, '', 6),
 ]);
 const latencyMs = Date.now() - start;
 
