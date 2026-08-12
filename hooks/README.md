@@ -16,8 +16,7 @@ The `npx gaussian-memory init` command writes these to `~/.gaussian-memory-env` 
 Copy the three hook scripts to `~/.claude/hooks/`:
 
 ```bash
-cp gaussian-retrieve.sh gaussian-posttool.sh gaussian-store.sh ~/.claude/hooks/
-chmod +x ~/.claude/hooks/*.sh
+cp gaussian-lib.mjs gaussian-retrieve.mjs gaussian-posttool.mjs gaussian-store.mjs ~/.claude/hooks/
 ```
 
 Add to `~/.claude/settings.json`:
@@ -25,9 +24,9 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-retrieve.sh", "statusMessage": "Recalling memories..." }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-posttool.sh", "timeout": 15, "async": true }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-store.sh", "timeout": 30, "async": true }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-retrieve.mjs", "statusMessage": "Recalling memories..." }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-store.mjs", "timeout": 30, "async": true }] }]
   }
 }
 ```
