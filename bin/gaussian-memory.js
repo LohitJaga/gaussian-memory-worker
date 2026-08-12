@@ -328,7 +328,6 @@ async function init() {
     const claudeDir = path.join(os.homedir(), '.claude');
     const hooksDir = path.join(claudeDir, 'hooks');
     const settingsPath = path.join(claudeDir, 'settings.json');
-    const mcpJsonPath = path.join(claudeDir, 'mcp.json');
     const repoHooks = path.join(__dirname, '..', 'hooks');
 
     if (fs.existsSync(claudeDir)) {
@@ -376,18 +375,34 @@ async function init() {
         console.log('done');
       }
 
-      // Write MCP config to ~/.claude/mcp.json with Bearer token
+      // Register with Claude Code's actual MCP config via the `claude` CLI.
+      // Writing ~/.claude/mcp.json directly (the old approach) doesn't work: Claude
+      // Code reads user-scoped MCP servers from ~/.claude.json (managed by `claude mcp
+      // add`), not from ~/.claude/mcp.json — that file is never consulted, so servers
+      // registered that way silently never connect. `claude mcp add` is also a `.cmd`
+      // shim on Windows, same as `npx`, so it needs shell:true there for the same
+      // ENOENT reason.
       if (url) {
-        process.stdout.write('  Writing ~/.claude/mcp.json with Bearer auth... ');
-        const mcpConfig = readJsonOrEmpty(mcpJsonPath);
-        if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-        mcpConfig.mcpServers['gaussian-memory'] = {
-          type: 'http',
-          url,
-          headers: { Authorization: `Bearer ${token}` },
-        };
-        fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2));
-        console.log('done');
+        process.stdout.write('  Registering MCP server with Claude Code (`claude mcp add`)... ');
+        // Remove any prior registration first so re-running init updates the token/URL
+        // in place instead of erroring on a duplicate name. Ignore failure — there may
+        // be nothing to remove yet.
+        spawnSync('claude', ['mcp', 'remove', 'gaussian-memory', '-s', 'user'], {
+          encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'], shell: true,
+        });
+        const addResult = spawnSync('claude', [
+          'mcp', 'add', '--transport', 'http', 'gaussian-memory', url,
+          '--header', `Authorization: Bearer ${token}`,
+          '-s', 'user',
+        ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: true });
+        if (addResult.status === 0) {
+          console.log('done');
+        } else {
+          console.log('failed');
+          console.error('  Could not run `claude mcp add` automatically:',
+            (addResult.stderr || addResult.stdout || 'unknown error').toString().trim().slice(0, 300));
+          console.error(`  Register it manually: claude mcp add --transport http gaussian-memory ${url} --header "Authorization: Bearer ${token}" -s user`);
+        }
       }
     }
 

@@ -68,10 +68,10 @@ Reload your shell (`source ~/.zshrc` or open a new terminal), restart your harne
 - Deploys the worker
 - Generates and sets an `AUTH_TOKEN` secret
 - Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600), and auto-appends `source ~/.gaussian-memory-env` to your `~/.zshrc` or `~/.bashrc`
-- Writes the auth token to `~/.claude/mcp.json`
+- Registers the MCP server with Claude Code via `claude mcp add` (user-scoped, so it's available in every project)
 - Auto-installs and configures hooks for Claude Code, OpenCode, Cursor, and Zed if it detects them on your machine (prompts before installing anything)
 
-On Windows without WSL, add `GAUSSIAN_WORKER_URL` and `GAUSSIAN_AUTH_TOKEN` as System Environment Variables instead.
+Works the same way on Windows — no WSL needed. `init` and the hooks are plain Node.
 
 </details>
 
