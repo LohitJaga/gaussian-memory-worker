@@ -4,6 +4,7 @@
 const { execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const https = require('https');
 const readline = require('readline');
 
@@ -302,6 +303,7 @@ async function init() {
   const deployResult = spawnSync('npx', ['wrangler', 'deploy'], {
     encoding: 'utf8',
     stdio: ['inherit', 'pipe', 'pipe'],
+    shell: true, // Windows: npx is npx.cmd, which only resolves through a shell
   });
   const deployOut = (deployResult.stdout || '') + (deployResult.stderr || '');
   // Don't use 'Total Upload:' as a success marker — it prints early, before
@@ -318,12 +320,12 @@ async function init() {
     console.log('\n  Setting AUTH_TOKEN secret...');
     const token = require('crypto').randomBytes(32).toString('hex');
     const r = spawnSync('npx', ['wrangler', 'secret', 'put', 'AUTH_TOKEN'], {
-      input: token, encoding: 'utf8', stdio: ['pipe','pipe','pipe']
+      input: token, encoding: 'utf8', stdio: ['pipe','pipe','pipe'], shell: true,
     });
     console.log('  AUTH_TOKEN set.\n');
 
     // Auto-install Claude Code hooks if ~/.claude exists
-    const claudeDir = path.join(process.env.HOME, '.claude');
+    const claudeDir = path.join(os.homedir(), '.claude');
     const hooksDir = path.join(claudeDir, 'hooks');
     const settingsPath = path.join(claudeDir, 'settings.json');
     const mcpJsonPath = path.join(claudeDir, 'mcp.json');
@@ -332,9 +334,9 @@ async function init() {
     if (fs.existsSync(claudeDir)) {
       // Hook safety UX — show what will be installed, ask for confirmation
       console.log('\n  Claude Code hooks to install:');
-      console.log('    UserPromptSubmit → gaussian-retrieve.sh  (inject memories before each prompt)');
-      console.log('    PostToolUse      → gaussian-posttool.sh  (capture tool observations, async)');
-      console.log('    Stop             → gaussian-store.sh     (store session memories on exit)');
+      console.log('    UserPromptSubmit → gaussian-retrieve.mjs  (inject memories before each prompt)');
+      console.log('    PostToolUse      → gaussian-posttool.mjs  (capture tool observations, async)');
+      console.log('    Stop             → gaussian-store.mjs     (store session memories on exit)');
       console.log('\n  These hooks write to ~/.claude/settings.json and run on every Claude Code session.');
       const confirmHooks = await ask('\n  Install hooks? [Y/n] ');
       if (confirmHooks.toLowerCase() === 'n') {
@@ -342,7 +344,8 @@ async function init() {
       } else {
         process.stdout.write('  Installing Claude Code hooks... ');
         fs.mkdirSync(hooksDir, { recursive: true });
-        for (const f of ['gaussian-retrieve.sh', 'gaussian-posttool.sh', 'gaussian-store.sh']) {
+        // Node hooks (portable across zsh/bash/WSL/PowerShell/cmd) + shared lib they import.
+        for (const f of ['gaussian-lib.mjs', 'gaussian-retrieve.mjs', 'gaussian-posttool.mjs', 'gaussian-store.mjs']) {
           const src = path.join(repoHooks, f);
           const dst = path.join(hooksDir, f);
           if (fs.existsSync(src)) {
@@ -351,21 +354,23 @@ async function init() {
           }
         }
 
-        // Patch settings.json — merge into existing hooks rather than replacing
+        // Patch settings.json — merge into existing hooks rather than replacing.
+        // Absolute quoted paths: the harness may run the command via cmd/PowerShell,
+        // neither of which expands `~`, so an absolute path is required on Windows.
         const settings = readJsonOrEmpty(settingsPath);
         if (!settings.hooks) settings.hooks = {};
+        const nodeHook = (f) => `node "${path.join(hooksDir, f)}"`;
         const gaussianHooks = {
-          UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-retrieve.sh', statusMessage: 'Recalling memories...' }] }],
-          PostToolUse:      [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-posttool.sh', timeout: 15, async: true }] }],
-          Stop:             [{ hooks: [{ type: 'command', command: 'bash ~/.claude/hooks/gaussian-store.sh', timeout: 30, async: true }] }],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: nodeHook('gaussian-retrieve.mjs'), statusMessage: 'Recalling memories...' }] }],
+          PostToolUse:      [{ hooks: [{ type: 'command', command: nodeHook('gaussian-posttool.mjs'), timeout: 15, async: true }] }],
+          Stop:             [{ hooks: [{ type: 'command', command: nodeHook('gaussian-store.mjs'), timeout: 30, async: true }] }],
         };
         for (const [event, val] of Object.entries(gaussianHooks)) {
-          const existing = settings.hooks[event];
-          if (!existing) {
-            settings.hooks[event] = val;
-          } else if (!JSON.stringify(existing).includes('gaussian')) {
-            settings.hooks[event] = [...existing, ...val];
-          }
+          const existing = Array.isArray(settings.hooks[event]) ? settings.hooks[event] : [];
+          // Drop any prior gaussian entries (e.g. legacy `bash …*.sh`) so re-running init
+          // upgrades an existing install in place instead of leaving stale hooks behind.
+          const cleaned = existing.filter(e => !JSON.stringify(e).includes('gaussian'));
+          settings.hooks[event] = [...cleaned, ...val];
         }
         fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
         console.log('done');
@@ -392,15 +397,15 @@ async function init() {
       console.error('Check `npx wrangler deploy` output and set GAUSSIAN_WORKER_URL manually in ~/.gaussian-memory-env');
       return;
     }
-    const envFile = path.join(process.env.HOME, '.gaussian-memory-env');
+    const envFile = path.join(os.homedir(), '.gaussian-memory-env');
     fs.writeFileSync(envFile, `export GAUSSIAN_WORKER_URL="${url}"\nexport GAUSSIAN_AUTH_TOKEN="${token}"\n`, { mode: 0o600 });
     fs.chmodSync(envFile, 0o600);
 
     // Auto-install OpenCode plugin + MCP server if ~/opencode.json exists
-    const opencodeJson = path.join(process.env.HOME, 'opencode.json');
+    const opencodeJson = path.join(os.homedir(), 'opencode.json');
     const pluginPkg = path.join(__dirname, '..', 'hooks', 'opencode-gaussian-memory.mjs');
-    const pluginDst = path.join(process.env.HOME, '.opencode', 'gaussian-memory.mjs');
-    if (fs.existsSync(opencodeJson) || fs.existsSync(path.join(process.env.HOME, '.config', 'opencode'))) {
+    const pluginDst = path.join(os.homedir(), '.opencode', 'gaussian-memory.mjs');
+    if (fs.existsSync(opencodeJson) || fs.existsSync(path.join(os.homedir(), '.config', 'opencode'))) {
       process.stdout.write('  Installing OpenCode plugin + MCP server... ');
       try {
         // Copy plugin file
@@ -424,19 +429,22 @@ async function init() {
     }
 
     // Auto-install Cursor hooks + MCP config if ~/.cursor exists
-    const cursorDir = path.join(process.env.HOME, '.cursor');
+    const cursorDir = path.join(os.homedir(), '.cursor');
     if (fs.existsSync(cursorDir)) {
       process.stdout.write('  Installing Cursor hooks + MCP config... ');
       try {
         // Copy sessionEnd hook script
         const cursorHooksDir = path.join(cursorDir, 'hooks');
         fs.mkdirSync(cursorHooksDir, { recursive: true });
-        const hookSrc = path.join(__dirname, '..', 'hooks', 'cursor-gaussian-store.sh');
-        const hookDst = path.join(cursorHooksDir, 'gaussian-store.sh');
+        const hookSrc = path.join(__dirname, '..', 'hooks', 'cursor-gaussian-store.mjs');
+        const hookDst = path.join(cursorHooksDir, 'gaussian-store.mjs');
         let hookCopied = false;
         if (fs.existsSync(hookSrc)) {
           fs.writeFileSync(hookDst, fs.readFileSync(hookSrc, 'utf8'));
           fs.chmodSync(hookDst, '755');
+          // Copy the shared lib the hook imports (relative to its own dir).
+          const libSrc = path.join(__dirname, '..', 'hooks', 'gaussian-lib.mjs');
+          if (fs.existsSync(libSrc)) fs.writeFileSync(path.join(cursorHooksDir, 'gaussian-lib.mjs'), fs.readFileSync(libSrc, 'utf8'));
           hookCopied = true;
         }
 
@@ -448,13 +456,10 @@ async function init() {
           const hooksConfig = readJsonOrEmpty(cursorHooksJson);
           if (!hooksConfig.version) hooksConfig.version = 1;
           if (!hooksConfig.hooks) hooksConfig.hooks = {};
-          const gaussianCursorHook = { type: 'command', command: 'bash ~/.cursor/hooks/gaussian-store.sh', timeout: 30 };
-          const existingSessionEnd = hooksConfig.hooks.sessionEnd;
-          if (!existingSessionEnd) {
-            hooksConfig.hooks.sessionEnd = [gaussianCursorHook];
-          } else if (!JSON.stringify(existingSessionEnd).includes('gaussian')) {
-            hooksConfig.hooks.sessionEnd = [...existingSessionEnd, gaussianCursorHook];
-          }
+          const gaussianCursorHook = { type: 'command', command: `node "${path.join(cursorHooksDir, 'gaussian-store.mjs')}"`, timeout: 30 };
+          const existingSessionEnd = Array.isArray(hooksConfig.hooks.sessionEnd) ? hooksConfig.hooks.sessionEnd : [];
+          const cleanedSessionEnd = existingSessionEnd.filter(e => !JSON.stringify(e).includes('gaussian'));
+          hooksConfig.hooks.sessionEnd = [...cleanedSessionEnd, gaussianCursorHook];
           fs.writeFileSync(cursorHooksJson, JSON.stringify(hooksConfig, null, 2));
 
           // Write mcp.json
@@ -474,7 +479,7 @@ async function init() {
     }
 
     // Auto-configure Zed if ~/.config/zed exists
-    const zedDir = path.join(process.env.HOME, '.config', 'zed');
+    const zedDir = path.join(os.homedir(), '.config', 'zed');
     const zedSettings = path.join(zedDir, 'settings.json');
     if (url && (fs.existsSync(zedSettings) || fs.existsSync(zedDir))) {
       process.stdout.write('  Configuring Zed context server... ');
@@ -498,7 +503,7 @@ async function init() {
     {
       process.stdout.write('  Writing ~/.mcp.json (universal MCP fallback)... ');
       try {
-        const universalMcpPath = path.join(process.env.HOME, '.mcp.json');
+        const universalMcpPath = path.join(os.homedir(), '.mcp.json');
         const universalMcp = readJsonOrEmpty(universalMcpPath);
         if (!universalMcp.mcpServers) universalMcp.mcpServers = {};
         universalMcp.mcpServers['gaussian-memory'] = {
@@ -574,8 +579,8 @@ async function init() {
 
     // Auto-append source line to shell profile
     const shellProfile = process.env.SHELL?.includes('zsh')
-      ? path.join(process.env.HOME, '.zshrc')
-      : path.join(process.env.HOME, '.bashrc');
+      ? path.join(os.homedir(), '.zshrc')
+      : path.join(os.homedir(), '.bashrc');
     let profileContent = '';
     try { profileContent = fs.readFileSync(shellProfile, 'utf8'); } catch {}
     if (!profileContent.includes('gaussian-memory-env')) {
@@ -661,7 +666,7 @@ async function backup() {
   const REAL_TABLES = ['memories', 'domain_anchors', 'memory_relations', 'memory_sigma_history', 'entity_nodes', 'memory_entities'];
   const tableArgs = REAL_TABLES.flatMap(t => ['--table', t]);
   const result = spawnSync('npx', ['wrangler', 'd1', 'export', 'gaussian-memory', '--remote', ...tableArgs, '--output', outFile], {
-    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: true, // Windows: resolve npx.cmd via shell
   });
   if (result.status !== 0) {
     console.error('failed:', result.stderr || result.stdout || 'unknown error');

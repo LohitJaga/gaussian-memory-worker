@@ -120,21 +120,20 @@ Each bullet or paragraph is stored as a memory. The section header is prepended 
 
 Copy the hook scripts and add them to `~/.claude/settings.json`:
 ```bash
-cp hooks/gaussian-*.sh ~/.claude/hooks/
-chmod +x ~/.claude/hooks/gaussian-*.sh
+cp hooks/gaussian-*.mjs ~/.claude/hooks/   # includes gaussian-lib.mjs, which the hooks import
 ```
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-retrieve.sh", "statusMessage": "Recalling memories..." }] }],
-    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-posttool.sh", "timeout": 15, "async": true }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "bash ~/.claude/hooks/gaussian-store.sh", "timeout": 30, "async": true }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-retrieve.mjs", "statusMessage": "Recalling memories..." }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-store.mjs", "timeout": 30, "async": true }] }]
   }
 }
 ```
 
-> **Windows:** Use WSL. Run `npx gaussian-memory init` inside the WSL shell and add env vars to your WSL shell profile.
+> The hooks are Node scripts (`node <path>`), so they run unchanged on macOS, Linux, and Windows — no WSL, no `jq`. `npx gaussian-memory init` wires them for you with absolute paths. **Windows manual setup:** the shell won't expand `~`, so use the full path, e.g. `node "C:\\Users\\you\\.claude\\hooks\\gaussian-retrieve.mjs"`.
 
 </details>
 
@@ -203,7 +202,7 @@ For auto-storage on session end, create `~/.cursor/hooks.json`:
     "sessionEnd": [
       {
         "type": "command",
-        "command": "bash ~/.cursor/hooks/gaussian-store.sh",
+        "command": "node ~/.cursor/hooks/gaussian-store.mjs",
         "timeout": 30
       }
     ]
@@ -213,8 +212,8 @@ For auto-storage on session end, create `~/.cursor/hooks.json`:
 
 Then copy the hook script:
 ```bash
-cp hooks/cursor-gaussian-store.sh ~/.cursor/hooks/gaussian-store.sh
-chmod +x ~/.cursor/hooks/gaussian-store.sh
+cp hooks/cursor-gaussian-store.mjs ~/.cursor/hooks/gaussian-store.mjs
+cp hooks/gaussian-lib.mjs ~/.cursor/hooks/gaussian-lib.mjs   # the hook imports this
 ```
 
 **What you get:**
@@ -468,9 +467,10 @@ src/rebuild.ts            Full-corpus rebuild pipeline: scan → seed_clusters �
 src/microcluster.ts       Live per-memory cluster_id assignment (internal dedup/diversity signal)
 bin/gaussian-memory.js    CLI: init, ingest, backup, and show commands
 hooks/
-  gaussian-retrieve.sh         UserPromptSubmit hook: retrieves context before each prompt
-  gaussian-posttool.sh         PostToolUse hook: stores semantic meaning of code changes
-  gaussian-store.sh            Stop hook: extracts facts from session, syncs CLAUDE.md
+  gaussian-retrieve.mjs        UserPromptSubmit hook: retrieves context before each prompt
+  gaussian-posttool.mjs        PostToolUse hook: stores semantic meaning of code changes
+  gaussian-store.mjs           Stop hook: extracts facts from session, syncs CLAUDE.md
+  gaussian-lib.mjs             shared helpers imported by the hooks above
   opencode-mcp-config.json     OpenCode MCP config template (~/.config/opencode/opencode.json)
   README.md                    Hook setup instructions
 schema.sql                D1 schema
