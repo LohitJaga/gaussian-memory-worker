@@ -320,12 +320,31 @@ async function init() {
     const url = out.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
     console.log(url ? `deployed → ${url}` : 'deployed (URL could not be determined automatically — check `npx wrangler deploy` output)');
 
-    // AUTH_TOKEN
+    // AUTH_TOKEN — the exit status was previously never checked, so a failed deploy
+    // (confirmed live 2026-08-12: a transient failure, not deterministic — a fresh
+    // isolated retry of the identical call succeeded) still printed "AUTH_TOKEN set."
+    // and went on to write the never-actually-deployed token into every config file
+    // (~/.gaussian-memory-env, claude mcp add, Cursor, Zed, ~/.mcp.json) — every one of
+    // them silently broken, with no error anywhere telling the user why. Since this can
+    // be transient, retry once before giving up; if it still fails, stop init entirely
+    // rather than proceed to write a token that was never actually deployed.
     console.log('\n  Setting AUTH_TOKEN secret...');
     const token = require('crypto').randomBytes(32).toString('hex');
-    const r = spawnSync('npx', ['wrangler', 'secret', 'put', 'AUTH_TOKEN'], {
-      input: token, encoding: 'utf8', stdio: ['pipe','pipe','pipe'], shell: true,
+    const putSecret = () => spawnSync('npx', ['wrangler', 'secret', 'put', 'AUTH_TOKEN'], {
+      input: token, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], shell: true,
     });
+    let r = putSecret();
+    if (r.status !== 0) {
+      console.log('  First attempt failed, retrying once...');
+      r = putSecret();
+    }
+    if (r.status !== 0) {
+      console.error('\nFailed to set AUTH_TOKEN secret after 2 attempts:');
+      console.error('  ' + realError(r));
+      console.error('\nSetup cannot continue safely — nothing was written to your config files.');
+      console.error('Fix the error above, then re-run `npx gaussian-memory init`.');
+      process.exit(1);
+    }
     console.log('  AUTH_TOKEN set.\n');
 
     // Auto-install Claude Code hooks if ~/.claude exists
