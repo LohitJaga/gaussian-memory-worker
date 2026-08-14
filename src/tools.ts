@@ -591,10 +591,23 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         if (s) summaries[d] = s;
       }
 
+      // Relative age. Absolute dates force the reader to do arithmetic against a "now" it
+      // may not have; recency is already 25% of baseScore, so surface the same signal.
+      // Placed after the closing paren so the hook's /session) and (identity/ filters still match.
+      const relAge = (ts: number | null | undefined) => {
+        if (!ts) return '';
+        const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+        if (s < 3600) return ` ${Math.max(1, Math.floor(s / 60))}m ago`;
+        if (s < 86400) return ` ${Math.floor(s / 3600)}h ago`;
+        if (s < 2592000) return ` ${Math.floor(s / 86400)}d ago`;
+        if (s < 31536000) return ` ${Math.floor(s / 2592000)}mo ago`;
+        return ` ${Math.floor(s / 31536000)}y ago`;
+      };
+
       const fmt = (r: any) => {
         const dd = (r as any).displayDomain ?? r.domain;
         const conf = r.sigma !== undefined ? (r.sigma < 0.3 ? '●' : r.sigma < 0.5 ? '◑' : '○') : '';
-        return `[${r.score.toFixed(2)}] (${dd}/${r.type})${r.activated ? ' ~' : ''} ${conf} ${r.text}`;
+        return `[${r.score.toFixed(2)}] (${dd}/${r.type})${r.activated ? ' ~' : ''}${relAge(r.timestamp)} ${conf} ${r.text}`;
       };
 
       // If summaries exist: group output by domain with summary header

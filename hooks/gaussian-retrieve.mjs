@@ -115,13 +115,21 @@ merged = merged.filter(l => {
 merged = merged.slice(0, 12);
 const mergedText = merged.join('\n');
 
+// Current local time — the model otherwise only gets the date, so it can't reason about
+// time of day or resolve the relative ages on retrieved memories. Injected unconditionally,
+// including when nothing was retrieved.
+const nowLine = `Current time: ${new Date().toLocaleString('en-US', {
+  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+})}`;
+
 // Inject first so receipt I/O never delays the prompt.
-if (mergedText) {
-  const ctx = `Relevant session context (use as ground truth for recent work and decisions):\n${mergedText}`;
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: ctx },
-  }));
-}
+const ctx = mergedText
+  ? `${nowLine}\n\nRelevant session context (use as ground truth for recent work and decisions):\n${mergedText}`
+  : nowLine;
+process.stdout.write(JSON.stringify({
+  hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: ctx },
+}));
 
 // Receipt logging — metadata + 200-char memory snippets for debugging.
 try {

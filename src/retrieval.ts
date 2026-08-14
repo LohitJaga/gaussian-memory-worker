@@ -657,6 +657,7 @@ export async function retrieve(
       domain: row.domain,
       cluster_id: row.cluster_id,
       type: row.memory_type,
+      timestamp: row.timestamp,
       sigma: memSigma,
       primaryScore,
       normCosine: normCosine[i],
@@ -791,6 +792,7 @@ export async function retrieve(
       const match = newMatches.get(row.id)!;
       activatedExtras.push({
         id: row.id, text: row.text, domain: row.domain, cluster_id: row.cluster_id, type: row.memory_type,
+        timestamp: row.timestamp,
         sigma: memSigma, primaryScore: match.score, score: match.score,
         vector: [], contradiction: row.contradiction_flag === 1,
         freshnessBoost: 0, isFileEdit: false, activated: true,
@@ -1002,6 +1004,7 @@ export async function retrieve(
       displayDomain: `${m.domain} ${drift}${clusterMark}`, // markers for display only
       type: m.type,
       activated: (m as any).activated ?? false,
+      timestamp: (m as any).timestamp ?? null,
       sigma: parseFloat(sig.toFixed(3)),
     };
   });
