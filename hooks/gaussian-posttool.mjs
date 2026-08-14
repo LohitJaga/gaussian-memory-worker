@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PostToolUse hook — semantic diff storage via memory_store_diff.
-import { loadEnv, readStdin, detectProject, callTool } from './gaussian-lib.mjs';
+import { loadEnv, readStdin, detectProject, callTool, redact } from './gaussian-lib.mjs';
 
 const input = await readStdin();
 let data = {};
@@ -11,7 +11,9 @@ const { worker, token } = loadEnv();
 if (!worker) process.exit(0);
 
 const project = detectProject();
-const squash = (s, lines) => String(s).split('\n').slice(0, lines).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+// redact() runs before truncation so a credential can't survive by being clipped
+// mid-pattern. Covers all three capture paths below: command, output, and file content.
+const squash = (s, lines) => redact(String(s)).split('\n').slice(0, lines).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 
 // Skip Edit (captured better by the Stop-hook session extraction), and any Bash command
 // that is read-only, a memory/gaussian call, routine vcs/package/file ops, or a deploy.

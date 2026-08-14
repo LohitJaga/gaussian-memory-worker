@@ -9,6 +9,35 @@ import { execFileSync } from 'child_process';
 
 export const HOME = os.homedir();
 
+// Capture runs over raw shell commands, file writes and transcript text, so a credential
+// typed inline would otherwise be persisted verbatim. Every branch keeps the surrounding
+// text so the memory stays useful — only the secret itself is replaced. Ordered
+// most-specific first; the generic KEY=value rule is last so named providers win.
+const SECRET_PATTERNS = [
+  [/-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?-----END[^-]*PRIVATE KEY-----/g, '[REDACTED]'],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[REDACTED]'],
+  [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [REDACTED]'],
+  [/\b(Authorization|X-Api-Key|X-Auth-Token)(\s*[:=]\s*)["']?[^"'\s]{8,}/gi, '$1$2[REDACTED]'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, '[REDACTED]'],
+  [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, '[REDACTED]'],
+  [/\bglpat-[A-Za-z0-9_-]{16,}/g, '[REDACTED]'],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED]'],
+  [/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]'],
+  [/\bAIza[0-9A-Za-z_-]{35}\b/g, '[REDACTED]'],
+  [/\bnpm_[A-Za-z0-9]{36}\b/g, '[REDACTED]'],
+  [/\bhf_[A-Za-z0-9]{16,}/g, '[REDACTED]'],
+  [/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[REDACTED]'],
+  [/([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s:@]+@/gi, '$1[REDACTED]@'],
+  [/(--(?:password|token|secret|api-?key|access-?key)[=\s]+)["']?[^"'\s]+/gi, '$1[REDACTED]'],
+  [/\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)[A-Za-z0-9_]*)(\s*=\s*)["']?[^"'\s]+/gi, '$1$2[REDACTED]'],
+];
+
+export function redact(text) {
+  let out = String(text ?? '');
+  for (const [re, sub] of SECRET_PATTERNS) out = out.replace(re, sub);
+  return out;
+}
+
 // Env resolution: prefer real environment (set by a sourced ~/.gaussian-memory-env
 // or by Windows user env vars), else read the file directly. Hooks are spawned in a
 // non-login shell that does not source profile rc files, and on Windows nothing
@@ -162,7 +191,7 @@ export function parseTranscript(transcriptPath, offset) {
     const label = role === 'user' ? 'User' : 'Assistant';
     const content = (e.message && e.message.content) ?? '';
     if (typeof content === 'string') {
-      if (content.length > 25 && content !== '[REDACTED]') out.push(`[${label}]: ${content.slice(0, 300)}`);
+      if (content.length > 25 && content !== '[REDACTED]') out.push(`[${label}]: ${redact(content).slice(0, 300)}`);
     } else if (Array.isArray(content)) {
       for (const c of content) {
         if (!c || typeof c !== 'object' || c.type !== 'text') continue;
@@ -172,7 +201,7 @@ export function parseTranscript(transcriptPath, offset) {
         if (text.startsWith('```') && (text.split('\n').length - 1) > 3) continue;
         if (barePath.test(text)) continue;
         if (bareFile.test(text)) continue;
-        out.push(`[${label}]: ${text.slice(0, 400)}`);
+        out.push(`[${label}]: ${redact(text).slice(0, 400)}`);
       }
     }
   }
