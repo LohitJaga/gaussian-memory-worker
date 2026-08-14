@@ -11,3 +11,4 @@ bench/locomo/results-*.json
 bench/locomo/.progress-*.json
 BENCHMARKING.md
 bench/locomo/RESULTS.md
+bench/
