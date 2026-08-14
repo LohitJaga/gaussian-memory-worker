@@ -75,6 +75,17 @@ Works the same way on Windows — no WSL needed. `init` and the hooks are plain 
 
 </details>
 
+## What gets captured, and what doesn't
+
+At the end of a session, the transcript is read and decisions and outcomes are extracted. During a session, file writes and non-trivial shell commands are captured, clipped to a couple hundred characters.
+
+Excluded before anything is stored:
+
+- Read-only commands (`ls`, `cat`, `grep`, …), git plumbing, package installs, and deploys
+- Credential-shaped strings — bearer and auth headers, provider API keys (OpenAI, GitHub, GitLab, Slack, AWS, Google, npm, HuggingFace), JWTs, `user:pass@host` URLs, `KEY=value` secrets, and PEM private key blocks — are redacted before the memory is written, not after
+
+Everything runs in your own Cloudflare account: D1 for storage, Vectorize for search, Workers AI for embeddings and for the small models that extract and judge. No third-party API is in that path and no data routes through anyone else. Use `memory_list`, `memory_update`, and `memory_delete` to inspect or remove anything it kept.
+
 ## Cloudflare plan
 
 Workers AI has a 10,000 neuron/day limit on the free plan. Two sessions/day with the nightly cron runs around 2,000–2,500 neurons, so normal use won't hit the limit. The one thing that can is a full domain rebuild (`memory_rebuild_domains` with `targeted=false`, covered under [MCP tools](#mcp-tools) below); it's resumable and doesn't need to run often.
