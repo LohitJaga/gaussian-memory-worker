@@ -135,8 +135,8 @@ export async function ensureDomainColumns(env: Env): Promise<void> {
 // Before this, any existing-anchor name was accepted unconditionally — the floor only
 // guarded the fallback branch — so at DOMAIN_CAP (prompt says "pick one even loosely")
 // the classifier force-filed memories into topically unrelated domains with no
-// geometric sanity check at all (confirmed live 2026-07-16: README-editing memories in
-// py-mu-pdf-project, a military-news fact in job-schedule).
+// geometric sanity check at all (confirmed live 2026-07-16: README-editing memories filed
+// into an unrelated library-specific project, a news fact filed into a scheduling domain).
 export function resolveLlmDomainChoice(
   choice: string | null, anchors: Anchor[], muArr: number[], atCap: boolean, fallback: string
 ): { domain: string; mintNew: boolean } {

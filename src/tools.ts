@@ -318,7 +318,7 @@ function inferTypeAndIntensity(text: string): { memory_type: string; emotional_i
 // Ingestion quality gate: blocks conversational chat-speak addressed to the assistant —
 // raw user/assistant turns that slip into the store paths (the historical source of junk
 // like "hm what do u thnk", "yea idk", "nah i ddint see it"). Distilled facts read in third
-// person ("Prefers X", "Chose Y", "Lohit wants Z") and survive. Conservative by design:
+// person ("Prefers X", "Chose Y", "The user wants Z") and survive. Conservative by design:
 // only clear chat filler is blocked, so real short preferences still get through.
 export function isLowSignalText(text: string): boolean {
   const t = (text ?? '').trim();

@@ -12,8 +12,8 @@ describe('deriveAnchorName', () => {
   });
 
   it('skips the first token even when it is a valid capitalized word', () => {
-    // "Purdue" is skipped as the sentence-starter; "Applied" is stop-worthy? no - falls to Statistics
-    expect(deriveAnchorName('Purdue Applied Statistics coursework')).not.toBe('purdue');
+    // "Boston" is skipped as the sentence-starter; "Applied" is stop-worthy? no - falls to Statistics
+    expect(deriveAnchorName('Boston Applied Statistics coursework')).not.toBe('boston');
   });
 
   it('skips a capitalized stop word and keeps scanning for the next candidate', () => {

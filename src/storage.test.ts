@@ -322,12 +322,12 @@ describe('selectMergeCandidate', () => {
 
   it('DECISION (2026-07-17): no named↔named merging — the measured duplication pattern is ' +
      'cwd-noise across arbitrary named projects, which no default-special rule would fix', () => {
-    // Live data: the same fact stored under loreal-internship AND leetcode-practice
+    // Observed: the same fact stored under work-project AND leetcode-practice
     // (project tags follow the session's working directory, not content). Merging
     // across named projects would move content between buckets other projects cannot
     // see into (named-context reads are own+default only).
     const rowMap = new Map([['theirs', row('leetcode-practice')]]);
-    const r = selectMergeCandidate([{ id: 'theirs', score: 0.99 }], rowMap, 'loreal-internship', null, 'episodic');
+    const r = selectMergeCandidate([{ id: 'theirs', score: 0.99 }], rowMap, 'work-project', null, 'episodic');
     expect(r.bestId).toBeNull();
   });
 

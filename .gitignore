@@ -12,3 +12,5 @@ bench/locomo/.progress-*.json
 BENCHMARKING.md
 bench/locomo/RESULTS.md
 bench/
+TODO.md
+TODO.md.local
