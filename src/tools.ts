@@ -1635,7 +1635,7 @@ Return ONLY valid JSON array:
         return `Done. ${count?.n ?? 0} entity links built.`;
       }
 
-      const SYSTEM_PROMPT = `Extract up to 4 named entities from this memory. Entity types: tool (specific model/library names like GLM-4.7-flash, D1, Vectorize), project (Gaussian Memory, Color Wow, Bayer), concept (spreading activation, Bhattacharyya), parameter (exact values like topK=2), person (proper names).
+      const SYSTEM_PROMPT = `Extract up to 4 named entities from this memory. Entity types: tool (specific model/library names like GLM-4.7-flash, D1, Vectorize), project (Gaussian Memory, auth-service, billing-api), concept (spreading activation, Bhattacharyya), parameter (exact values like topK=2), person (proper names).
 Return ONLY a JSON array: ["type:canonical_name", ...]. Return [] if no clear entities.
 Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
 
