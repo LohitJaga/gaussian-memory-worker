@@ -1,0 +1,4 @@
+# Normalize all text to LF in the repo, regardless of the contributor's
+# core.autocrlf setting. Matters most for hooks/*.mjs and bin/*.js, which are
+# executed directly — a CRLF shebang breaks them on macOS/Linux.
+* text=auto eol=lf
