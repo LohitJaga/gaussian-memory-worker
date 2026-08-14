@@ -9,3 +9,5 @@ gaussian-backup-*.sql
 bench/locomo/data/
 bench/locomo/results-*.json
 bench/locomo/.progress-*.json
+BENCHMARKING.md
+bench/locomo/RESULTS.md

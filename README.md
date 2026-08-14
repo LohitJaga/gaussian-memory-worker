@@ -7,7 +7,7 @@ Persistent memory for AI coding assistants. Works across sessions, devices, and 
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly (~$0/month on the free tier for most users).
 
-**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store — see [BENCHMARKING.md](BENCHMARKING.md) for methodology): **92% recall** on exact-phrasing queries, **100%** on paraphrased ones, and **83%** on vague, loosely-worded ones. This costs more tokens per query than naive cosine since it injects richer context, not just better rankings, but compared to competitors reduces token count by 85+%: about 700 tokens/query vs. 5–7K for Mem0/Zep. Full frontier (recall and token cost across `top_k` 4/8/16/24) is in BENCHMARKING.md.
+**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store): **92% recall** on exact-phrasing queries, **100%** on paraphrased ones, and **83%** on vague, loosely-worded ones. This costs more tokens per query than naive cosine since it injects richer context, not just better rankings, but compared to competitors reduces token count by 85+%: about 700 tokens/query vs. 5–7K for Mem0/Zep.
 
 ## What it does
 
