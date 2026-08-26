@@ -3,6 +3,8 @@
 [![CI](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml/badge.svg)](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+![Gaussian Memory answering "what's still broken" with three real open threads](docs/assets/demo.gif)
+
 Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly. The free tier covers personal use; the limit you reach first is Vectorize's 5M stored dimensions, which is account-wide across indexes. At 768 dimensions, and with a micro-cluster vector stored alongside the memories, that works out to a few thousand memories before you need the paid plan.
