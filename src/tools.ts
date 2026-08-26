@@ -333,6 +333,18 @@ export function isLowSignalText(text: string): boolean {
   return false;
 }
 
+// A malformed tool call can hand us a raw parameter block instead of parsed fields:
+// the value for `alternatives` arrives carrying its own closing tag plus the next
+// parameter's opening tag and body, and `outcome` never arrives at all. Observed in
+// production on 2026-08-12. Split it back apart rather than embedding the markup.
+function unwrapParamBleed(value: string, args: Record<string, unknown>): string {
+  const m = value.match(/<\/\w+>\s*<parameter name="(\w+)">([\s\S]*)$/);
+  if (!m || m.index === undefined) return value;
+  const [, spilledKey, spilledVal] = m;
+  if (!args[spilledKey]) args[spilledKey] = spilledVal.trim();
+  return value.slice(0, m.index).trim();
+}
+
 export async function handleToolCall(name: string, args: any, env: Env, ctx?: ExecutionContext): Promise<string> {
   switch (name) {
     case 'memory_store': {
@@ -443,7 +455,8 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const parts = [`Decision: ${decision}`];
       // Fix #9: trim before truthiness check so whitespace-only values are skipped
       for (const [label, key] of [['Context', 'context'], ['Alternatives considered', 'alternatives'], ['Outcome', 'outcome']] as const) {
-        const val = typeof args[key] === 'string' ? (args[key] as string).trim() : '';
+        const raw = typeof args[key] === 'string' ? (args[key] as string).trim() : '';
+        const val = raw ? unwrapParamBleed(raw, args as Record<string, unknown>) : '';
         if (val) parts.push(`${label}: ${val}`);
       }
       const text = parts.join(' | ');

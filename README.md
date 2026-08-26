@@ -5,9 +5,9 @@
 
 Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
-Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly (~$0/month on the free tier for most users).
+Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly. The free tier covers personal use; the limit you reach first is Vectorize's 5M stored dimensions, which is account-wide across indexes. At 768 dimensions, and with a micro-cluster vector stored alongside the memories, that works out to a few thousand memories before you need the paid plan.
 
-**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store): **92% recall** on exact-phrasing queries, **100%** on paraphrased ones, and **83%** on vague, loosely-worded ones. This costs more tokens per query than naive cosine since it injects richer context, not just better rankings, but compared to competitors reduces token count by 85+%: about 700 tokens/query vs. 5–7K for Mem0/Zep.
+**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store): **92% recall** on exact-phrasing queries, **100%** on paraphrased ones, and **83%** on vague, loosely-worded ones. This costs more tokens per query than naive cosine, since it injects richer context rather than just better rankings: about 700 tokens on a typical query. Both numbers are self-measured against my own store, not a public benchmark.
 
 ## What it does
 
@@ -18,11 +18,11 @@ The difference from other memory systems is that every memory carries its own co
 What actually shows up in context, injected automatically:
 
 ```
-[0.94] (auth-service ↑/decision) ● Replaced Redis with D1 for session storage — zero egress fees, edge-native
-[0.81] (auth-service →/procedural) ● JWT migration still incomplete — old sessions not yet cut over
+[1.31] (auth-service ↑/decision) 3w ago ● Replaced Redis with D1 for session storage — zero egress fees, edge-native
+[0.88] (auth-service →/procedural) 6d ago ● JWT migration still incomplete — old sessions not yet cut over
 ```
 
-`[0.94]` is that memory's relevance to your current prompt, ranked by the retrieval pipeline described below. `(auth-service ↑/decision)` is the project, a confidence trend arrow (`↑` rising, `→` stable, `↓` fading), and the memory type (`decision`, `episodic`, `semantic`, `procedural`, `session`).
+`[1.31]` is that memory's relevance to your current prompt, ranked by the retrieval pipeline described below. It can exceed 1.0 because the base score is multiplied by a confidence term clamped at 1.40. `(auth-service ↑/decision)` is the project, the memory's current confidence band (`↑` sharp, `→` holding, `↓` fading — a level, not a trajectory), and the memory type (`decision`, `episodic`, `semantic`, `procedural`, `session`).
 
 ### Why not just RAG?
 
