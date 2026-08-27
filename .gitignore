@@ -6,11 +6,18 @@ wrangler.toml
 memories/
 __probe__.json
 gaussian-backup-*.sql
-bench/locomo/data/
-bench/locomo/results-*.json
-bench/locomo/.progress-*.json
+# Benchmark harness: the runners are public so the method is inspectable.
+# The gold sets are NOT, and must never be — they are built from a real
+# personal memory store and contain PUID, employer and client data. A stale
+# v1.0.0 tag leaked bench/gold/retrieval_gold.v1.json once already (fixed
+# 2026-08-14); do not undo that.
+bench/*
+!bench/*.mjs
+!bench/README.md
+!bench/lib/
+!bench/tools/
+bench/gold/
+bench/locomo/
 BENCHMARKING.md
-bench/locomo/RESULTS.md
-bench/
 TODO.md
 TODO.md.local

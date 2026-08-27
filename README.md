@@ -9,7 +9,7 @@ Persistent memory for AI coding assistants. Works across sessions, devices, and 
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly. The free tier covers personal use; the limit you reach first is Vectorize's 5M stored dimensions, which is account-wide across indexes. At 768 dimensions, and with a micro-cluster vector stored alongside the memories, that works out to a few thousand memories before you need the paid plan.
 
-**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store): **92% recall** on exact-phrasing queries, **100%** on paraphrased ones, and **83%** on vague, loosely-worded ones. This costs more tokens per query than naive cosine, since it injects richer context rather than just better rankings: about 700 tokens on a typical query. Both numbers are self-measured against my own store, not a public benchmark.
+**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (41 real queries against a real, lived-in memory store): **92% recall** on exact-phrasing queries, **100%** on paraphrased ones, and **83%** on vague, loosely-worded ones. This costs more tokens per query than naive cosine, since it injects richer context rather than just better rankings: about 700 tokens on a typical query. Both numbers are self-measured against my own store, not a public benchmark. The harness is in [`bench/`](bench/) so the method is inspectable and you can run it against your own store; the gold sets are not published, because they are built from a real personal memory store. See [bench/README.md](bench/README.md).
 
 ## What it does
 
