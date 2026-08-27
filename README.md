@@ -3,7 +3,7 @@
 [![CI](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml/badge.svg)](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-![Gaussian Memory answering "what's still broken" with three real open threads](docs/assets/demo.gif)
+![Gaussian Memory answering "why is the retrieve hook slow" with the fix, the rejected option, a correction, and the open thread](docs/assets/demo.gif)
 
 Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
@@ -17,14 +17,14 @@ The system automatically captures what you worked on, what decisions you made, a
 
 The difference from other memory systems is that every memory carries its own confidence score, and that score moves over time. Reinforce a belief and its confidence climbs. Leave it untouched for weeks and it fades.
 
-What actually shows up in context, injected automatically:
+What actually shows up in context, injected automatically. This is real output from my own store, not a mock-up:
 
 ```
-[1.31] (auth-service ↑/decision) 3w ago ● Replaced Redis with D1 for session storage — zero egress fees, edge-native
-[0.88] (auth-service →/procedural) 6d ago ● JWT migration still incomplete — old sessions not yet cut over
+[1.72] (cloudflare-project ↑/decision) 2mo ago ● Use Workers + D1 + Vectorize. Alternatives considered: Supabase, Railway, self-hosted Postgres
+[1.50] (benchmark-project ↑/decision) 2w ago ● Retrieve hook 3.5-4.2s on Windows, blocks UserPromptSubmit. Cause still unidentified
 ```
 
-`[1.31]` is that memory's relevance to your current prompt, ranked by the retrieval pipeline described below. It can exceed 1.0 because the base score is multiplied by a confidence term clamped at 1.40. `(auth-service ↑/decision)` is the project, the memory's current confidence band (`↑` sharp, `→` holding, `↓` fading — a level, not a trajectory), and the memory type (`decision`, `episodic`, `semantic`, `procedural`, `session`).
+`[1.72]` is that memory's relevance to your current prompt, ranked by the retrieval pipeline described below. It can exceed 1.0 because the base score is multiplied by a confidence term clamped at 1.40. `(cloudflare-project ↑/decision)` is the project, the memory's current confidence band (`↑` sharp, `→` holding, `↓` fading — a level, not a trajectory), and the memory type (`decision`, `episodic`, `semantic`, `procedural`, `session`).
 
 ### Why not just RAG?
 

@@ -9,11 +9,11 @@ That's the state of memory in developer tools. It isn't that coding agents have 
 Here's what it puts into context on a prompt as vague as "where was I":
 
 ```
-[1.31] (auth-service ↑/decision) 3w ago ● Replaced Redis with D1 for session storage — zero egress fees, edge-native
-[0.88] (auth-service →/procedural) 6d ago ● JWT migration still incomplete — old sessions not yet cut over
+[1.72] (cloudflare-project ↑/decision) 2mo ago ● Use Workers + D1 + Vectorize. Alternatives considered: Supabase, Railway, self-hosted Postgres
+[1.50] (benchmark-project ↑/decision) 2w ago ● Retrieve hook 3.5-4.2s on Windows, blocks UserPromptSubmit. Cause still unidentified
 ```
 
-Nothing prompted that second line. Nobody tagged it. It's the landmine you'd otherwise step on at 2am.
+That is real output from my own store. Nothing prompted the second line, and nobody tagged it as open. It is the landmine you'd otherwise step on at 2am.
 
 ## The bottleneck moved
 
@@ -76,12 +76,12 @@ Zep and Mem0 both handle contradiction. Zep tracks validity intervals on graph e
 ## Reading the block
 
 ```
-[1.31] (auth-service ↑/decision) 3w ago ● Replaced Redis with D1 for session storage
+[1.72] (cloudflare-project ↑/decision) 2mo ago ● Use Workers + D1 + Vectorize
 ```
 
-`1.31` is the final fused score — cosine, keyword, recency and access, already multiplied by the confidence term, which is why it can exceed 1. It's relevance with confidence folded in, and it's why a shaky memory can't rank high just by matching your words.
+`1.72` is the final fused score — cosine, keyword, recency and access, already multiplied by the confidence term, which is why it can exceed 1. It's relevance with confidence folded in, and it's why a shaky memory can't rank high just by matching your words.
 
-`auth-service` is the project the memory formed in; memories stay scoped to their project unless you ask across projects. `↑` is the confidence band — sharp, holding, or fading. `decision` is the memory type: choices and why, as against `procedural`, how things work around here.
+`cloudflare-project` is the project the memory formed in; memories stay scoped to their project unless you ask across projects. `↑` is the confidence band — sharp, holding, or fading. `decision` is the memory type: choices and why, as against `procedural`, how things work around here.
 
 The whole injected block runs around 700 tokens. It's a precision top-up, not a transcript dump.
 
