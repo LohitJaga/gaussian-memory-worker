@@ -3,7 +3,9 @@
 [![CI](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml/badge.svg)](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-![Gaussian Memory answering "why is the retrieve hook slow" with the fix, the rejected option, a correction, and the open thread](docs/assets/demo.gif)
+<video src="https://raw.githubusercontent.com/LohitJaga/gaussian-memory-worker/main/docs/assets/demo.mp4" controls muted playsinline poster="https://raw.githubusercontent.com/LohitJaga/gaussian-memory-worker/main/docs/assets/demo-poster.png" width="100%"></video>
+
+*A vague "where did we land on UserPromptSubmit blocking" prompt, answered from real stored memory, including the belief-drift confidence trajectory and the write-back that supersedes the old note.*
 
 Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
