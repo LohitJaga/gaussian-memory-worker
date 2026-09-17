@@ -3,10 +3,6 @@
 [![CI](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml/badge.svg)](https://github.com/LohitJaga/gaussian-memory-worker/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[![Watch the demo](docs/assets/demo-thumb.png)](https://raw.githubusercontent.com/LohitJaga/gaussian-memory-worker/main/docs/assets/demo.mp4)
-
-**[▶ Watch the demo](https://raw.githubusercontent.com/LohitJaga/gaussian-memory-worker/main/docs/assets/demo.mp4)** — a vague "where did we land on UserPromptSubmit blocking" prompt, answered from real stored memory, including the belief-drift confidence trajectory and the write-back that supersedes the old note. GitHub doesn't play video inline in READMEs, so this opens/downloads the file.
-
 Persistent memory for AI coding assistants. Works across sessions, devices, and projects without any manual setup once installed.
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly. The free tier covers personal use; the limit you reach first is Vectorize's 5M stored dimensions, which is account-wide across indexes. At 768 dimensions, and with a micro-cluster vector stored alongside the memories, that works out to a few thousand memories before you need the paid plan.
