@@ -49,12 +49,13 @@ Create `~/.codex/hooks.json`:
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-retrieve.mjs --codex", "statusMessage": "Recalling memories...", "timeout": 15, "additionalContextLimit": 6000 }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs", "timeout": 10 }] }]
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs", "timeout": 90, "async": true }] }],
+    "SessionStart":     [{ "matcher": "startup|resume", "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs --sweep", "timeout": 300, "async": true }] }]
   }
 }
 ```
 
-The Stop hook is synchronous on purpose: Codex drops async hooks still running when it exits, so the hook relaunches itself detached and returns immediately. Start `codex` and run `/hooks` once to trust the new hooks. Receipts go to `~/.codex/gaussian-receipts.jsonl`.
+Stop stores each turn in the background. Codex drops async hooks still running when it exits, so the last turn of a session is picked up by the SessionStart sweep the next time Codex starts. Start `codex` and run `/hooks` once to trust the new hooks. Receipts go to `~/.codex/gaussian-receipts.jsonl`.
 
 ---
 

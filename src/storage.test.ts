@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery } from './storage';
+import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery, QUERY_STOPWORDS } from './storage';
 
 // ── isContradiction ──────────────────────────────────────────────────────
 
@@ -191,6 +191,13 @@ describe('buildKeywordQuery', () => {
     expect(q).toContain('"devday"');
     expect(q).toContain('"aws"');
     expect(q).not.toContain('"at"');
+  });
+
+  it('keeps non-ASCII words whole and drops contraction stems', () => {
+    const q = buildKeywordQuery("why didn't José meet Müller", 20, 3, QUERY_STOPWORDS);
+    expect(q).toContain('"josé"');
+    expect(q).toContain('"müller"');
+    expect(q).not.toContain('"didn"');
   });
 
   it('returns empty string for text with no qualifying terms', () => {

@@ -34,14 +34,15 @@ if (toolName === 'Write') {
 } else if (toolName === 'apply_patch') {
   // Codex writes files through apply_patch. Mirror Write: capture newly added files only,
   // edits to existing files are left to the Stop-hook session extraction.
+  // In parallel: sequential 4s calls for a multi-file patch could outrun the 15s hook timeout.
   const patch = String((data.tool_input && data.tool_input.command) || '');
-  for (const section of patch.split(/^(?=\*\*\* )/m)) {
+  await Promise.all(patch.split(/^(?=\*\*\* )/m).map(section => {
     const m = section.match(/^\*\*\* Add File: (.+)$/m);
-    if (!m) continue;
+    if (!m) return null;
     const body = section.split('\n').filter(l => l.startsWith('+')).map(l => l.slice(1)).join('\n');
-    await callTool(worker, token, 'memory_store_diff',
+    return callTool(worker, token, 'memory_store_diff',
       { file_path: m[1].trim(), old_string: '', new_string: squash(body, 6), project }, 4000);
-  }
+  }));
 } else if (toolName === 'Bash') {
   const cmd = (data.tool_input && data.tool_input.command) || '';
   if (skip.some(re => re.test(cmd))) process.exit(0);

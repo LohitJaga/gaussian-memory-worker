@@ -135,7 +135,9 @@ export async function sessionStore({ input, stateDir, worker, token, sessionKeys
   if (!acquired) return;
 
   try {
-    const project = detectProject();
+    // The session's own cwd when the payload carries one: a Codex catch-up sweep stores
+    // earlier sessions from wherever the new session started.
+    const project = detectProject(data.cwd || undefined);
     const transcriptPath = data.transcript_path || '';
     if (!transcriptPath || !fs.existsSync(transcriptPath)) return;
 

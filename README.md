@@ -139,7 +139,7 @@ cp hooks/gaussian-*.mjs ~/.claude/hooks/   # includes gaussian-lib.mjs, which th
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-retrieve.mjs", "statusMessage": "Recalling memories..." }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-store.mjs", "timeout": 30, "async": true }] }]
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/gaussian-store.mjs", "timeout": 90, "async": true }] }]
   }
 }
 ```
@@ -214,7 +214,7 @@ For auto-storage on session end, create `~/.cursor/hooks.json`:
       {
         "type": "command",
         "command": "node ~/.cursor/hooks/gaussian-store.mjs",
-        "timeout": 30
+        "timeout": 90
       }
     ]
   }
@@ -262,7 +262,8 @@ Then create `~/.codex/hooks.json` (use absolute paths on Windows):
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-retrieve.mjs --codex", "statusMessage": "Recalling memories...", "timeout": 15, "additionalContextLimit": 6000 }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs", "timeout": 10 }] }]
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs", "timeout": 90, "async": true }] }],
+    "SessionStart":     [{ "matcher": "startup|resume", "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs --sweep", "timeout": 300, "async": true }] }]
   }
 }
 ```
@@ -272,7 +273,7 @@ Also append `hooks/codex-AGENTS.md` to `~/.codex/AGENTS.md`. Without it Codex te
 Codex asks you to trust new hooks once: start `codex` and run `/hooks` to review and trust them.
 
 **What you get:**
-- **Full parity with Claude Code** — the same retrieval runs before every prompt, tool observations are captured as you work, and the session is extracted into memory after each turn.
+- **Full parity with Claude Code** — the same retrieval runs before every prompt, tool observations are captured as you work, and the session is extracted into memory after each turn, with anything left over picked up at the next Codex start.
 - **MCP tools** — all memory tools available, auto-approved so recall doesn't prompt on every call.
 - **Shared memory** — Codex and Claude Code read and write the same backend, so something you decided in one shows up in the other.
 

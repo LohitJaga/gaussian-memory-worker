@@ -199,11 +199,27 @@ const FTS_STOPWORDS = new Set([
   'are', 'not', 'now', 'still', 'been', 'into', 'about', 'when', 'then', 'than', 'also',
 ]);
 
+// Question and pronoun filler for search queries. Memory bodies rarely lean on these, but
+// questions are mostly made of them ("how do I like my responses formatted"), and each one
+// OR-matches hundreds of rows that crowd the specific terms' matches out of the pool.
+export const QUERY_STOPWORDS = new Set([
+  'what', 'which', 'who', 'whom', 'whose', 'where', 'why', 'how', 'did', 'does', 'doing', 'done',
+  'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might', 'must', 'any', 'all',
+  'you', 'your', 'yours', 'our', 'ours', 'they', 'them', 'their', 'his', 'her', 'its', 'mine',
+  'like', 'just', 'get', 'got', 'again', 'there', 'here', 'some', 'thing', 'things', 'one',
+  'tell', 'told', 'say', 'said', 'know', 'remind', 'yeah', 'yea', 'lol', 'too', 'very', 'really',
+  'out', 'off', 'over', 'before', 'after', 'while', 'being', 'had', 'having',
+  'she', 'him', 'hers', 'use', 'new', 'way',
+  // contraction stems left after tokenizing ("didn't" -> "didn", "t")
+  'didn', 'doesn', 'don', 'isn', 'wasn', 'aren', 'weren', 'won', 'wouldn', 'couldn',
+  'shouldn', 'haven', 'hasn',
+]);
+
 // Builds a safe FTS5 MATCH query from arbitrary text: memory bodies and search queries.
-// A `replace(/['"*()]/g, ' ')`-style sanitization breaks on long memory text: FTS5's grammar treats `:` as a column filter, `-`
-// directly before a term as NOT, and (confirmed live 2026-07-07 against real memory text) even
-// plain commas can trip the parser on long inputs — the query silently returns zero results
-// since callers wrap this in .catch(() => []). It's also too restrictive even when it doesn't
+// A `replace(/['"*()]/g, ' ')`-style sanitization breaks on long memory text: FTS5's grammar
+// treats `:` as a column filter, `-` directly before a term as NOT, and (confirmed live
+// 2026-07-07 against real memory text) even plain commas can trip the parser on long inputs —
+// the query silently returns zero results since callers wrap this in .catch(() => []). It's also too restrictive even when it doesn't
 // error: FTS5's default is implicit AND between bareword terms, so a 70-word memory text as a
 // query requires literally every word to appear in a candidate, which is essentially always zero
 // matches. Tokenizing to bare alphanumeric words and OR-joining each as a quoted phrase fixes
@@ -214,20 +230,10 @@ const FTS_STOPWORDS = new Set([
 // reverted 2026-07-07) cut off the actual significant words on longer memories, since the
 // specific/technical vocabulary that makes a good keyword doesn't reliably show up early in a
 // sentence; longer words are a cheap, effective proxy for "specific" over "common filler".
-// Question and pronoun filler for search queries. Memory bodies rarely lean on these, but
-// questions are mostly made of them ("how do I like my responses formatted"), and each one
-// OR-matches hundreds of rows that crowd the specific terms' matches out of the pool.
-export const QUERY_STOPWORDS = new Set([
-  'what', 'which', 'who', 'whom', 'whose', 'where', 'why', 'how', 'did', 'does', 'doing', 'done',
-  'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might', 'must', 'any', 'all',
-  'you', 'your', 'yours', 'our', 'ours', 'they', 'them', 'their', 'his', 'her', 'its', 'mine',
-  'like', 'just', 'get', 'got', 'again', 'there', 'here', 'some', 'thing', 'things', 'one',
-  'tell', 'told', 'say', 'said', 'know', 'remind', 'yeah', 'yea', 'lol', 'too', 'very', 'really',
-  'out', 'off', 'over', 'why', 'before', 'after', 'while', 'being', 'had', 'having',
-]);
-
+// Letters/digits of any script, not just ASCII: an [a-z0-9] split turned "José" into "jos"
+// and dropped CJK entirely, while FTS5's unicode61 tokenizer indexes both fine.
 export function buildKeywordQuery(text: string, maxTerms = 20, minLength = 4, extraStopwords?: Set<string>): string {
-  const terms = [...new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])]
+  const terms = [...new Set(text.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? [])]
     .filter(t => t.length >= minLength && !FTS_STOPWORDS.has(t) && !extraStopwords?.has(t))
     .sort((a, b) => b.length - a.length)
     .slice(0, maxTerms);

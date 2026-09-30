@@ -23,6 +23,7 @@ const GOLD_PATH = arg('--gold', 'bench/gold/retrieval_gold.v1.json,bench/gold/re
 
 const VARIANTS = {
   prod: undefined,
+  old: { ftsOr: false, ftsStopwords: false },
   ftsOr: { ftsOr: true },
   ftsOrStop: { ftsOr: true, ftsStopwords: true },
   ftsOrStop_noHot: { ftsOr: true, ftsStopwords: true, hotTier: false },

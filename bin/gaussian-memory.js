@@ -10,6 +10,24 @@ const readline = require('readline');
 
 const [,, cmd, ...args] = process.argv;
 
+// Removes a TOML table and all of its subtables ([name], [name.x], [[name.x]]) by header,
+// keeping every other line. Enough for init's own upsert; not a general TOML parser.
+function removeTomlTable(toml, name) {
+  let skipping = false;
+  return toml.split('\n').filter(line => {
+    const h = line.match(/^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$/);
+    if (h) skipping = h[1] === name || h[1].startsWith(`${name}.`);
+    return !skipping;
+  }).join('\n');
+}
+
+// Gaussian Memory tools Codex may run without asking: reads and additive writes only.
+// Deletes, bulk cleanup, decay and rebuilds keep Codex's approval prompt.
+const CODEX_AUTO_APPROVED_TOOLS = [
+  'memory_retrieve', 'memory_list', 'memory_stats', 'memory_timeline', 'identity_profile_get',
+  'memory_auto_store', 'memory_store', 'memory_store_decision',
+];
+
 function readJsonOrEmpty(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
 }
@@ -498,7 +516,7 @@ async function init() {
           const hooksConfig = readJsonOrEmpty(cursorHooksJson);
           if (!hooksConfig.version) hooksConfig.version = 1;
           if (!hooksConfig.hooks) hooksConfig.hooks = {};
-          const gaussianCursorHook = { type: 'command', command: `node "${path.join(cursorHooksDir, 'gaussian-store.mjs')}"`, timeout: 30 };
+          const gaussianCursorHook = { type: 'command', command: `node "${path.join(cursorHooksDir, 'gaussian-store.mjs')}"`, timeout: 90 };
           const existingSessionEnd = Array.isArray(hooksConfig.hooks.sessionEnd) ? hooksConfig.hooks.sessionEnd : [];
           const cleanedSessionEnd = existingSessionEnd.filter(e => !JSON.stringify(e).includes('gaussian'));
           hooksConfig.hooks.sessionEnd = [...cleanedSessionEnd, gaussianCursorHook];
@@ -522,7 +540,9 @@ async function init() {
 
     // Auto-install Codex hooks + MCP server if ~/.codex exists
     const codexDir = path.join(os.homedir(), '.codex');
-    if (fs.existsSync(codexDir)) {
+    const installCodex = fs.existsSync(codexDir)
+      && (await ask('\n  Install Codex hooks + MCP server (~/.codex/hooks.json, config.toml, AGENTS.md)? [Y/n] ')).toLowerCase() !== 'n';
+    if (installCodex) {
       process.stdout.write('  Installing Codex hooks + MCP server... ');
       try {
         const codexHooksDir = path.join(codexDir, 'hooks');
@@ -539,8 +559,8 @@ async function init() {
         }
 
         // hooks.json — merge, dropping prior gaussian entries so re-running init upgrades in place.
-        // The Stop hook detaches its own extraction work, so it runs synchronously here:
-        // Codex drops async hooks still running when it exits.
+        // Stop stores each turn in the background; Codex drops it if still running at exit, so
+        // SessionStart sweeps up what earlier sessions left (see codex-gaussian-store.mjs).
         const codexHooksJson = path.join(codexDir, 'hooks.json');
         const codexHooks = readJsonOrEmpty(codexHooksJson);
         if (!codexHooks.hooks) codexHooks.hooks = {};
@@ -548,7 +568,8 @@ async function init() {
         const gaussianCodexHooks = {
           UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${nodeHook('gaussian-retrieve.mjs')} --codex`, statusMessage: 'Recalling memories...', timeout: 15, additionalContextLimit: 6000 }] }],
           PostToolUse:      [{ hooks: [{ type: 'command', command: nodeHook('gaussian-posttool.mjs'), timeout: 15, async: true }] }],
-          Stop:             [{ hooks: [{ type: 'command', command: nodeHook('gaussian-store.mjs'), timeout: 10 }] }],
+          Stop:             [{ hooks: [{ type: 'command', command: nodeHook('gaussian-store.mjs'), timeout: 90, async: true }] }],
+          SessionStart:     [{ matcher: 'startup|resume', hooks: [{ type: 'command', command: `${nodeHook('gaussian-store.mjs')} --sweep`, timeout: 300, async: true }] }],
         };
         for (const [event, val] of Object.entries(gaussianCodexHooks)) {
           const existing = Array.isArray(codexHooks.hooks[event]) ? codexHooks.hooks[event] : [];
@@ -565,17 +586,19 @@ async function init() {
           fs.writeFileSync(agentsMd, existingAgents ? `${existingAgents.trimEnd()}\n\n${section}` : section);
         }
 
-        // config.toml — replace any existing [mcp_servers.gaussian-memory] table. A static
-        // header rather than bearer_token_env_var: Codex launched from a GUI or on Windows
-        // never sources ~/.gaussian-memory-env. Memory tools are auto-approved so recall
-        // doesn't prompt on every call.
+        // config.toml — replace the [mcp_servers.gaussian-memory] table and its subtables,
+        // leaving everything else (Codex keeps hook trust hashes in this file). A static header
+        // rather than bearer_token_env_var: Codex launched from a GUI or on Windows never sources
+        // ~/.gaussian-memory-env. Only read and additive tools are auto-approved, so recall
+        // doesn't prompt; delete/cleanup tools still ask.
         if (url) {
           const codexConfig = path.join(codexDir, 'config.toml');
-          let toml = fs.existsSync(codexConfig) ? fs.readFileSync(codexConfig, 'utf8') : '';
-          toml = toml.replace(/\[mcp_servers\.gaussian-memory\][\s\S]*?(?=\n\[|$)/, '').trim();
+          const existingToml = fs.existsSync(codexConfig) ? fs.readFileSync(codexConfig, 'utf8') : '';
+          let toml = removeTomlTable(existingToml, 'mcp_servers.gaussian-memory').trim();
           toml += `${toml ? '\n\n' : ''}[mcp_servers.gaussian-memory]\nurl = ${JSON.stringify(url)}\n`
             + `http_headers = { Authorization = ${JSON.stringify(`Bearer ${token}`)} }\n`
-            + 'default_tools_approval_mode = "approve"\n';
+            + 'default_tools_approval_mode = "prompt"\n'
+            + CODEX_AUTO_APPROVED_TOOLS.map(t => `\n[mcp_servers.gaussian-memory.tools.${t}]\napproval_mode = "approve"\n`).join('');
           fs.writeFileSync(codexConfig, toml, { mode: 0o600 });
           fs.chmodSync(codexConfig, 0o600); // writeFileSync's mode is ignored when the file already existed
         }
