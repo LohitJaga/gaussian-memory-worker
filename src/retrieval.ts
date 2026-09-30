@@ -1,6 +1,6 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
-import { hotTierGet, hotTierAddMany } from './storage';
+import { hotTierGet, hotTierAddMany, buildKeywordQuery } from './storage';
 import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
 } from './gaussian';
@@ -349,8 +349,12 @@ export async function retrieve(
   const poolMultiplier = 4 + Math.round(4 * Math.max(0, Math.min(1, (querySigmaVal - 0.2) / 0.6)));
   const queryOpts = { topK: Math.min(topK * poolMultiplier, 50), returnValues: true, returnMetadata: 'indexed' as const };
 
-  // Build FTS5 query — sanitize to valid FTS5 syntax (remove special chars)
-  const ftsQuery = searchQuery.replace(/['"*()]/g, ' ').trim();
+  // FTS5 query: OR of quoted keywords. The raw query used to go in as-is, and FTS5 reads
+  // bare words as an implicit AND, so a natural question ("what did Osman tell me at
+  // DevDay") only matched memories containing every word, which is almost none; BM25
+  // contributed nothing on most real queries (verified live 2026-09-30). Min length 3
+  // keeps short acronyms (AWS, GCP, SQL) that matter in queries.
+  const ftsQuery = buildKeywordQuery(searchQuery, 20, 3);
 
   // EXPERIMENTAL (2026-07-08), 4th candidate source: pure access-frequency ranking,
   // zero embeddings involved. Heavily-reinforced memories (high access_count) are

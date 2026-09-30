@@ -199,9 +199,8 @@ const FTS_STOPWORDS = new Set([
   'are', 'not', 'now', 'still', 'been', 'into', 'about', 'when', 'then', 'than', 'also',
 ]);
 
-// Builds a safe FTS5 MATCH query from arbitrary text (memory bodies, not short search queries).
-// retrieval.ts's `replace(/['"*()]/g, ' ')` sanitization is fine for short natural-language user
-// queries, but breaks on long memory text: FTS5's grammar treats `:` as a column filter, `-`
+// Builds a safe FTS5 MATCH query from arbitrary text: memory bodies and search queries.
+// A `replace(/['"*()]/g, ' ')`-style sanitization breaks on long memory text: FTS5's grammar treats `:` as a column filter, `-`
 // directly before a term as NOT, and (confirmed live 2026-07-07 against real memory text) even
 // plain commas can trip the parser on long inputs — the query silently returns zero results
 // since callers wrap this in .catch(() => []). It's also too restrictive even when it doesn't
@@ -215,9 +214,9 @@ const FTS_STOPWORDS = new Set([
 // reverted 2026-07-07) cut off the actual significant words on longer memories, since the
 // specific/technical vocabulary that makes a good keyword doesn't reliably show up early in a
 // sentence; longer words are a cheap, effective proxy for "specific" over "common filler".
-export function buildKeywordQuery(text: string, maxTerms = 20): string {
+export function buildKeywordQuery(text: string, maxTerms = 20, minLength = 4): string {
   const terms = [...new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])]
-    .filter(t => t.length >= 4 && !FTS_STOPWORDS.has(t))
+    .filter(t => t.length >= minLength && !FTS_STOPWORDS.has(t))
     .sort((a, b) => b.length - a.length)
     .slice(0, maxTerms);
   return terms.map(t => `"${t}"`).join(' OR ');

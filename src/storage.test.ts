@@ -185,6 +185,14 @@ describe('buildKeywordQuery', () => {
     expect(q).not.toContain('"was"');
   });
 
+  it('turns a natural question into OR-joined keywords, keeping short acronyms at minLength 3', () => {
+    const q = buildKeywordQuery('what did Osman tell me at DevDay on AWS', 20, 3);
+    expect(q).toContain('"osman" OR ');
+    expect(q).toContain('"devday"');
+    expect(q).toContain('"aws"');
+    expect(q).not.toContain('"at"');
+  });
+
   it('returns empty string for text with no qualifying terms', () => {
     expect(buildKeywordQuery('a to it is')).toBe('');
   });
