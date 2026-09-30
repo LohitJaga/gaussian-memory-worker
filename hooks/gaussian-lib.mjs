@@ -150,7 +150,9 @@ export async function sessionStore({ input, stateDir, worker, token, sessionKeys
     if (!fullLog || fullLog.length < 2000) return;
     const log = fullLog.slice(-30000);
 
-    const { ok } = await callToolStatus(worker, token, 'memory_extract_and_store', { log_text: log, project }, 10000, 99);
+    // Extraction is an LLM pass over up to 30k chars and routinely takes ~20s; a shorter
+    // timeout aborts the request, so the offset is never committed and nothing is stored.
+    const { ok } = await callToolStatus(worker, token, 'memory_extract_and_store', { log_text: log, project }, 60000, 99);
     if (ok) fs.writeFileSync(offsetFile, String(fileSize));
 
     if (syncClaudeMd) {

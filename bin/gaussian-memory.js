@@ -385,7 +385,7 @@ async function init() {
         const gaussianHooks = {
           UserPromptSubmit: [{ hooks: [{ type: 'command', command: nodeHook('gaussian-retrieve.mjs'), statusMessage: 'Recalling memories...' }] }],
           PostToolUse:      [{ hooks: [{ type: 'command', command: nodeHook('gaussian-posttool.mjs'), timeout: 15, async: true }] }],
-          Stop:             [{ hooks: [{ type: 'command', command: nodeHook('gaussian-store.mjs'), timeout: 30, async: true }] }],
+          Stop:             [{ hooks: [{ type: 'command', command: nodeHook('gaussian-store.mjs'), timeout: 90, async: true }] }],
         };
         for (const [event, val] of Object.entries(gaussianHooks)) {
           const existing = Array.isArray(settings.hooks[event]) ? settings.hooks[event] : [];
