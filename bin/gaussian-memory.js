@@ -520,6 +520,63 @@ async function init() {
       }
     }
 
+    // Auto-install Codex hooks + MCP server if ~/.codex exists
+    const codexDir = path.join(os.homedir(), '.codex');
+    if (fs.existsSync(codexDir)) {
+      process.stdout.write('  Installing Codex hooks + MCP server... ');
+      try {
+        const codexHooksDir = path.join(codexDir, 'hooks');
+        fs.mkdirSync(codexHooksDir, { recursive: true });
+        // Same retrieve/posttool hooks as Claude Code; the Stop hook is Codex-specific.
+        const files = {
+          'gaussian-lib.mjs': 'gaussian-lib.mjs',
+          'gaussian-retrieve.mjs': 'gaussian-retrieve.mjs',
+          'gaussian-posttool.mjs': 'gaussian-posttool.mjs',
+          'codex-gaussian-store.mjs': 'gaussian-store.mjs',
+        };
+        for (const [src, dst] of Object.entries(files)) {
+          fs.writeFileSync(path.join(codexHooksDir, dst), fs.readFileSync(path.join(__dirname, '..', 'hooks', src), 'utf8'));
+        }
+
+        // hooks.json — merge, dropping prior gaussian entries so re-running init upgrades in place.
+        // The Stop hook detaches its own extraction work, so it runs synchronously here:
+        // Codex drops async hooks still running when it exits.
+        const codexHooksJson = path.join(codexDir, 'hooks.json');
+        const codexHooks = readJsonOrEmpty(codexHooksJson);
+        if (!codexHooks.hooks) codexHooks.hooks = {};
+        const nodeHook = (f) => `node "${path.join(codexHooksDir, f)}"`;
+        const gaussianCodexHooks = {
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${nodeHook('gaussian-retrieve.mjs')} --codex`, statusMessage: 'Recalling memories...', timeout: 15, additionalContextLimit: 6000 }] }],
+          PostToolUse:      [{ hooks: [{ type: 'command', command: nodeHook('gaussian-posttool.mjs'), timeout: 15, async: true }] }],
+          Stop:             [{ hooks: [{ type: 'command', command: nodeHook('gaussian-store.mjs'), timeout: 10 }] }],
+        };
+        for (const [event, val] of Object.entries(gaussianCodexHooks)) {
+          const existing = Array.isArray(codexHooks.hooks[event]) ? codexHooks.hooks[event] : [];
+          codexHooks.hooks[event] = [...existing.filter(e => !JSON.stringify(e).includes('gaussian')), ...val];
+        }
+        fs.writeFileSync(codexHooksJson, JSON.stringify(codexHooks, null, 2));
+
+        // config.toml — replace any existing [mcp_servers.gaussian-memory] table. A static
+        // header rather than bearer_token_env_var: Codex launched from a GUI or on Windows
+        // never sources ~/.gaussian-memory-env. Memory tools are auto-approved so recall
+        // doesn't prompt on every call.
+        if (url) {
+          const codexConfig = path.join(codexDir, 'config.toml');
+          let toml = fs.existsSync(codexConfig) ? fs.readFileSync(codexConfig, 'utf8') : '';
+          toml = toml.replace(/\[mcp_servers\.gaussian-memory\][\s\S]*?(?=\n\[|$)/, '').trim();
+          toml += `${toml ? '\n\n' : ''}[mcp_servers.gaussian-memory]\nurl = ${JSON.stringify(url)}\n`
+            + `http_headers = { Authorization = ${JSON.stringify(`Bearer ${token}`)} }\n`
+            + 'default_tools_approval_mode = "approve"\n';
+          fs.writeFileSync(codexConfig, toml, { mode: 0o600 });
+          fs.chmodSync(codexConfig, 0o600); // writeFileSync's mode is ignored when the file already existed
+        }
+        console.log('done');
+        console.log('  Codex asks you to trust new hooks once: run `codex`, then /hooks to review and trust them.');
+      } catch (e) {
+        console.log('failed:', e.message);
+      }
+    }
+
     // Auto-configure Zed if ~/.config/zed exists
     const zedDir = path.join(os.homedir(), '.config', 'zed');
     const zedSettings = path.join(zedDir, 'settings.json');

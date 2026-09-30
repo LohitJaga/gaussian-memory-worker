@@ -31,6 +31,17 @@ if (toolName === 'Write') {
   const content = squash((data.tool_input && data.tool_input.content) || '', 6);
   await callTool(worker, token, 'memory_store_diff',
     { file_path: filePath, old_string: '', new_string: content, project }, 4000);
+} else if (toolName === 'apply_patch') {
+  // Codex writes files through apply_patch. Mirror Write: capture newly added files only,
+  // edits to existing files are left to the Stop-hook session extraction.
+  const patch = String((data.tool_input && data.tool_input.command) || '');
+  for (const section of patch.split(/^(?=\*\*\* )/m)) {
+    const m = section.match(/^\*\*\* Add File: (.+)$/m);
+    if (!m) continue;
+    const body = section.split('\n').filter(l => l.startsWith('+')).map(l => l.slice(1)).join('\n');
+    await callTool(worker, token, 'memory_store_diff',
+      { file_path: m[1].trim(), old_string: '', new_string: squash(body, 6), project }, 4000);
+  }
 } else if (toolName === 'Bash') {
   const cmd = (data.tool_input && data.tool_input.command) || '';
   if (skip.some(re => re.test(cmd))) process.exit(0);

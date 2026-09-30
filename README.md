@@ -36,7 +36,7 @@ RAG retrieves chunks from a static document store, and a chunk means whatever it
 - Automatic capture of decisions, code diffs, and session summaries without asking
 - Contradiction detection: a new fact that conflicts with an old one gets flagged and resolved instead of silently duplicated
 - Entity graph and spreading activation surface related memories even when the wording doesn't match
-- One MCP server for Claude Code, Cursor, OpenCode, and Zed — same tools, same behavior everywhere
+- One MCP server for Claude Code, Codex, Cursor, OpenCode, and Zed — same tools, same behavior everywhere
 - Self-hosted on your own Cloudflare account, no managed service, ~$0/month on the free tier
 
 ## Quick start
@@ -69,7 +69,7 @@ Reload your shell (`source ~/.zshrc` or open a new terminal), restart your harne
 - Generates and sets an `AUTH_TOKEN` secret
 - Writes `~/.gaussian-memory-env` with your worker URL and token (chmod 600), and auto-appends `source ~/.gaussian-memory-env` to your `~/.zshrc` or `~/.bashrc`
 - Registers the MCP server with Claude Code via `claude mcp add` (user-scoped, so it's available in every project)
-- Auto-installs and configures hooks for Claude Code, OpenCode, Cursor, and Zed if it detects them on your machine (prompts before installing anything)
+- Auto-installs and configures hooks for Claude Code, Codex, OpenCode, Cursor, and Zed if it detects them on your machine (prompts before installing anything)
 
 Works the same way on Windows — no WSL needed. `init` and the hooks are plain Node.
 
@@ -231,6 +231,48 @@ cp hooks/gaussian-lib.mjs ~/.cursor/hooks/gaussian-lib.mjs   # the hook imports 
 - **MCP tools** — all 26 memory tools available in agent mode. Call `memory_retrieve` or `memory_store` directly.
 - **Auto-store** — `sessionEnd` hook extracts and stores memories when you close a conversation.
 - **Auto-inject** — not available yet. Cursor's `sessionStart` hook supports an `additional_context` output field that would enable this, but injection is currently broken upstream ([forum thread](https://forum.cursor.com/t/sessionstart-hook-additional-context-is-never-injected-into-agents-initial-system-context/158452)). When they fix it, Cursor will have full parity with Claude Code.
+
+</details>
+
+### Codex
+
+<details>
+<summary>Configured automatically by <code>init</code> if <code>~/.codex</code> is detected — expand for manual setup and what you get</summary>
+
+Manual setup: add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.gaussian-memory]
+url = "https://your-worker.workers.dev"
+http_headers = { Authorization = "Bearer your-token" }
+default_tools_approval_mode = "approve"
+```
+
+Copy the hooks (the Stop hook is Codex-specific):
+```bash
+mkdir -p ~/.codex/hooks
+cp hooks/gaussian-lib.mjs hooks/gaussian-retrieve.mjs hooks/gaussian-posttool.mjs ~/.codex/hooks/
+cp hooks/codex-gaussian-store.mjs ~/.codex/hooks/gaussian-store.mjs
+```
+
+Then create `~/.codex/hooks.json` (use absolute paths on Windows):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-retrieve.mjs --codex", "statusMessage": "Recalling memories...", "timeout": 15, "additionalContextLimit": 6000 }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs", "timeout": 10 }] }]
+  }
+}
+```
+
+Codex asks you to trust new hooks once: start `codex` and run `/hooks` to review and trust them.
+
+**What you get:**
+- **Full parity with Claude Code** — the same retrieval runs before every prompt, tool observations are captured as you work, and the session is extracted into memory after each turn.
+- **MCP tools** — all memory tools available, auto-approved so recall doesn't prompt on every call.
+- **Shared memory** — Codex and Claude Code read and write the same backend, so something you decided in one shows up in the other.
 
 </details>
 

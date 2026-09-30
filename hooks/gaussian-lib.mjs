@@ -171,7 +171,8 @@ export async function sessionStore({ input, stateDir, worker, token, sessionKeys
 
 // Byte-offset delta parse of a JSONL transcript. Returns ' | '-joined turns of
 // meaningful text, filtering agent bookkeeping, long code blocks, and bare paths.
-// Handles both Claude Code (role under .message) and Cursor (role at top level).
+// Handles Claude Code (role under .message), Cursor (role at top level), and Codex
+// (response_item payloads with input_text/output_text parts).
 export function parseTranscript(transcriptPath, offset) {
   let slice;
   try {
@@ -184,11 +185,24 @@ export function parseTranscript(transcriptPath, offset) {
   const skipHead = /^(SPAWNED|MERGED|SKIP|ERROR|Extracted \d)/;
   const barePath = /^\/(?:Users|home)\/\S*$/;
   const bareFile = /^\S+\.(csv|jsonl|pdf|png|ts|py|sh|json)$/;
+  const codexInjected = /^(<(environment_context|user_instructions|user_shell_command|turn_aborted)>|# AGENTS\.md instructions)/;
   for (const line of slice.split('\n')) {
     if (out.length >= 300) break;
     if (!line.trim()) continue;
     let e;
     try { e = JSON.parse(line); } catch { continue; }
+    // Codex: only real user/assistant messages; developer/system turns are harness
+    // instructions (hook output lands there too), and some user turns are injected
+    // context blocks (environment_context, AGENTS.md) rather than something typed.
+    let codex = false;
+    if (e.type === 'response_item') {
+      const p = e.payload || {};
+      if (p.type !== 'message' || (p.role !== 'user' && p.role !== 'assistant')) continue;
+      e = { role: p.role, message: { content: p.content } };
+      codex = true;
+    } else if (e.type && e.payload) {
+      continue; // other Codex rollout records (session_meta, event_msg, turn_context, ...)
+    }
     const role = e.role || (e.message && e.message.role) || '';
     const label = role === 'user' ? 'User' : 'Assistant';
     const content = (e.message && e.message.content) ?? '';
@@ -196,9 +210,10 @@ export function parseTranscript(transcriptPath, offset) {
       if (content.length > 25 && content !== '[REDACTED]') out.push(`[${label}]: ${redact(content).slice(0, 300)}`);
     } else if (Array.isArray(content)) {
       for (const c of content) {
-        if (!c || typeof c !== 'object' || c.type !== 'text') continue;
+        if (!c || typeof c !== 'object' || !['text', 'input_text', 'output_text'].includes(c.type)) continue;
         const text = (c.text || '').trim();
         if (text.length < 25 || text === '[REDACTED]') continue;
+        if (codex && role === 'user' && codexInjected.test(text)) continue;
         if (skipHead.test(text)) continue;
         if (text.startsWith('```') && (text.split('\n').length - 1) > 3) continue;
         if (barePath.test(text)) continue;

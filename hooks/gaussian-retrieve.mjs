@@ -14,6 +14,9 @@ if (!prompt) process.exit(0);
 const { worker, token } = loadEnv();
 if (!worker) process.exit(0);
 
+// --codex: same retrieval for Codex. Receipts go under ~/.codex, and the CLAUDE.md
+// bootstrap is skipped since Codex reads AGENTS.md instead.
+const codex = process.argv.includes('--codex');
 const claudeMd = path.join(HOME, '.claude', 'CLAUDE.md');
 const project = detectProject();
 
@@ -21,7 +24,7 @@ const project = detectProject();
 // A "null", error, or implausibly short payload is rejected so a bad fetch can't clobber it.
 try {
   const size = fs.existsSync(claudeMd) ? fs.statSync(claudeMd).size : 0;
-  if (size === 0) {
+  if (!codex && size === 0) {
     const profile = await callTool(worker, token, 'identity_profile_get', {}, 10000);
     if (profile && profile !== 'null' && profile.length >= 50) {
       fs.mkdirSync(path.dirname(claudeMd), { recursive: true });
@@ -133,7 +136,7 @@ process.stdout.write(JSON.stringify({
 
 // Receipt logging — metadata + 200-char memory snippets for debugging.
 try {
-  const receiptFile = path.join(HOME, '.claude', 'gaussian-receipts.jsonl');
+  const receiptFile = path.join(HOME, codex ? '.codex' : '.claude', 'gaussian-receipts.jsonl');
   const queryHash = crypto.createHash('md5').update(prompt).digest('hex').slice(0, 8);
   const memories = merged.filter(l => l.startsWith('[')).map(l => {
     const s = l.match(/^\[([0-9.]+)\]/); const d = l.match(/\(([^)]+)\)/);

@@ -33,6 +33,31 @@ Add to `~/.claude/settings.json`:
 
 ---
 
+## Codex
+
+Copy the hooks to `~/.codex/hooks/` (the Stop hook is Codex-specific):
+
+```bash
+cp gaussian-lib.mjs gaussian-retrieve.mjs gaussian-posttool.mjs ~/.codex/hooks/
+cp codex-gaussian-store.mjs ~/.codex/hooks/gaussian-store.mjs
+```
+
+Create `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-retrieve.mjs --codex", "statusMessage": "Recalling memories...", "timeout": 15, "additionalContextLimit": 6000 }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-posttool.mjs", "timeout": 15, "async": true }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node ~/.codex/hooks/gaussian-store.mjs", "timeout": 10 }] }]
+  }
+}
+```
+
+The Stop hook is synchronous on purpose: Codex drops async hooks still running when it exits, so the hook relaunches itself detached and returns immediately. Start `codex` and run `/hooks` once to trust the new hooks. Receipts go to `~/.codex/gaussian-receipts.jsonl`.
+
+---
+
 ## OpenCode
 
 OpenCode integrates via MCP (it has no shell hook system). Merge the contents of `opencode-mcp-config.json` into your global OpenCode config at `~/.config/opencode/opencode.json`:
