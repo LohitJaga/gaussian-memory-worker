@@ -556,6 +556,15 @@ async function init() {
         }
         fs.writeFileSync(codexHooksJson, JSON.stringify(codexHooks, null, 2));
 
+        // AGENTS.md — without it Codex tends to ignore the injected block and go searching
+        // files for the answer. Appended once; an existing AGENTS.md is kept intact.
+        const agentsMd = path.join(codexDir, 'AGENTS.md');
+        const existingAgents = fs.existsSync(agentsMd) ? fs.readFileSync(agentsMd, 'utf8') : '';
+        if (!existingAgents.includes('# Gaussian Memory')) {
+          const section = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'codex-AGENTS.md'), 'utf8');
+          fs.writeFileSync(agentsMd, existingAgents ? `${existingAgents.trimEnd()}\n\n${section}` : section);
+        }
+
         // config.toml — replace any existing [mcp_servers.gaussian-memory] table. A static
         // header rather than bearer_token_env_var: Codex launched from a GUI or on Windows
         // never sources ~/.gaussian-memory-env. Memory tools are auto-approved so recall

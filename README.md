@@ -267,6 +267,8 @@ Then create `~/.codex/hooks.json` (use absolute paths on Windows):
 }
 ```
 
+Also append `hooks/codex-AGENTS.md` to `~/.codex/AGENTS.md`. Without it Codex tends to ignore the recalled memories and search files instead.
+
 Codex asks you to trust new hooks once: start `codex` and run `/hooks` to review and trust them.
 
 **What you get:**
