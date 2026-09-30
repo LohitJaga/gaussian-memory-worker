@@ -214,9 +214,21 @@ const FTS_STOPWORDS = new Set([
 // reverted 2026-07-07) cut off the actual significant words on longer memories, since the
 // specific/technical vocabulary that makes a good keyword doesn't reliably show up early in a
 // sentence; longer words are a cheap, effective proxy for "specific" over "common filler".
-export function buildKeywordQuery(text: string, maxTerms = 20, minLength = 4): string {
+// Question and pronoun filler for search queries. Memory bodies rarely lean on these, but
+// questions are mostly made of them ("how do I like my responses formatted"), and each one
+// OR-matches hundreds of rows that crowd the specific terms' matches out of the pool.
+export const QUERY_STOPWORDS = new Set([
+  'what', 'which', 'who', 'whom', 'whose', 'where', 'why', 'how', 'did', 'does', 'doing', 'done',
+  'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might', 'must', 'any', 'all',
+  'you', 'your', 'yours', 'our', 'ours', 'they', 'them', 'their', 'his', 'her', 'its', 'mine',
+  'like', 'just', 'get', 'got', 'again', 'there', 'here', 'some', 'thing', 'things', 'one',
+  'tell', 'told', 'say', 'said', 'know', 'remind', 'yeah', 'yea', 'lol', 'too', 'very', 'really',
+  'out', 'off', 'over', 'why', 'before', 'after', 'while', 'being', 'had', 'having',
+]);
+
+export function buildKeywordQuery(text: string, maxTerms = 20, minLength = 4, extraStopwords?: Set<string>): string {
   const terms = [...new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])]
-    .filter(t => t.length >= minLength && !FTS_STOPWORDS.has(t))
+    .filter(t => t.length >= minLength && !FTS_STOPWORDS.has(t) && !extraStopwords?.has(t))
     .sort((a, b) => b.length - a.length)
     .slice(0, maxTerms);
   return terms.map(t => `"${t}"`).join(' OR ');

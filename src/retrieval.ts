@@ -1,6 +1,6 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
-import { hotTierGet, hotTierAddMany, buildKeywordQuery } from './storage';
+import { hotTierGet, hotTierAddMany, buildKeywordQuery, QUERY_STOPWORDS } from './storage';
 import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
 } from './gaussian';
@@ -284,6 +284,16 @@ export async function baselineRetrieve(
     .sort((a, b) => b.score - a.score);
 }
 
+const D1_ID_CHUNK = 90; // below D1's 100-parameter cap, leaving room for project/time binds
+export function chunk<T>(xs: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
+  return out;
+}
+
+export type RetrievalVariant = { ftsOr?: boolean; ftsStopwords?: boolean; hotTier?: boolean; recencyCreated?: boolean };
+export const DEFAULT_VARIANT: Required<RetrievalVariant> = { ftsOr: true, ftsStopwords: true, hotTier: true, recencyCreated: false };
+
 export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default',
   strictProject = false,
@@ -295,10 +305,13 @@ export async function retrieve(
   // opts.trace: bench-only pipeline introspection — pass an empty object and retrieve()
   // fills it with per-stage candidate id lists so a "why didn't memory X surface" question
   // is answerable from data instead of deduction. No effect on scoring.
-  opts: { frozen?: boolean; trace?: Record<string, unknown> } = {}
+  // opts.variant: bench-only switches for A/B-testing scoring changes against the live store
+  // in one deploy. Defaults are production behavior; agent calls never set it.
+  opts: { frozen?: boolean; trace?: Record<string, unknown>; variant?: RetrievalVariant } = {}
 ): Promise<{ id: string; score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
   if (!query?.trim()) return [];
+  const v = { ...DEFAULT_VARIANT, ...opts.variant };
 
   // Pure semantic retrieval — no LLM query rewriting.
   // Memories are stored with context-enriched text (via memory_auto_store context param),
@@ -354,7 +367,7 @@ export async function retrieve(
   // DevDay") only matched memories containing every word, which is almost none; BM25
   // contributed nothing on most real queries (verified live 2026-09-30). Min length 3
   // keeps short acronyms (AWS, GCP, SQL) that matter in queries.
-  const ftsQuery = buildKeywordQuery(searchQuery, 20, 3);
+  const ftsQuery = v.ftsOr ? buildKeywordQuery(searchQuery, 20, 3, v.ftsStopwords ? QUERY_STOPWORDS : undefined) : searchQuery.replace(/['"*()]/g, ' ').trim();
 
   // EXPERIMENTAL (2026-07-08), 4th candidate source: pure access-frequency ranking,
   // zero embeddings involved. Heavily-reinforced memories (high access_count) are
@@ -467,7 +480,7 @@ export async function retrieve(
   }
 
   // Hot tier — inject recently stored/accessed memory IDs into candidate pool
-  const hotIds = await hotTierGet(env);
+  const hotIds = v.hotTier ? await hotTierGet(env) : [];
   const mergedSet = new Set(mergedIds);
   const hotOnlyIds = hotIds.filter(id => !mergedSet.has(id));
 
@@ -513,17 +526,18 @@ export async function retrieve(
   const clusterOnlyIds = clusterRoutedIds.filter(id => !results.matches.some(m => m.id === id));
   const hotAccessOnlyIds = hotAccessIds.filter(id => !results.matches.some(m => m.id === id));
   const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds, ...hotAccessOnlyIds])].slice(0, 120);
-  const placeholders = allIds.map(() => '?').join(',');
   const { clause: projectClause, param: projectParam } = projectScopeClause(project, strictProject);
   const nowSec = Math.floor(Date.now() / 1000);
-  const binds = projectParam ? [...allIds, projectParam, nowSec] : [...allIds, nowSec];
-  const rows = await env.DB.prepare(
+  // D1 caps a statement at 100 bound parameters and allIds can reach 120, so fetch in chunks.
+  // A single statement used to throw "too many SQL variables" once the pool got that large.
+  const rowChunks = await Promise.all(chunk(allIds, D1_ID_CHUNK).map(ids => env.DB.prepare(
     `SELECT id, text, domain, cluster_id, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp, last_accessed
-     FROM memories WHERE id IN (${placeholders}) ${projectClause} AND (valid_to IS NULL OR valid_to > ?)`
-  ).bind(...binds).all<{
+     FROM memories WHERE id IN (${ids.map(() => '?').join(',')}) ${projectClause} AND (valid_to IS NULL OR valid_to > ?)`
+  ).bind(...(projectParam ? [...ids, projectParam, nowSec] : [...ids, nowSec])).all<{
     id: string; text: string; domain: string; cluster_id: string | null; memory_type: string;
     sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number; last_accessed: number;
-  }>();
+  }>()));
+  const rows = { results: rowChunks.flatMap(r => r.results ?? []) };
 
   const cosineMap = new Map(results.matches.map(m => [m.id, m.score]));
   // Injected candidates (no real query cosine) get a SYNTHETIC score, kept in a separate
@@ -542,10 +556,10 @@ export async function retrieve(
   // Cluster bonus rewards coherent knowledge clusters over isolated matching facts.
   const clusterCohesionMap = new Map<string, number>(); // memory_id → cohesion bonus
   if (allIds.length > 0) {
-    const entPlaceholders = allIds.map(() => '?').join(',');
-    const entRows = await env.DB.prepare(
-      `SELECT memory_id, entity_id FROM memory_entities WHERE memory_id IN (${entPlaceholders})`
-    ).bind(...allIds).all<{ memory_id: string; entity_id: string }>().catch(() => ({ results: [] }));
+    const entChunks = await Promise.all(chunk(allIds, D1_ID_CHUNK).map(ids => env.DB.prepare(
+      `SELECT memory_id, entity_id FROM memory_entities WHERE memory_id IN (${ids.map(() => '?').join(',')})`
+    ).bind(...ids).all<{ memory_id: string; entity_id: string }>().catch(() => ({ results: [] as { memory_id: string; entity_id: string }[] }))));
+    const entRows = { results: entChunks.flatMap(r => r.results ?? []) };
 
     // Build bidirectional maps: entity→members, memory→entities
     const entityToMembers = new Map<string, Set<string>>();
@@ -595,7 +609,7 @@ export async function retrieve(
     const memSigma = safeDeserializeSigma(row.sigma_diagonal);
     const cosineSim = cosineMap.get(row.id) ?? 0;
     const syntheticCos = syntheticCosMap.get(row.id) ?? null;
-    const lastAccessed = row.last_accessed ?? row.timestamp ?? 0;
+    const lastAccessed = v.recencyCreated ? (row.timestamp ?? 0) : (row.last_accessed ?? row.timestamp ?? 0);
     const recency = Math.max(0, 1 - (nowSec - lastAccessed) / NINETY_DAYS);
     const accessFreq = Math.min(1, Math.log1p(row.access_count ?? 0) / Math.log1p(50));
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);

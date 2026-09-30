@@ -139,7 +139,7 @@ export default {
         const trace = q.trace === true ? {} as Record<string, unknown> : undefined;
         const rows = q.baseline === true
           ? await baselineRetrieve(q.query, topK, env, q.project ?? 'default', q.strict_project === true)
-          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen, trace });
+          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen, trace, variant: q.variant && typeof q.variant === 'object' ? q.variant : undefined });
         return new Response(JSON.stringify({
           mode: q.baseline === true ? 'baseline' : 'gaussian',
           frozen: q.baseline === true ? true : frozen, // baseline path never mutates regardless

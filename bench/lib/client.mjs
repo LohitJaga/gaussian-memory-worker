@@ -93,8 +93,9 @@ export function parseRetrieval(text) {
 // `text` here is the raw memory text (plus any [SUPERSEDED]/[CONTRADICTED] prefix),
 // NOT the full agent-facing block — token counts derived from it exclude the
 // [DOMAIN:]/Summary:/[SYNTHESIS] framing lines (roughly constant overhead).
-export async function retrieveStructured(query, { top_k = 8, domain, project, strict_project, baseline, frozen = true } = {}, env) {
+export async function retrieveStructured(query, { top_k = 8, domain, project, strict_project, baseline, frozen = true, variant } = {}, env) {
   const payload = { query, top_k, frozen };
+  if (variant) payload.variant = variant;
   if (domain) payload.domain = domain;
   if (project) payload.project = project;
   if (strict_project) payload.strict_project = true;
