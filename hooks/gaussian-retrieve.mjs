@@ -162,17 +162,6 @@ try {
   fs.mkdirSync(path.dirname(receiptFile), { recursive: true });
   fs.appendFileSync(receiptFile, JSON.stringify(receipt) + '\n');
 
-  // Rotate under an atomic mkdir lock — keep last 500. If the lock is held, skip.
-  const lock = receiptFile + '.lock';
-  let locked = false;
-  try { fs.mkdirSync(lock); locked = true; } catch { /* held by another hook */ }
-  if (locked) {
-    try {
-      const lines = fs.readFileSync(receiptFile, 'utf8').split('\n').filter(Boolean);
-      if (lines.length > 500) fs.writeFileSync(receiptFile, lines.slice(-500).join('\n') + '\n');
-    } catch { /* nothing to rotate */ }
-    try { fs.rmdirSync(lock); } catch { /* already gone */ }
-  }
 } catch { /* receipts are best-effort */ }
 
 process.exit(0);
