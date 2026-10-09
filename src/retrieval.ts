@@ -1025,7 +1025,7 @@ Write the one-sentence note the assistant probably saved earlier that this messa
     const probSets = answers.map(jr => (jr?.result?.answers?.best?.probabilities ?? jr?.answers?.best?.probabilities) as Record<string, number> | undefined).filter(Boolean) as Record<string, number>[];
     const probs = probSets.length ? Object.fromEntries(idx.map(k => [`n${k}`, probSets.reduce((sum, p) => sum + (p[`n${k}`] ?? 0), 0) / probSets.length])) : undefined;
     if (probs) {
-      head.forEach((c, k) => jevProb.set(c.id, probs[`n${k}`] ?? 0));
+      head.forEach((c, k) => { jevProb.set(c.id, probs[`n${k}`] ?? 0); });
       const topScore = head[0].score;
       const sorted = [...head].sort((a, b) => (jevProb.get(b.id) ?? 0) - (jevProb.get(a.id) ?? 0));
       sorted.forEach((c, i) => { c.score = topScore * (1 - 0.01 * i); });
@@ -1117,7 +1117,7 @@ Write the one-sentence note the assistant probably saved earlier that this messa
       .filter(c => allTemporalIds.has(c.id) && c.type === 'session' && !topIdSetTemp.has(c.id))
       .slice(0, 2);
     top.push(...missedTemporalSessions);
-    missedTemporalSessions.forEach(c => guaranteedTemporalIds.add(c.id));
+    missedTemporalSessions.forEach(c => { guaranteedTemporalIds.add(c.id); });
   }
 
   // Injected-source guarantee (2026-07-09, experiments 3/4 redesigned): the adaptive
