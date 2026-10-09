@@ -1,12 +1,12 @@
 import type { Env } from './types';
 import { TOOLS, handleToolCall, drainPendingIngest } from './tools';
-import { embed } from './embed';
+import { embed, batchEmbed } from './embed';
 import { initialSigma, serializeSigma } from './gaussian';
 import {
   pruneJunkMemories, updateDecay, deduplicateRecentMemories,
   deduplicateColdMemories, cleanupSingletons, refreshStaleDomainSummaries,
   cronRebuildBatch, synthesizeIdentityProfile, consolidateColdMemories,
-  cacheDuplicateReport,
+  cacheDuplicateReport, syncExpansions,
 } from './cron';
 import { processPendingEntityQueue } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
@@ -139,7 +139,7 @@ export default {
         const trace = q.trace === true ? {} as Record<string, unknown> : undefined;
         const rows = q.baseline === true
           ? await baselineRetrieve(q.query, topK, env, q.project ?? 'default', q.strict_project === true)
-          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen, trace, variant: q.variant && typeof q.variant === 'object' ? q.variant : undefined });
+          : await retrieve(q.query, q.domain ?? null, topK, env, q.project ?? 'default', q.strict_project === true, { frozen, trace, variant: q.variant && typeof q.variant === 'object' ? q.variant : undefined, context: typeof q.context === 'string' ? q.context : undefined });
         return new Response(JSON.stringify({
           mode: q.baseline === true ? 'baseline' : 'gaussian',
           frozen: q.baseline === true ? true : frozen, // baseline path never mutates regardless
@@ -147,6 +147,48 @@ export default {
           rows,
           ...(trace ? { trace } : {}),
         }), { headers: JSON_HEADERS });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
+      }
+    }
+
+    // Bench-only embedding endpoint (2026-10-09): lets offline index experiments embed query and
+    // expansion text with the same BGE model the worker uses, behind the same AUTH_TOKEN.
+    if (url.pathname === '/bench/embed') {
+      const q = body ?? {};
+      if (!Array.isArray(q.texts) || q.texts.length === 0 || q.texts.length > 100) {
+        return new Response(JSON.stringify({ error: 'texts (1-100 strings) is required' }), { status: 400, headers: JSON_HEADERS });
+      }
+      try {
+        const vecs = await batchEmbed(q.texts.map((t: unknown) => String(t)), env);
+        return new Response(JSON.stringify({ vectors: vecs.map(v => Array.from(v)) }), { headers: JSON_HEADERS });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
+      }
+    }
+
+    // Bench-only manual trigger for the nightly expansion sync (fills memories_exp_fts gaps now
+    // instead of waiting for cron). Touches memories_exp_fts only.
+    if (url.pathname === '/bench/sync-expansions') {
+      const limit = Math.min(500, Number((body ?? {}).limit) || 100);
+      try {
+        return new Response(JSON.stringify(await syncExpansions(env, limit)), { headers: JSON_HEADERS });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
+      }
+    }
+
+    // Bench-only raw Workers AI pass-through (2026-10-09): non-chat models such as typesafe/jev take
+    // their own input shape ({ state, questions }), so this forwards { model, input } unchanged.
+    if (url.pathname === '/bench/ai') {
+      const q = body ?? {};
+      if (typeof q.model !== 'string' || !q.input || typeof q.input !== 'object') {
+        return new Response(JSON.stringify({ error: 'model (string) and input (object) are required' }), { status: 400, headers: JSON_HEADERS });
+      }
+      try {
+        const t0 = Date.now();
+        const result = await env.AI.run(q.model as any, q.input);
+        return new Response(JSON.stringify({ model: q.model, ms: Date.now() - t0, result }), { headers: JSON_HEADERS });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
       }
@@ -286,6 +328,8 @@ export default {
     // neuron budget. Capped per run (see PENDING_INGEST_DRAIN_CAP in tools.ts) so a large
     // backlog can't itself burn through the whole day's quota in one cron tick.
     await run('drainPendingIngest', () => drainPendingIngest(env));
+    // After the drain on purpose: optional enrichment, time-boxed to 60 s, never ahead of real writes.
+    await run('syncExpansions', () => syncExpansions(env, 100));
   },
 };
 

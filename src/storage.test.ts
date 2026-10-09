@@ -363,3 +363,32 @@ describe('selectMergeCandidate', () => {
     expect(r.bestId).toBeNull();
   });
 });
+
+// ── jevMergeDecision (store-time merge decision, 2026-10-09) ────────────────
+import { jevMergeDecision } from './storage';
+
+describe('jevMergeDecision', () => {
+  const envWith = (run: (...a: any[]) => any) => ({ AI: { run }, JEV_RERANK: 'on' }) as any;
+
+  it('returns null without calling the model when JEV_RERANK is not "on" (opt-in)', async () => {
+    let called = false;
+    const env = { AI: { run: async () => { called = true; return {}; } } } as any;
+    expect(await jevMergeDecision('a', 'b', env)).toBeNull();
+    expect(called).toBe(false);
+  });
+
+  it('returns the choice Jev made', async () => {
+    const env = envWith(async () => ({ result: { answers: { action: { choice: 'same', confidence: 0.9 } } } }));
+    expect(await jevMergeDecision('a', 'b', env)).toBe('same');
+  });
+
+  it('returns null when the call fails, so the caller falls back to the σ gate', async () => {
+    const env = envWith(async () => { throw new Error('2021: Insufficient AI Gateway credits'); });
+    expect(await jevMergeDecision('a', 'b', env)).toBeNull();
+  });
+
+  it('returns null for an unknown label', async () => {
+    const env = envWith(async () => ({ result: { answers: { action: { choice: 'merge_everything' } } } }));
+    expect(await jevMergeDecision('a', 'b', env)).toBeNull();
+  });
+});

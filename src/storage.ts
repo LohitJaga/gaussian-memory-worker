@@ -279,6 +279,51 @@ export function normalizeForExactMatch(s: string): string {
 //    rows that later flood retrieval) and a strict one (0.97) otherwise. Reads
 //    cluster_id from D1 rows, not Vectorize metadata — cluster_id isn't written to
 //    Vectorize at all (see microcluster.ts), and D1 is read-after-write consistent.
+// Store-time relationship between a new note and its nearest existing note, decided by Jev.
+// Returns null on any error or after 2 s so the caller falls back to the σ gate.
+export async function jevMergeDecision(newText: string, existingText: string, env: Env): Promise<'same' | 'update' | 'adds_detail' | 'different' | null> {
+  if (env.JEV_RERANK !== 'on') return null; // opt-in; null keeps the σ-gate behaviour
+  const call = (env.AI.run as any)('typesafe/jev', {
+    state: `An AI assistant is saving a new note about its user and found a similar existing note.\nNew note: "${newText.slice(0, 1200)}"\nExisting note: "${existingText.slice(0, 1200)}"`,
+    questions: { action: { type: 'choice', instructions: 'How does the new note relate to the existing note?', criteria: {
+      same: 'Same fact restated in different words; nothing new or changed',
+      update: 'Same subject, but a fact, number, date, status or plan changed, so the existing note is now out of date',
+      adds_detail: 'Same subject; the new note adds information without changing anything in the existing note',
+      different: 'A different subject or fact; both should be kept separately',
+    } } },
+  }).catch((e: unknown) => { console.warn('[jev] merge decision failed:', String(e).slice(0, 200)); return null; });
+  // 1 s: this runs before any write on the store path, inside the post-tool hook's 4 s client timeout.
+  const r = await Promise.race([call, new Promise(res => setTimeout(() => res('timeout'), 1000))]) as any;
+  if (r === 'timeout') { console.warn('[jev] merge decision timed out'); return null; }
+  const choice = r?.result?.answers?.action?.choice ?? r?.answers?.action?.choice;
+  return ['same', 'update', 'adds_detail', 'different'].includes(choice) ? choice : null;
+}
+
+// Contradiction-judge verdict from Jev, same verdict set as the Llama judge in memory_judge.
+// The newer memory is stated so "supersedes" follows the newer-wins rule. null → Llama fallback.
+export async function jevJudgeVerdict(
+  a: { text: string; timestamp: number }, b: { text: string; timestamp: number }, env: Env,
+): Promise<{ verdict: 'supersedes' | 'conflicts_with' | 'extends' | 'compatible'; confidence: number } | null> {
+  if (env.JEV_RERANK !== 'on') return null; // opt-in; null keeps the Llama judge
+  const aNewer = (a.timestamp ?? 0) >= (b.timestamp ?? 0);
+  const call = (env.AI.run as any)('typesafe/jev', {
+    state: `Memory A (stored ${aNewer ? 'later' : 'earlier'}): "${a.text.slice(0, 1200)}"\nMemory B (stored ${aNewer ? 'earlier' : 'later'}): "${b.text.slice(0, 1200)}"`,
+    questions: { rel: { type: 'choice', instructions: 'What is the relationship between memory A and memory B? If one replaces the other, the later one supersedes the earlier one.', criteria: {
+      // Direction-neutral: the flagged-rows path passes the OLDER memory as A; resolveSupersedeDirection
+      // picks the direction from timestamps afterwards.
+      supersedes: 'One memory is a newer or more accurate version of the other and replaces it (a fact, number, date, status or plan changed)',
+      conflicts_with: 'A and B make contradictory claims about the same thing at the same time',
+      extends: 'A adds detail about the same thing without contradicting B',
+      compatible: 'A and B are about different things, with no conflict',
+    } } },
+  }).catch((e: unknown) => { console.warn('[jev] judge failed, falling back to Llama:', String(e).slice(0, 200)); return null; });
+  const r = await Promise.race([call, new Promise(res => setTimeout(() => res('timeout'), 2500))]) as any;
+  if (r === 'timeout') { console.warn('[jev] judge timed out, falling back to Llama'); return null; }
+  const ans = r?.result?.answers?.rel ?? r?.answers?.rel;
+  if (!ans || !['supersedes', 'conflicts_with', 'extends', 'compatible'].includes(ans.choice)) return null;
+  return { verdict: ans.choice, confidence: Math.min(1, Math.max(0, Number(ans.confidence) || 0.5)) };
+}
+
 export interface MergeCandidateRow { sigma_diagonal: string; text: string; cluster_id: string | null; project: string }
 export function selectMergeCandidate(
   matches: { id: string; score?: number }[],
@@ -523,7 +568,30 @@ export async function storeMemory(
   // Reads cluster_id from rowMap (D1), same reasoning as the ceiling check above.
   const bestRow = bestId ? rowMap.get(bestId) : undefined;
   const mergeThreshold = (bestRow && clusterId && bestRow.cluster_id === clusterId) ? 0.20 : 0.08;
-  if (bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold)) {
+  // Merge decision by Jev (2026-10-09) when the nearest memory is actually close. The σ gate below
+  // passes the new mu twice, so its distance is σ-only and only never-touched (σ = 0.50) memories can
+  // ever merge; repeats of anything else spawn duplicates (23% of memories have a near-duplicate).
+  // On 160 labeled pairs Jev got 94% (same 100%, update 90%, adds-detail 90%, different 98%) and never
+  // merged two different facts. "update" flags the old memory so the nightly judge can supersede it;
+  // "adds_detail"/"different" spawn as before; any Jev failure falls back to the σ gate.
+  const bestScore = bestId ? (matches.find(m => m.id === bestId)?.score ?? 0) : 0;
+  // Session summaries never take the Jev path: two days' summaries can look "the same" to it.
+  const jevAction = bestId && bestRow && bestScore >= 0.80 && memoryType !== 'session' ? await jevMergeDecision(text, bestRow.text, env) : null;
+  if (jevAction === 'update' && bestId) {
+    await env.DB.prepare('UPDATE memories SET contradiction_flag = 1 WHERE id = ?').bind(bestId).run().catch(() => {});
+  }
+  // Jev "same" means nothing new, so the stored text, domain and vector stay as they are (a shorter
+  // restatement must not overwrite a richer original); only confidence and access move, like the
+  // exact-duplicate path above.
+  if (jevAction === 'same' && bestId && bestSigma) {
+    const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
+    await env.DB.prepare(
+      'UPDATE memories SET sigma_diagonal = ?, last_accessed = ?, access_count = access_count + 1 WHERE id = ?'
+    ).bind(serializeSigma(newSigma), now, bestId).run();
+    return { action: 'merged', id: bestId };
+  }
+  const doMerge = jevAction ? jevAction === 'same' : Boolean(bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold));
+  if (bestId && bestSigma && doMerge) {
     const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
 
     // Preserve 'session' type on merge — session summaries must not silently become episodic
@@ -584,8 +652,9 @@ export async function storeMemory(
   ]);
 
   // Surface near-miss candidates (score > 0.85, not merged) for memory_judge
+  // A Jev "update" below 0.85 cosine is queued too, so the judge sees the pair with the new memory as A.
   const nearMissIds = matches
-    .filter(m => m.score > 0.85 && m.id !== id)
+    .filter(m => (m.score > 0.85 || (jevAction === 'update' && m.id === bestId)) && m.id !== id)
     .map(m => m.id);
 
   let conflict_candidates: Array<{ id: string; text: string; score: number }> | undefined;

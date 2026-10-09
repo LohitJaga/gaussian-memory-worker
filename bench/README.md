@@ -58,13 +58,13 @@ mistake I made and had to correct.
 
 ## What the numbers actually say
 
-The headline figures are 92% recall on exact-phrasing queries, 100% on
-paraphrased, 83% on vague. The comparison that matters is the vague set, where
-a naive-cosine baseline on the same corpus scores 0.38.
+On the 53-query hand-labeled gold set, measured on the live deployment
+(2026-10-09, about 10 memories returned by each system): recall 0.83 vs 0.62
+for naive cosine, MRR 0.79 vs 0.43. By category: exact/paraphrased 0.96 vs
+0.80, vague 0.92 vs 0.67 (12 queries, so directional), multi-fact 0.61 vs 0.36.
 
-Multi-fact synthesis queries score 0.33 across 20 queries. That is the weak
-spot and it is reported here because leaving it out would make the other three
-numbers mean less.
+Multi-fact synthesis is still the weak spot. It is reported here because
+leaving it out would make the other numbers mean less.
 
 All of it is self-measured on one store. It is not a public benchmark and it
 should not be read as one.

@@ -115,3 +115,11 @@ CREATE TABLE IF NOT EXISTS pending_ingest (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_ingest_created ON pending_ingest(created_at);
+
+-- Write-time key expansions (casual later references + keywords per memory), searched alongside
+-- memories_fts. Filled by the nightly syncExpansions cron step; deleted rows are swept there too.
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_exp_fts USING fts5(
+  id UNINDEXED,
+  text,
+  project UNINDEXED
+);

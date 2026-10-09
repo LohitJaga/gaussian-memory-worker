@@ -7,6 +7,12 @@ compatibility_flags = ["nodejs_compat"]
 #   wrangler secret put AUTH_TOKEN
 # Generate one with: openssl rand -hex 32
 
+[vars]
+# Jev decision model (rerank, merge decisions, contradiction judge) and write-time key expansions.
+# Jev bills through prepaid AI Gateway credits (dashboard → AI → AI Gateway → Credits, about $0.001
+# per prompt). Set to "on" once credits are added; until then those calls are skipped.
+JEV_RERANK = "off"
+
 [ai]
 binding = "AI"
 

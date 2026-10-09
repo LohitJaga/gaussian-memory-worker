@@ -8,8 +8,34 @@ import { HOME, loadEnv, readStdin, detectProject, callTool } from './gaussian-li
 
 const input = await readStdin();
 let prompt = '';
-try { prompt = String(JSON.parse(input).prompt || ''); } catch { /* not JSON */ }
+let transcriptPath = '';
+try { const j = JSON.parse(input); prompt = String(j.prompt || ''); transcriptPath = String(j.transcript_path || ''); } catch { /* not JSON */ }
 if (!prompt) process.exit(0);
+
+// End of the previous assistant reply, so vague prompts ("this", "that thing") resolve against the
+// conversation. Reads only the transcript's tail. Handles Claude Code (type: assistant) and Codex
+// rollout (response_item / message / role: assistant) lines; any failure just means no context.
+function previousAssistantTurn(file) {
+  try {
+    const size = fs.statSync(file).size;
+    const fd = fs.openSync(file, 'r');
+    const len = Math.min(size, 512 * 1024);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n').reverse();
+    for (const line of lines) {
+      let o; try { o = JSON.parse(line); } catch { continue; }
+      const blocks = o?.type === 'assistant' ? o.message?.content
+        : o?.type === 'response_item' && o.payload?.role === 'assistant' ? o.payload.content : null;
+      if (!Array.isArray(blocks)) continue;
+      const text = blocks.filter(b => b?.type === 'text' || b?.type === 'output_text').map(b => b.text || '').join('\n').trim();
+      if (text) return text.slice(-600);
+    }
+  } catch { /* no transcript */ }
+  return '';
+}
+const prevTurn = transcriptPath ? previousAssistantTurn(transcriptPath) : '';
 
 const { worker, token } = loadEnv();
 if (!worker) process.exit(0);
@@ -33,9 +59,11 @@ try {
   }
 } catch { /* bootstrap is best-effort */ }
 
-function queryMemory(query, context, top_k = 10) {
-  const args = context ? { query, top_k, project, context } : { query, top_k, project };
-  return callTool(worker, token, 'memory_retrieve', args, 5000);
+function queryMemory(query, context, top_k = 10, rerank = true) {
+  const args = { query, top_k, project, ...(context ? { context } : {}), ...(rerank ? {} : { rerank: false }) };
+  // 8 s: the reranked retrieval runs ~3.3 s warm; 5 s lost every result on a cold start. Claude Code
+  // sets no hook timeout and Codex allows 15 s, so this stays inside both.
+  return callTool(worker, token, 'memory_retrieve', args, 8000);
 }
 
 // Query routing: project-anchored in a git repo, prompt-word-based otherwise.
@@ -77,56 +105,38 @@ if (prompt.length < 25) {
 // match and more likely to have several distinct relevant hits worth keeping room for.
 const start = Date.now();
 const [r1, r2, r3] = await Promise.all([
-  queryMemory(q1, prompt, 10),
+  queryMemory(q1, prevTurn, 10),
+  // Ambient queries keep the rerank stage: skipping it (rerank:false) saved a third of the Jev cost but
+  // measurably hurt the injected set (real-prompt sim 2026-10-09: nDCG -0.024 strict), since their one
+  // line each is then picked by score alone.
   queryMemory(q2, '', 6),
   queryMemory(q3, '', 6),
 ]);
 const latencyMs = Date.now() - start;
 
 const scoreOf = (l) => { const m = l.match(/^\[([0-9.]+)\]/); return m ? parseFloat(m[1]) : 0; };
-
-// Merge → drop identity domain (CLAUDE.md owns it) → keep scored lines → score gate 0.70
-// → sort high→low → exact-line dedup → near-dup dedup on memory text (first 80 chars after
-// '● ') → cap session-type lines at 3 → top 12.
-let merged = [r1, r2, r3].filter(Boolean).join('\n').split('\n')
-  .filter(l => !l.includes('(identity/'))
-  .filter(l => /^\[[0-9]/.test(l))
-  .filter(l => scoreOf(l) >= 0.70);
-merged.sort((a, b) => scoreOf(b) - scoreOf(a));
-
-const seenLine = new Set();
-merged = merged.filter(l => {
-  if (seenLine.has(l)) return false;
-  seenLine.add(l);
-  return true;
-});
-
+// A result line starts with its score and project, e.g. "[1.23] (project ...". The looser /^\[[0-9]/
+// also admitted continuation lines of multi-line memories that happen to start "[22] ...".
+// Identity-domain lines are dropped (CLAUDE.md owns identity); score gate 0.70.
+const isResult = (l) => /^\[[0-9]+\.[0-9]+\] \(/.test(l) && !/\(identity[ /]/.test(l) && scoreOf(l) >= 0.70;
+// The tool groups its output by domain; the score carries the rank, so sort by it.
+const linesOf = (r) => (r || '').split('\n').filter(isResult).sort((a, b) => scoreOf(b) - scoreOf(a));
+// Near-dup key: memory text after the confidence marker (● ◑ ○), first 80 chars.
+const textKey = (l) => { const m = l.match(/[●◑○]\s(.*)/); return m ? m[1].slice(0, 80) : l; };
 const seenText = new Set();
-merged = merged.filter(l => {
-  // Text follows the confidence marker (● ◑ ○); keying on '●' alone gave every ◑/○ line the
-  // same empty key, so only the first of them survived.
-  const m = l.match(/[●◑○]\s(.*)/);
-  const key = m ? m[1].slice(0, 80) : l;
-  if (seenText.has(key)) return false;
-  seenText.add(key);
-  return true;
-});
+const take = (l) => { const k = textKey(l); if (seenText.has(k)) return false; seenText.add(k); return true; };
+
+// The prompt's own matches first, in rank order, then one line from each ambient query (Q2 recent
+// decisions, Q3 conventions). Merging all three by score put ambient lines above the prompt's best
+// match: on 250 real prompts (2026-10-09 simulation) the first injected memory was useful 62% of the
+// time score-merged vs 70% prompt-first, with the same coverage.
+let merged = linesOf(r1).filter(take);
+for (const r of [r2, r3]) { const pick = linesOf(r).find(take); if (pick) merged.push(pick); }
 
 let sessionCount = 0;
 merged = merged.filter(l => {
   if (/\/session\)/.test(l)) { sessionCount++; if (sessionCount > 3) return false; }
   return true;
-});
-
-// Q2/Q3 are ambient context; uncapped they crowded prompt matches out of the 12 slots
-// (simulated on frozen gold 2026-10-08: injected recall 0.642 uncapped, 0.679 at 1 line each).
-const q1Lines = new Set((r1 || '').split('\n'));
-const ambientCount = new Map();
-merged = merged.filter(l => {
-  if (q1Lines.has(l)) return true;
-  const src = (r2 || '').split('\n').includes(l) ? 2 : 3;
-  ambientCount.set(src, (ambientCount.get(src) ?? 0) + 1);
-  return ambientCount.get(src) <= 1;
 });
 merged = merged.slice(0, 12);
 const mergedText = merged.join('\n');

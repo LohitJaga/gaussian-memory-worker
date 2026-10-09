@@ -535,3 +535,44 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
 
   return { archived: archived.length };
 }
+
+// Write-time key expansions (2026-10-09): memories_exp_fts holds, per memory, a few casual ways the
+// user might later refer to it plus keywords/synonyms, searched alongside memories_fts so vague,
+// differently-worded prompts can still reach the right memory. Nightly: drop rows whose memory is
+// gone (this table only), then expand up to `limit` memories that have none yet, 5 per model call.
+export async function syncExpansions(env: Env, limit = 100, budgetMs = 60_000): Promise<{ removed: number; added: number }> {
+  if (env.JEV_RERANK !== 'on') return { removed: 0, added: 0 }; // expansions are only searched when Jev is on
+  const deadline = Date.now() + budgetMs; // time-boxed so it can't eat the scheduled run's 15 min
+  const del = await env.DB.prepare('DELETE FROM memories_exp_fts WHERE id NOT IN (SELECT id FROM memories)').run();
+  const removed = del.meta?.changes ?? 0;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const rows = await env.DB.prepare(
+    `SELECT id, text, project FROM memories
+     WHERE id NOT IN (SELECT id FROM memories_exp_fts) AND (valid_to IS NULL OR valid_to > ?)
+     ORDER BY timestamp DESC LIMIT ?`
+  ).bind(nowSec, limit).all<{ id: string; text: string; project: string | null }>();
+  const todo = rows.results ?? [];
+  let added = 0;
+  for (let i = 0; i < todo.length && Date.now() < deadline; i += 5) {
+    const batch = todo.slice(i, i + 5);
+    const list = batch.map((m, k) => `[${k}] ${m.text.replace(/\s+/g, ' ').slice(0, 400)}`).join('\n');
+    const prompt = `These are notes an AI coding assistant saved about its user (a developer and student). For each note, write:\n- "q": 3 short, casual messages (lowercase, 3-10 words) the user might type weeks later when vaguely referring back to it, using different words than the note where natural\n- "k": 5 keywords or short phrases, including synonyms and the broader topic\n\nNotes:\n${list}\n\nReturn ONLY JSON like {"0": {"q": ["..", "..", ".."], "k": ["..", "..", "..", "..", ".."]}, "1": {...}}.`;
+    let parsed: Record<string, { q?: unknown[]; k?: unknown[] }> = {};
+    try {
+      const res = await callAI(env, '@cf/meta/llama-4-scout-17b-16e-instruct', { messages: [{ role: 'user', content: prompt }], max_tokens: 900 }) as any;
+      const r = res?.response;
+      parsed = r && typeof r === 'object' ? r : JSON.parse(String(r ?? '').match(/\{[\s\S]*\}/)?.[0] ?? '{}');
+    } catch { continue; }
+    const stmts: D1PreparedStatement[] = [];
+    batch.forEach((m, k) => {
+      const e = parsed[k] ?? parsed[String(k)];
+      if (!e || !Array.isArray(e.q)) return;
+      const text = [...e.q.slice(0, 3), ...(Array.isArray(e.k) ? e.k.slice(0, 5) : [])].map(String).join(' . ');
+      stmts.push(env.DB.prepare('INSERT INTO memories_exp_fts (id, text, project) VALUES (?, ?, ?)').bind(m.id, text, m.project ?? 'default'));
+    });
+    if (stmts.length) {
+      try { await env.DB.batch(stmts); added += stmts.length; } catch (e) { console.warn('[syncExpansions] insert batch failed:', String(e).slice(0, 200)); }
+    }
+  }
+  return { removed, added };
+}

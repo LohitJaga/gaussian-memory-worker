@@ -1,5 +1,6 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
+import { callAI } from './ai';
 import { hotTierGet, hotTierAddMany, buildKeywordQuery, QUERY_STOPWORDS } from './storage';
 import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
@@ -295,6 +296,8 @@ export type RetrievalVariant = {
   ftsOr?: boolean; ftsStopwords?: boolean; hotTier?: boolean; recencyCreated?: boolean; dedupCos?: number;
   typeCap?: number; resort?: boolean; entityFix?: boolean; trim?: number;
   weights?: number[]; noBhatt?: boolean; normFix?: boolean; pool50?: boolean; entDistinct?: boolean;
+  qSigma?: number; noGuarantee?: boolean; noAccessFreq?: boolean; bhatt?: number[]; clarity?: boolean; noSigma?: boolean; sigmaByClarity?: boolean;
+  rawCos?: boolean; prf?: number; hyde?: boolean; rerank?: number; lanes?: number; priorScale?: boolean; jev?: number; jevCut?: number; wide?: boolean; jevMeta?: boolean; expFts?: boolean; ctxFts?: boolean; jevAvg?: boolean; jevFast?: number; expCap?: number; jev2?: boolean;
 };
 // Defaults changed 2026-10-08 after the orphan-vector cleanup, each measured on its own against
 // frozen gold (53 queries) and through a hook simulation (BENCHMARKING.md 2026-10-08):
@@ -304,10 +307,27 @@ export type RetrievalVariant = {
 // recency/access 0.27/0.08→0.10/0.05 (both mostly measured past retrieval), normFix
 // (keyword-only candidates were min-maxed as cos=0). pool50/entDistinct/noHot measured
 // neutral or worse and stay off. DEDUP_COS itself stays 0.85 for the cron duplicate report.
+// Defaults changed 2026-10-09 after a real-prompt eval (250 prompts from Lohit's transcripts, LLM
+// relevance judgments with a reliability check, leak-filtered, near-duplicate-aware) plus the frozen
+// gold and a 480-query synthetic set (BENCHMARKING.md 2026-10-09). On; everything else stays a bench switch:
+//   sigmaByClarity  memory σ only counts when the top match isn't near-verbatim (σ gate was hiding
+//                   rarely-used memories on precise queries: synthetic precise recall 0.86 → 0.98)
+//   wide            vector top 100 + 60 keyword hits, so the reranker sees more candidates
+//   jev 80          TypeSafe's Jev reads the query and 80 candidate notes and picks (gold MRR 0.52 → 0.76)
+//   jevMeta         notes carry age/domain/type; the state carries the previous assistant turn
+//   jevAvg          two Jev calls on reversed orders, averaged (cancels position sensitivity)
+//   expFts, ctxFts  write-time expansions table and previous-turn keywords in the BM25 query
+//   trim 10         at most 10 notes (or top_k if larger); the 0.03 probability cutoff lost recall
+// Full-hook simulation, real prompts: first injected memory useful 53% → 73%, useful share 33% → 57%.
 export const DEFAULT_VARIANT: Required<RetrievalVariant> = {
   ftsOr: true, ftsStopwords: true, hotTier: true, recencyCreated: false, dedupCos: 0.90,
-  typeCap: 12, resort: true, entityFix: true, trim: 0,
+  typeCap: 12, resort: true, entityFix: true, trim: 10,
   weights: [0.70, 0.15, 0.10, 0.05], noBhatt: false, normFix: true, pool50: false, entDistinct: false,
+  // Bench-only ablation/fitting switches (2026-10-09): qSigma > 0 pins the query σ (turns the
+  // vagueness heuristic off), noGuarantee/noAccessFreq drop those candidate paths, bhatt is
+  // [base, slope, min, max] of the Bhattacharyya multiplier.
+  qSigma: 0, noGuarantee: false, noAccessFreq: false, bhatt: [0.70, 0.70, 0.70, 1.40], clarity: false, noSigma: false, sigmaByClarity: true,
+  rawCos: false, prf: 0, hyde: false, rerank: 0, lanes: 0, priorScale: false, jev: 80, jevCut: 0, wide: true, jevMeta: true, expFts: true, ctxFts: true, jevAvg: true, jevFast: 1, expCap: 0, jev2: false,
 };
 
 export async function retrieve(
@@ -323,11 +343,17 @@ export async function retrieve(
   // is answerable from data instead of deduction. No effect on scoring.
   // opts.variant: bench-only switches for A/B-testing scoring changes against the live store
   // in one deploy. Defaults are production behavior; agent calls never set it.
-  opts: { frozen?: boolean; trace?: Record<string, unknown>; variant?: RetrievalVariant } = {}
+  opts: { frozen?: boolean; trace?: Record<string, unknown>; variant?: RetrievalVariant; context?: string } = {}
 ): Promise<{ id: string; score: number; text: string; domain: string; type: string; activated?: boolean; sigma?: number }[]> {
   // Empty/whitespace query: embedding it is meaningless and may throw — return no results.
   if (!query?.trim()) return [];
   const v = { ...DEFAULT_VARIANT, ...opts.variant };
+  // Jev is opt-in (JEV_RERANK = "on"): it bills through AI Gateway credits. Without it, run the
+  // pipeline that was measured without a reranker (gated σ, no wide pool / trim / expansions), unless a
+  // bench variant asks for these explicitly.
+  if (env.JEV_RERANK !== 'on' && opts.variant?.jev === undefined) {
+    Object.assign(v, { jev: 0, jevAvg: false, wide: opts.variant?.wide ?? false, trim: opts.variant?.trim ?? 0, expFts: opts.variant?.expFts ?? false, ctxFts: opts.variant?.ctxFts ?? false });
+  }
 
   // Pure semantic retrieval — no LLM query rewriting.
   // Memories are stored with context-enriched text (via memory_auto_store context param),
@@ -355,7 +381,7 @@ export async function retrieve(
   // with a naive baseline on short casual queries, consistent with this never firing.
   const lengthSigma = 0.5 * Math.min(query.length / 300, 1.0);
   const specificityAdj = entityTokens.length > 0 ? -0.1 * Math.min(entityTokens.length, 2) : 0.05;
-  const querySigmaVal = Math.max(0.2, Math.min(0.8, 0.3 + lengthSigma + specificityAdj));
+  let querySigmaVal = v.qSigma > 0 ? v.qSigma : Math.max(0.2, Math.min(0.8, 0.3 + lengthSigma + specificityAdj));
 
   // Temporal cue parsing — "yesterday", "this week" etc. → timestamp window boost at score time.
   const temporalDaysMap: Record<string, number> = {
@@ -390,7 +416,18 @@ export async function retrieve(
   // DevDay") only matched memories containing every word, which is almost none; BM25
   // contributed nothing on most real queries (verified live 2026-09-30). Min length 3
   // keeps short acronyms (AWS, GCP, SQL) that matter in queries.
-  const ftsQuery = v.ftsOr ? buildKeywordQuery(searchQuery, 20, 3, v.ftsStopwords ? QUERY_STOPWORDS : undefined) : searchQuery.replace(/['"*()]/g, ' ').trim();
+  // ctxFts: keywords from the end of the previous assistant turn join the keyword query only
+  // (measured: context helps through BM25 and hurts inside the embedding). The prompt's own terms go
+  // first; context terms only fill the slots left, since buildKeywordQuery keeps the 20 longest terms and
+  // would otherwise drop short prompt terms ("jev", "d1") in favour of long context words.
+  const ftsStop = v.ftsStopwords ? QUERY_STOPWORDS : undefined;
+  let ftsQuery = v.ftsOr ? buildKeywordQuery(searchQuery, 20, 3, ftsStop) : searchQuery.replace(/['"*()]/g, ' ').trim();
+  if (v.ftsOr && v.ctxFts && opts.context) {
+    const promptTerms = ftsQuery ? ftsQuery.split(' OR ') : [];
+    const room = 20 - promptTerms.length;
+    const ctxTerms = buildKeywordQuery(opts.context.slice(-200), 20, 3, ftsStop).split(' OR ').filter(t => t && !promptTerms.includes(t)).slice(0, Math.max(0, room));
+    ftsQuery = [...promptTerms, ...ctxTerms].join(' OR ');
+  }
 
   // EXPERIMENTAL (2026-07-08), 4th candidate source: pure access-frequency ranking,
   // zero embeddings involved. Heavily-reinforced memories (high access_count) are
@@ -407,13 +444,24 @@ export async function retrieve(
   // project-scoped row fetch below. Harmless (no cross-project leak, since the row
   // fetch always filters), but wasteful and meant this source could contribute
   // nothing useful for any project other than the dominant one.
-  const useAccessFrequency = querySigmaVal > 0.35 || entityTokens.length === 0;
+  // clarity mode decides after the vector fetch, so the cheap access-frequency query always runs.
+  const useAccessFrequency = !v.noAccessFreq && (v.clarity || querySigmaVal > 0.35 || entityTokens.length === 0);
   const { clause: afClause, param: afParam } = projectScopeClause(project, strictProject);
   const afBinds = afParam ? [afParam] : [];
   const { clause: ftsProjectClause, param: ftsProjectParam } = projectScopeClause(project, strictProject);
-  const ftsBinds = ftsProjectParam ? [ftsQuery, ftsProjectParam, topK * 4] : [ftsQuery, topK * 4];
+  const ftsLimit = v.wide ? 60 : topK * 4;
+  const ftsBinds = ftsProjectParam ? [ftsQuery, ftsProjectParam, ftsLimit] : [ftsQuery, ftsLimit];
 
-  const [vecFinal, ftsResults, hotAccessRows] = await Promise.all([
+  // Started alongside the first stage (they only need qvec / ftsQuery), awaited where they're merged.
+  const expPromise = v.expFts && ftsQuery.length >= 3
+    ? env.DB.prepare(
+        `SELECT id, -bm25(memories_exp_fts) as bm25_score FROM memories_exp_fts WHERE memories_exp_fts MATCH ? ${ftsProjectClause} ORDER BY rank LIMIT ?`
+      ).bind(...ftsBinds).all<{ id: string; bm25_score: number }>().catch(() => ({ results: [] as { id: string; bm25_score: number }[] }))
+    : null;
+  const widePromise = v.wide
+    ? queryVectorizeScoped(env, Array.from(qvec), { topK: 100, returnValues: false, returnMetadata: 'indexed' }, project, strictProject).catch(() => null)
+    : null;
+  let [vecFinal, ftsResults, hotAccessRows] = await Promise.all([
     queryVectorizeScoped(env, Array.from(qvec), queryOpts, project, strictProject),
     ftsQuery.length >= 3
       ? env.DB.prepare(
@@ -425,7 +473,83 @@ export async function retrieve(
           .bind(...afBinds).all<{ id: string }>().catch(() => ({ results: [] }))
       : Promise.resolve({ results: [] as { id: string }[] }),
   ]);
-  const hotAccessIds = (hotAccessRows.results ?? []).map(r => r.id);
+  let hotAccessIds = (hotAccessRows.results ?? []).map(r => r.id);
+
+  // expFts (bench switch): also search memories_exp_fts, the write-time expansions (casual later
+  // references + keywords per memory), and merge by best BM25 so vocabulary-gap matches can enter.
+  if (expPromise) {
+    const exp = await expPromise;
+    const best = new Map<string, number>();
+    // expCap (bench switch): at most N expansion-only hits, so they can't crowd the reranker's pool.
+    const mainIds = new Set((ftsResults.results ?? []).map(r => r.id));
+    let expOnly = 0;
+    const expRows = (exp.results ?? []).filter(r => mainIds.has(r.id) || !(v.expCap > 0) || ++expOnly <= v.expCap);
+    for (const r of [...(ftsResults.results ?? []), ...expRows]) best.set(r.id, Math.max(best.get(r.id) ?? -Infinity, r.bm25_score ?? 0));
+    ftsResults = { ...ftsResults, results: [...best.entries()].sort((a, b) => b[1] - a[1]).map(([id, bm25_score]) => ({ id, bm25_score })) } as typeof ftsResults;
+  }
+
+  // clarity (bench switch, 2026-10-09): measure query vagueness from the retrieval itself instead
+  // of the length/entity heuristic. The heuristic scored AUC 0.49 at separating vague from precise
+  // queries (480 synthetic queries); top-1 raw cosine scored 0.996. Map top-1 cosine to σ
+  // (0.90 → 0.2 precise, 0.68 → 0.8 vague), widen the vector pool when the measured σ is vague,
+  // and keep the access-frequency source only when the query isn't clearly precise.
+  // sigmaByClarity (bench switch): σ acts as a usage prior only when the match itself is uncertain.
+  // A near-verbatim top-1 match (cosine >= 0.85, fixed a priori) is trusted and σ gets no say.
+  const top1Cos = Math.max(0, ...(vecFinal.matches ?? []).map(m => m.score ?? 0));
+  const noSig = v.noSigma || (v.sigmaByClarity && top1Cos >= 0.85);
+  if (v.clarity && !(v.qSigma > 0)) {
+    const top1 = top1Cos;
+    querySigmaVal = Math.max(0.2, Math.min(0.8, 0.2 + 0.6 * (0.90 - top1) / 0.22));
+    if (querySigmaVal > 0.6 && queryOpts.topK < 50) {
+      vecFinal = await queryVectorizeScoped(env, Array.from(qvec), { ...queryOpts, topK: 50 }, project, strictProject);
+    }
+    if (querySigmaVal <= 0.35 && entityTokens.length > 0) hotAccessIds = [];
+  }
+
+  // wide (bench switch): a second vector query for the top 100 ids (no values, so the 50 cap doesn't
+  // apply) widens the candidate pool for a downstream reranker such as jev.
+  const more = widePromise ? await widePromise : null;
+  if (more) {
+    const have = new Set((vecFinal.matches ?? []).map(m => m.id));
+    const matches = [...(vecFinal.matches ?? []), ...(more.matches ?? []).filter(m => !have.has(m.id))];
+    vecFinal = { matches, count: matches.length } as VectorizeMatches;
+  }
+  // prf / hyde (bench switches, 2026-10-09), both only when the top match is not near-verbatim:
+  // prf blends the query with its top-3 hits (Rocchio) and searches again; hyde has a small LLM
+  // write the memory the query probably refers to and searches with that. Hits found this way
+  // keep the best similarity to either vector, so they compete on the same scale.
+  const extraVecs: Float32Array[] = [];
+  if (top1Cos < 0.85 && v.prf > 0) {
+    const tops = (vecFinal.matches ?? []).slice(0, 3).filter(m => m.values && (m.values as ArrayLike<number>).length);
+    if (tops.length) {
+      const q2 = Array.from(qvec);
+      for (const m of tops) { const mv = Array.from(m.values as ArrayLike<number>); for (let i = 0; i < q2.length; i++) q2[i] += (v.prf / tops.length) * mv[i]; }
+      const n = Math.sqrt(q2.reduce((a, x) => a + x * x, 0)) || 1;
+      extraVecs.push(new Float32Array(q2.map(x => x / n)));
+    }
+  }
+  if (top1Cos < 0.85 && v.hyde) {
+    const r = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+      messages: [{ role: 'user', content: `A developer typed this to their AI coding assistant: "${query}"
+Write the one-sentence note the assistant probably saved earlier that this message refers to. Output only the note.` }],
+      max_tokens: 60,
+    }).catch(() => null) as any;
+    const note = String(r?.response ?? '').trim();
+    if (note) extraVecs.push(await embed(note, env));
+  }
+  if (extraVecs.length) {
+    const merged = new Map<string, VectorizeMatch>();
+    for (const m of vecFinal.matches ?? []) merged.set(m.id, m);
+    for (const ev of extraVecs) {
+      const res = await queryVectorizeScoped(env, Array.from(ev), queryOpts, project, strictProject);
+      for (const m of res.matches ?? []) {
+        const prev = merged.get(m.id);
+        if (!prev || (m.score ?? 0) > (prev.score ?? 0)) merged.set(m.id, m);
+      }
+    }
+    const matches = [...merged.values()].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 50);
+    vecFinal = { matches, count: matches.length } as VectorizeMatches;
+  }
 
   // Cluster-routing (MICRO_VECTORIZE search-time consultation) — REMOVED 2026-07-09.
   // Two design attempts, both failed for principled reasons, not just bad luck:
@@ -465,7 +589,7 @@ export async function retrieve(
   // Build merged ID set sorted by RRF score, preserve vector metadata for top vector hits
   const mergedIds = [...rrfScores.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, topK * 4)
+    .slice(0, v.wide ? 120 : topK * 4)
     .map(([id]) => id);
 
   const results = vecFinal;
@@ -548,7 +672,7 @@ export async function retrieve(
   // (cluster-routing removed 2026-07-09 — clusterRoutedIds is always [] now, see above).
   const clusterOnlyIds = clusterRoutedIds.filter(id => !results.matches.some(m => m.id === id));
   const hotAccessOnlyIds = hotAccessIds.filter(id => !results.matches.some(m => m.id === id));
-  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds, ...hotAccessOnlyIds])].slice(0, 120);
+  const allIds = [...new Set([...hotOnlyIds.slice(0, 10), ...temporalOnlyIds.slice(0, 15), ...results.matches.map(m => m.id), ...ftsOnlyIds, ...clusterOnlyIds, ...hotAccessOnlyIds])].slice(0, v.wide ? 200 : 120);
   const { clause: projectClause, param: projectParam } = projectScopeClause(project, strictProject);
   const nowSec = Math.floor(Date.now() / 1000);
   // D1 caps a statement at 100 bound parameters and allIds can reach 120, so fetch in chunks.
@@ -643,15 +767,17 @@ export async function retrieve(
     const recency = Math.max(0, 1 - (nowSec - lastAccessed) / NINETY_DAYS);
     const accessFreq = Math.min(1, Math.log1p(row.access_count ?? 0) / Math.log1p(50));
     const sigExcess = Math.max(0, meanSigma(memSigma) - querySigmaVal);
-    const cosineWeighted = cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
+    // noSigma (bench switch): memory σ plays no part in relevance (no cosine penalty, Bhattacharyya,
+    // activation weight, tiebreak, or σ gate).
+    const cosineWeighted = noSig ? cosineSim : cosineSim * Math.max(0.75, 1.0 - 0.25 * sigExcess);
     const bm25Raw = bm25Map.get(row.id) ?? 0;
-    return { row, memSigma, cosineWeighted, syntheticCos, recency, accessFreq, bm25Raw };
+    return { row, memSigma, cosineWeighted, syntheticCos, recency, accessFreq, bm25Raw, cosineSim };
   });
 
   // Min-max normalization within batch — spreads scores across [0,1] per component.
   // Cosine: real hits min-max against each other; injected candidates keep their
   // synthetic value as the post-normalization score (see normalizeCosineBatch).
-  const normCosine = normalizeCosineBatch(rawCandidates);
+  const normCosine = v.rawCos ? rawCandidates.map(c => c.syntheticCos ?? c.cosineWeighted) : normalizeCosineBatch(rawCandidates);
   const normRecency = minMaxNormalize(rawCandidates.map(c => c.recency));
   const normAccess = minMaxNormalize(rawCandidates.map(c => c.accessFreq));
   // BM25: if all candidates have zero score (no FTS5 hits), return zeros — not ones.
@@ -661,6 +787,7 @@ export async function retrieve(
   const normBm25 = bm25Vals.every(v => v === 0) ? bm25Vals.map(() => 0) : minMaxNormalize(bm25Vals);
 
   // Pass 2: build scored candidates using normalized components
+  const featRows: Record<string, number | string>[] = [];
   const candidates = rawCandidates.map(({ row, memSigma }, i) => {
     const entityBoost = Math.min(0.25, entityBoostMap.get(row.id) ?? 0);
     const rrfBoost = Math.min(0.1, (rrfScores.get(row.id) ?? 0) * 6); // reduced — BM25 now first-class
@@ -677,13 +804,17 @@ export async function retrieve(
     // Bhattacharyya distribution overlap: measures how well query and memory uncertainty match.
     const currentSigma = meanSigma(memSigma);
     const bhattScore = distributionalScore(normCosine[i], querySigmaVal, currentSigma);
-    const bhattMultiplier = 0.70 + 0.70 * bhattScore;
+    const bhattMultiplier = v.bhatt[0] + v.bhatt[1] * bhattScore;
     // BM25 as first-class rerank signal: keyword-matching memories surface even with mediocre cosine.
     // Weights: cosine (semantic) 50%, BM25 (keyword) 15%, recency 27%, access 8%. Recency raised /
     // access lowered from 22/13 (2026-07-07) — access_count was letting stale memories that got
     // surfaced repeatedly outrank newer, corrected ones (rich-get-richer); see isContradiction's
     // UNRESOLVED/RESOLVED class for the complementary fix at the retrieval-eligibility level.
-    const [wCos, wBm25, wRec, wAcc] = v.weights;
+    // priorScale (bench switch): recency/access count less as the top match gets more exact
+    // (full weight at top-1 cosine <= 0.70, none at >= 0.85), with that weight moved to cosine.
+    const ps = v.priorScale ? Math.max(0, Math.min(1, (0.85 - top1Cos) / 0.15)) : 1;
+    const [wCos0, wBm25, wRec0, wAcc0] = v.weights;
+    const wRec = wRec0 * ps, wAcc = wAcc0 * ps, wCos = wCos0 + (wRec0 + wAcc0) * (1 - ps);
     const baseScore = wCos * normCosine[i] + wBm25 * normBm25[i] + wRec * normRecency[i] + wAcc * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
     // Density-bias dampener (2026-07-27): large `session`-type blobs have more surface area
     // to match against than a small atomic decision/episodic fact, so they can win multihop
@@ -698,7 +829,12 @@ export async function retrieve(
     const sessionLengthPenalty = row.memory_type === 'session' && row.text.length > 500
       ? Math.min(0.15, 0.04 * Math.log2(row.text.length / 500))
       : 0;
-    const primaryScore = baseScore * (1 - sessionLengthPenalty) * (v.noBhatt ? 1 : Math.min(1.40, Math.max(0.70, bhattMultiplier)));
+    const primaryScore = baseScore * (1 - sessionLengthPenalty) * (v.noBhatt || noSig ? 1 : Math.min(v.bhatt[3], Math.max(v.bhatt[2], bhattMultiplier)));
+    if (opts.trace || v.lanes > 0) featRows.push({
+      id: row.id.slice(0, 8), cos: normCosine[i], rc: rawCandidates[i].syntheticCos === null ? rawCandidates[i].cosineSim : -1,
+      bm25: normBm25[i], rec: normRecency[i], acc: normAccess[i],
+      boost: entityBoost + rrfBoost + cohesionBonus + temporalBoost, bhatt: bhattScore, msig: currentSigma, pen: sessionLengthPenalty, primary: primaryScore,
+    });
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
@@ -736,7 +872,7 @@ export async function retrieve(
     }
 
     // Sigma weight: sharp memories (low sigma) radiate stronger activation
-    const sigmaWeight = Math.max(0, 1 - meanSigma(c.sigma));
+    const sigmaWeight = noSig ? 0.5 : Math.max(0, 1 - meanSigma(c.sigma));
 
     // Contradiction penalty: contested memories are less trustworthy
     const contradictionFactor = c.contradiction ? 0.3 : 1.0;
@@ -774,7 +910,7 @@ export async function retrieve(
   scored.sort((a, b) => {
     const diff = b.score - a.score;
     if (Math.abs(diff) > 0.05) return diff;
-    return meanSigma(a.sigma) - meanSigma(b.sigma); // lower σ wins ties
+    return noSig ? diff : meanSigma(a.sigma) - meanSigma(b.sigma); // lower σ wins ties
   });
 
   // Multi-hop BFS spreading activation (depth=2).
@@ -859,6 +995,89 @@ export async function retrieve(
   // ones — embedding cosine when both have vectors, token-Jaccard fallback otherwise.
   const kept = dedupBySimilarity(scored, v.dedupCos); // scored is already sorted desc by score
 
+  // jev (bench switch, 2026-10-09): TypeSafe's Jev decision model reads the query and the top N
+  // candidate notes and returns a probability per note (one listwise choice call). Notes are re-ordered
+  // by that probability and re-spaced under the old top score, like the rerank switch. Any error keeps
+  // the original order. jevCut drops final notes below that probability (keeping at least 3).
+  const jevProb = new Map<string, number>();
+  // jevFast (bench switch): on near-verbatim matches (top-1 cosine >= 0.85) use one Jev call instead of
+  // two (1) or skip Jev entirely (2), trading a little ranking for latency where the match is already clear.
+  const clearMatch = top1Cos >= 0.85;
+  if (v.jev > 0 && kept.length > 1 && !(v.jevFast === 2 && clearMatch)) {
+    const head = kept.slice(0, v.jev);
+    // jevMeta (bench switch): each note carries its age, project and type, and the state carries the end
+    // of the previous assistant turn when the caller passes opts.context.
+    const age = (ts: number) => { const d = Math.max(0, (nowSec - ts) / 86400); return d < 1 ? 'today' : d < 2 ? 'yesterday' : d < 14 ? `${Math.round(d)} days ago` : d < 60 ? `${Math.round(d / 7)} weeks ago` : `${Math.round(d / 30)} months ago`; };
+    const criteria = Object.fromEntries(head.map((c, k) => [`n${k}`, (v.jevMeta ? `[${age(c.timestamp ?? nowSec)}, ${c.domain}, ${c.type}] ` : '') + c.text.replace(/\s+/g, ' ').slice(0, 220)]));
+    const prevTurn = v.jevMeta && opts.context ? `\n\nThe end of the assistant's previous reply was:\n"${opts.context.slice(-300)}"` : '';
+    // jevAvg (bench switch): a second call with the candidates in reverse order, run in parallel and
+    // averaged, cancels Jev's position sensitivity (measured +0.012 nDCG, top pick flips 36% otherwise).
+    const ask = (order: number[]) => (env.AI.run as any)('typesafe/jev', {
+      state: `A developer sent this message to their AI coding assistant:\n"${query}"${prevTurn}\n\nThe assistant can attach notes it saved earlier about this developer and their work.`,
+      questions: { best: { type: 'choice', instructions: 'Which saved note is the most useful context for responding to this message?', criteria: Object.fromEntries(order.map(k => [`n${k}`, criteria[`n${k}`]])) } },
+    }).catch((e: unknown) => { console.warn('[jev] rerank failed, keeping first-stage order:', String(e).slice(0, 200)); return null; });
+    const idx = head.map((_, k) => k);
+    // Deadline: a slow Jev call (cold start) falls back to the first-stage order instead of pushing the
+    // whole retrieval past the hook's timeout (seen live: 5.5 s cold vs ~3.3 s warm for the full hook).
+    const withDeadline = (pr: Promise<any>) => Promise.race([pr, new Promise(res => setTimeout(() => { console.warn('[jev] rerank timed out after 2.5 s'); res(null); }, 2500))]);
+    const twoCalls = v.jevAvg && !(v.jevFast === 1 && clearMatch);
+    const answers = await Promise.all((twoCalls ? [ask(idx), ask([...idx].reverse())] : [ask(idx)]).map(withDeadline));
+    const probSets = answers.map(jr => (jr?.result?.answers?.best?.probabilities ?? jr?.answers?.best?.probabilities) as Record<string, number> | undefined).filter(Boolean) as Record<string, number>[];
+    const probs = probSets.length ? Object.fromEntries(idx.map(k => [`n${k}`, probSets.reduce((sum, p) => sum + (p[`n${k}`] ?? 0), 0) / probSets.length])) : undefined;
+    if (probs) {
+      head.forEach((c, k) => jevProb.set(c.id, probs[`n${k}`] ?? 0));
+      const topScore = head[0].score;
+      const sorted = [...head].sort((a, b) => (jevProb.get(b.id) ?? 0) - (jevProb.get(a.id) ?? 0));
+      sorted.forEach((c, i) => { c.score = topScore * (1 - 0.01 * i); });
+      kept.splice(0, head.length, ...sorted);
+    }
+  }
+  // jev2 (bench switch): second round for multi-hop questions. Vector neighbours of Jev's top 3 picks
+  // join the top 25, and Jev picks again from the combined set, so a fact that only connects through
+  // another fact (not through the question's wording) can still be chosen.
+  if (v.jev2 && jevProb.size && kept.length > 1) {
+    const anchors = kept.slice(0, 3).filter(c => Array.isArray(c.vector) && c.vector.length > 0);
+    const nb = await Promise.all(anchors.map(a => queryVectorizeScoped(env, a.vector as number[], { topK: 8, returnValues: false, returnMetadata: 'none' }, project, strictProject).catch(() => ({ matches: [], count: 0 }) as VectorizeMatches)));
+    const keptIds = new Set(kept.map(c => c.id));
+    const newIds = [...new Set(nb.flatMap(r => (r.matches ?? []).map(m => m.id)))].filter(id => !keptIds.has(id)).slice(0, 20);
+    if (newIds.length) {
+      const nowS = Math.floor(Date.now() / 1000);
+      const rowsNb = (await env.DB.prepare(
+        `SELECT id, text, domain, cluster_id, memory_type, sigma_diagonal, contradiction_flag, timestamp FROM memories WHERE id IN (${newIds.map(() => '?').join(',')}) AND (valid_to IS NULL OR valid_to > ?)`
+      ).bind(...newIds, nowS).all<{ id: string; text: string; domain: string; cluster_id: string; memory_type: string; sigma_diagonal: string; contradiction_flag: number; timestamp: number }>().catch(() => ({ results: [] }))).results ?? [];
+      const extras = rowsNb.map(r => ({ id: r.id, text: r.text, domain: r.domain, cluster_id: r.cluster_id, type: r.memory_type, timestamp: r.timestamp,
+        sigma: safeDeserializeSigma(r.sigma_diagonal), primaryScore: 0, score: 0, vector: [], contradiction: r.contradiction_flag === 1, freshnessBoost: 0, isFileEdit: false, activated: true } as any));
+      const pool2 = [...kept.slice(0, 25), ...extras];
+      const crit2 = Object.fromEntries(pool2.map((c, k) => [`n${k}`, c.text.replace(/\s+/g, ' ').slice(0, 220)]));
+      const r2 = await Promise.race([(env.AI.run as any)('typesafe/jev', {
+        state: `A developer sent this message to their AI coding assistant:\n"${query}"\n\nThe assistant can attach notes it saved earlier about this developer and their work. Some notes only matter because they connect to other notes.`,
+        questions: { best: { type: 'choice', instructions: 'Which saved note is the most useful context for responding to this message?', criteria: crit2 } },
+      }).catch(() => null), new Promise(res => setTimeout(() => res(null), 2500))]) as any;
+      const p2 = (r2?.result?.answers?.best?.probabilities ?? r2?.answers?.best?.probabilities) as Record<string, number> | undefined;
+      if (p2) {
+        const topScore = kept[0].score;
+        const order = pool2.map((c, k) => [c, p2[`n${k}`] ?? 0] as const).sort((a, b) => b[1] - a[1]).map(x => x[0]);
+        order.forEach((c, i) => { c.score = topScore * (1 - 0.01 * i); });
+        kept.splice(0, 25, ...order);
+      }
+    }
+  }
+
+  // rerank (bench switch, 2026-10-09): a cross-encoder reads query and memory together and
+  // re-orders the top N; their scores are re-spaced under the old top score so the floor and
+  // caps below keep working unchanged.
+  if (v.rerank > 0 && kept.length > 1) {
+    const head = kept.slice(0, v.rerank);
+    const rr = await callAI(env, '@cf/baai/bge-reranker-base', { query, contexts: head.map(c => ({ text: c.text.slice(0, 1500) })) }).catch(() => null) as any;
+    const order = (rr?.response ?? []) as { id: number; score: number }[];
+    if (order.length === head.length) {
+      const topScore = head[0].score;
+      const sorted = [...order].sort((a, b) => b.score - a.score).map(o => head[o.id]);
+      sorted.forEach((c, i) => { c.score = topScore * (1 - 0.01 * i); });
+      kept.splice(0, head.length, ...sorted);
+    }
+  }
+
   // Threshold-based retrieval: return ALL above score floor, not a hard topK.
   // Context window is 200k — injecting 15 relevant memories costs nothing vs 5.
   // Floor = median of top-topK scores * 0.88, so we always get at least topK
@@ -869,6 +1088,14 @@ export async function retrieve(
     : 0;
   const injectCap = querySigmaVal < 0.4 ? topK * 3 : querySigmaVal > 0.7 ? topK : topK * 2;
   const top = kept.filter(c => c.score >= floor).slice(0, injectCap); // adaptive cap: precise→3×topK, vague→topK
+  // lanes (bench switch): the best `lanes` candidates by pure relevance (cosine + BM25, no usage
+  // prior) always make the cut, so an old but exact match can't be buried by recency/access.
+  if (v.lanes > 0) {
+    const relOf = new Map(featRows.map(f => [f.id as string, 0.85 * (f.cos as number) + 0.15 * (f.bm25 as number)]));
+    const inTop = new Set(top.map(c => c.id));
+    const byRel = kept.filter(c => relOf.has(c.id.slice(0, 8))).sort((a, b) => (relOf.get(b.id.slice(0, 8)) ?? 0) - (relOf.get(a.id.slice(0, 8)) ?? 0));
+    for (const c of byRel.slice(0, v.lanes)) if (!inTop.has(c.id)) top.push(c);
+  }
 
   // Append activated associations not already in results
   const topIdSet = new Set(top.map(c => c.id));
@@ -883,12 +1110,14 @@ export async function retrieve(
 
   // Temporal de-biasing: activation clusters can drown temporal hits even with a score boost.
   // Guarantee up to 2 session summaries from the temporal window make it into results.
+  const guaranteedTemporalIds = new Set<string>();
   if (temporalWindowDays >= 0 && allTemporalIds.size > 0) {
     const topIdSetTemp = new Set(top.map(c => c.id));
     const missedTemporalSessions = kept
       .filter(c => allTemporalIds.has(c.id) && c.type === 'session' && !topIdSetTemp.has(c.id))
       .slice(0, 2);
     top.push(...missedTemporalSessions);
+    missedTemporalSessions.forEach(c => guaranteedTemporalIds.add(c.id));
   }
 
   // Injected-source guarantee (2026-07-09, experiments 3/4 redesigned): the adaptive
@@ -902,7 +1131,7 @@ export async function retrieve(
   // cosine-reachable in a top-100 window but sits at rank 8 of the global access pool;
   // it was injected, scored, and then floor-cut on every earlier run.
   const guaranteedInjectedIds = new Set<string>();
-  if (entityTokens.length === 0 && (clusterOnlyIds.length > 0 || hotAccessOnlyIds.length > 0)) {
+  if (!v.noGuarantee && entityTokens.length === 0 && (clusterOnlyIds.length > 0 || hotAccessOnlyIds.length > 0)) {
     const injectedIdSet = new Set([...clusterOnlyIds, ...hotAccessOnlyIds]);
     const topIdSetInj = new Set(top.map(c => c.id));
     const missedInjected = kept.filter(c => injectedIdSet.has(c.id) && !topIdSetInj.has(c.id));
@@ -938,6 +1167,7 @@ export async function retrieve(
     opts.trace.kept = brief(kept);
     opts.trace.top = brief(top);
     opts.trace.guaranteedInjected = [...guaranteedInjectedIds].map(id => id.slice(0, 8));
+    opts.trace.features = featRows;
   }
 
   // Final near-dup sweep: the BFS/temporal/contradiction de-biasing above can re-introduce
@@ -946,7 +1176,7 @@ export async function retrieve(
 
   // σ hard gate: specific queries only surface memories whose confidence meets the
   // query's specificity requirement. Always keep at least 2 results to prevent empty injection.
-  const finalTop = sigmaGate(topDeduped, querySigmaVal, 2);
+  const finalTop = noSig ? topDeduped : sigmaGate(topDeduped, querySigmaVal, 2);
 
   // Sigma-aware exemption (2026-07-13, BOUNDED 2026-07-17): a low-rank member of an
   // on-topic cluster that has actually earned high confidence via repeated Kalman
@@ -994,7 +1224,17 @@ export async function retrieve(
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
   let postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
   if (v.resort) postDiversity = [...postDiversity].sort((a, b) => b.score - a.score);
-  if (v.trim > 0) postDiversity = postDiversity.slice(0, v.trim);
+  // Guaranteed slots (temporal session summaries, injected-source picks) sit below the Jev-respaced
+  // scores after resort, so a plain slice would always drop them; they ride along past the trim (max 3).
+  if (v.trim > 0) {
+    const n = Math.max(v.trim, topK);
+    const exempt = postDiversity.slice(n).filter(c => guaranteedTemporalIds.has(c.id) || guaranteedInjectedIds.has(c.id)).slice(0, 3);
+    postDiversity = [...postDiversity.slice(0, n), ...exempt];
+  }
+  if (v.jevCut > 0 && jevProb.size) {
+    const keep = postDiversity.filter((c, i) => i < 3 || (jevProb.get(c.id) ?? 0) >= v.jevCut);
+    postDiversity = keep;
+  }
 
   if (opts.trace) {
     opts.trace.topDeduped = topDeduped.map(c => c.id.slice(0, 8));

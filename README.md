@@ -7,7 +7,7 @@ Persistent memory for AI coding assistants. Works across sessions, devices, and 
 
 Built on Cloudflare Workers. You deploy it to your own account, own your data, and pay Cloudflare directly. The free tier covers personal use; the limit you reach first is Vectorize's 5M stored dimensions, which is account-wide across indexes. At 768 dimensions, and with a micro-cluster vector stored alongside the memories, that works out to a few thousand memories before you need the paid plan.
 
-**Benchmarked against a naive-cosine baseline on a frozen, ID-matched gold set** (53 real queries against a real, lived-in memory store, re-measured 2026-10-08): at the same number of returned memories, recall matches plain cosine (0.70 vs 0.70) and the right memory ranks higher (MRR 0.53 vs 0.45). On vague, loosely-worded queries it also surfaces memories cosine misses even at depth 100. It costs more tokens per query than naive cosine, since it returns a wider set when a query is vague. These numbers are self-measured against my own store, not a public benchmark. The harness is in [`bench/`](bench/) so the method is inspectable and you can run it against your own store; the gold sets are not published, because they are built from a real personal memory store. See [bench/README.md](bench/README.md).
+**Benchmarked against a naive-cosine baseline on a frozen, hand-labeled gold set** (53 real queries against a real, lived-in memory store, measured on the live deployment 2026-10-09, about 10 memories returned by each): recall 0.83 vs 0.62 for plain cosine, and the right memory ranks higher (MRR 0.79 vs 0.43). Vague queries: recall 0.92 vs 0.67. Multi-fact queries are the weak spot at 0.61 recall (cosine 0.36). The overall gaps are well outside their 95% paired-bootstrap intervals; the vague subset is only 12 queries, so read that one as directional. On 250 real prompts replayed through the full hook, the first memory injected is useful 75% of the time, and noise in the agent's context is down 44% against the previous pipeline. The cost is latency: a retrieve takes about 1 s server-side, about 3 s for the hook's three parallel queries. These numbers are self-measured against my own store, not a public benchmark. The harness is in [`bench/`](bench/) so the method is inspectable and you can run it against your own store; the gold sets are not published, because they are built from a real personal memory store. See [bench/README.md](bench/README.md).
 
 ## What it does
 
@@ -32,16 +32,16 @@ RAG retrieves chunks from a static document store, and a chunk means whatever it
 
 - Persistent memory across sessions, devices, and editors, all backed by the same D1/Vectorize store
 - Confidence scoring per memory: sharpens with reinforcement, decays when ignored, gets discarded once it fades too far
-- Hybrid retrieval — cosine similarity, BM25 keyword search, recency, and access frequency, fused and confidence-weighted
+- Hybrid retrieval: cosine similarity, BM25 keyword search (including write-time key expansions), recency, and access frequency, fused and confidence-weighted, then reranked by a decision model that reads your previous turn so vague prompts like "fix that thing" resolve
 - Automatic capture of decisions, code diffs, and session summaries without asking
 - Contradiction detection: a new fact that conflicts with an old one gets flagged and resolved instead of silently duplicated
 - Entity graph and spreading activation surface related memories even when the wording doesn't match
 - One MCP server for Claude Code, Codex, Cursor, OpenCode, and Zed — same tools, same behavior everywhere
-- Self-hosted on your own Cloudflare account, no managed service, ~$0/month on the free tier
+- Self-hosted on your own Cloudflare account, no managed service, ~$0/month on the free tier plus about $0.001 per prompt for Jev
 
 ## Quick start
 
-**Requirements:** Node.js 18+, a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works).
+**Requirements:** Node.js 18+, a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier works), and a few dollars of prepaid AI Gateway credits for the Jev decision model (dashboard → AI → AI Gateway → Credits; about $0.001 per prompt).
 
 ```bash
 npm install -g wrangler
@@ -56,6 +56,8 @@ npx gaussian-memory init
 > On a brand-new Cloudflare account, R2 (used only for optional nightly cold-storage archival, not core retrieval) requires a one-time manual enable at [dash.cloudflare.com](https://dash.cloudflare.com) before the API will create a bucket. `init` detects this and skips archival gracefully if it's not enabled yet — everything else works normally. Enable R2 anytime later and re-run `init` to turn archival on.
 >
 > Also on a brand-new account, `init` will interactively ask you to pick a `workers.dev` subdomain during the deploy step — this is a one-time, permanent, Cloudflare-wide choice (your worker's URL will be `https://gaussian-memory.<your-subdomain>.workers.dev`), and only happens once, ever, per account.
+
+Once credits are added, set `JEV_RERANK = "on"` under `[vars]` in `wrangler.toml` and run `npx wrangler deploy`. Until then the worker skips those calls, so a fresh deploy never bills anything you didn't set up.
 
 Reload your shell (`source ~/.zshrc` or open a new terminal), restart your harness, and it's live.
 
@@ -84,7 +86,7 @@ Excluded before anything is stored:
 - Read-only commands (`ls`, `cat`, `grep`, …), git plumbing, package installs, and deploys
 - Credential-shaped strings — bearer and auth headers, provider API keys (OpenAI, GitHub, GitLab, Slack, AWS, Google, npm, HuggingFace), JWTs, `user:pass@host` URLs, `KEY=value` secrets, and PEM private key blocks — are redacted before the memory is written, not after
 
-Everything runs in your own Cloudflare account: D1 for storage, Vectorize for search, Workers AI for embeddings and for the small models that extract and judge. No third-party API is in that path and no data routes through anyone else. Use `memory_list`, `memory_update`, and `memory_delete` to inspect or remove anything it kept.
+Everything runs in your own Cloudflare account: D1 for storage, Vectorize for search, Workers AI for embeddings and for the models that extract, rerank, and judge. Jev is TypeSafe's model, served through Workers AI and billed through your AI Gateway credits; there is no separate API key or account. No other service is in that path. Use `memory_list`, `memory_update`, and `memory_delete` to inspect or remove anything it kept.
 
 ## Cloudflare plan
 
@@ -363,20 +365,24 @@ Every memory carries a confidence score:
 
 Base score is a weighted combination of **cosine similarity** (0.50), **BM25 keyword match** (0.15), **recency** (0.27), and **access frequency** (0.08), normalized within each retrieval batch. A memory that keyword-matches precisely can surface even with a mediocre vector score, since BM25 is a first-class signal, not a tiebreaker. Vector search and FTS5 keyword search run in parallel and get fused via reciprocal-rank fusion before scoring. A **Bhattacharyya multiplier** then adjusts that base score up or down.
 
-The multiplier compares how confident the query itself sounds against how confident each memory is. A precise technical query amplifies memories that are similarly high-confidence: sharp, well-reinforced facts. A vague exploratory query lets lower-confidence memories through too. Capitalized or named terms in the query read as more precise; their absence reads as more vague, regardless of query length. That query-to-memory confidence match is what keeps retrieval from being purely semantic.
+The multiplier compares how confident the query itself sounds against how confident each memory is. A precise technical query amplifies memories that are similarly high-confidence: sharp, well-reinforced facts. A vague exploratory query lets lower-confidence memories through too. Capitalized or named terms in the query read as more precise; their absence reads as more vague, regardless of query length. That query-to-memory confidence match is what keeps retrieval from being purely semantic. When the query has a clear match (top cosine ≥ 0.85), the confidence terms step aside and the match ranks on relevance alone, since there is nothing left to be uncertain about.
 
-Beyond the base score, retrieval also runs entity-graph boosting (shared named entities between memories), spreading activation (top-3 hits become anchors, a 2-hop BFS pulls in their neighbors), and cluster cohesion bonuses (memories that keep co-occurring with shared entities score as a group). None of this requires an LLM call at query time. It's pure vector/SQL math, so retrieval latency doesn't scale with corpus size the way an LLM-in-the-loop approach would.
+Beyond the base score, retrieval also runs entity-graph boosting (shared named entities between memories), spreading activation (top-3 hits become anchors, a 2-hop BFS pulls in their neighbors), and cluster cohesion bonuses (memories that keep co-occurring with shared entities score as a group).
+
+The first stage is deliberately wide: 100 vector hits and 60 keyword hits, where the keyword search also covers short key expansions written for each memory when it was stored (the likely ways someone would later ask for it). Its top 80 candidates then go to **Jev**, a decision model on Workers AI, in one listwise call: the prompt, the end of your previous assistant turn, and each candidate with its age, domain, and type. Jev returns a probability per candidate; the call is run twice with the candidates in opposite orders and averaged to cancel position bias (once when the match is already clear), and the top 10 are kept. Each call has a 2.5 s deadline, after which the first-stage order is used.
 
 After scoring:
 - **Temporal validity filter:** memories with `valid_to` set (superseded by a newer version) are excluded before scoring, so expired facts never surface
 - **Spreading activation:** top-3 hits become anchors; neighboring memories in the entity graph score a secondary boost
 - **Cluster cohesion bonus:** memories co-retrieved with shared entity links score higher as a group
 - **Confidence tiebreaker:** equal-scoring memories resolve in favor of the more confident one
-- **Threshold retrieval:** all memories above a score floor are returned, not a fixed top-k
+- **Rerank and trim:** Jev's order, top 10, with guaranteed recent-session and injected-source memories riding past the cut (at most 3)
 
 ### Merging
 
 Closeness is measured via **Bhattacharyya distance** between two memories' confidence distributions, not raw cosine similarity. Memories close enough by that measure merge via **Kalman update** instead of sitting as duplicates. The threshold is tighter for memories the system already considers the same topic (same `cluster_id`) than for ones it considers unrelated, so genuine cross-topic duplicates still collapse without accidentally merging distinct facts that happen to share wording. Merging two independent observations of the same fact produces higher combined confidence than either had alone, which keeps the corpus from accumulating dozens of near-identical facts over time.
+
+When a new memory's nearest neighbor in the same project is close (cosine ≥ 0.80), Jev decides first: **same** fact (reinforce the existing memory, keep its text), **update** (store the new one and queue the old one for the contradiction judge), **adds detail**, or **different** (both stored). On 160 test pairs it chose correctly 94% of the time and never merged two different facts. The contradiction judge uses Jev too (92% vs 86% for Llama 3.3 70B on 120 pairs with known answers, at a third of the latency), with Llama as the fallback.
 
 ### Nightly cron (6am UTC)
 
@@ -392,6 +398,7 @@ Closeness is measured via **Bhattacharyya distance** between two memories' confi
 10. Auto-judge memories flagged as contradictions (supersedes/conflicts_with/extends/compatible)
 11. Process entity extraction queue (50/run)
 12. Drain writes that got deferred earlier when Workers AI's daily neuron quota ran out, now that every other AI-using step above has had first claim on today's budget
+13. Write key expansions for new memories and drop those of deleted ones (time-boxed to 60 s)
 
 ## Architecture
 
@@ -406,7 +413,7 @@ flowchart LR
 
     Clients -->|MCP / JSON-RPC 2.0| W[["Cloudflare Worker<br/>(MCP server, all logic at edge)"]]
 
-    W --> AI[Workers AI<br/>BGE embeddings · Llama 3.2 / 3.3]
+    W --> AI[Workers AI<br/>BGE embeddings · Jev · Llama 3.2 / 3.3 / 4 Scout]
     W --> DB[(D1<br/>memories + FTS5 keyword index)]
     W --> VEC[(Vectorize<br/>memory embeddings)]
     W --> MC[(MICRO_VECTORIZE<br/>dedup / diversity clusters)]
@@ -421,8 +428,8 @@ flowchart LR
 | Cloudflare Workers | MCP server (HTTP/JSON-RPC 2.0), all logic runs at edge |
 | D1 (SQLite) | Memory store: text, confidence score, domain, `cluster_id`, type, access metadata, confidence history, micro-cluster centroids |
 | Vectorize | Two indexes — dense vector search over memories (768D BGE-base-en-v1.5), and a second index of micro-cluster centroids for the internal dedup/diversity signal |
-| FTS5 virtual table | Full-text keyword search, fused with Vectorize via RRF (k=60) |
-| Workers AI | BGE embeddings; Llama 3.2 3B for lightweight synthesis/summarization; Llama 3.3 70B for fact extraction, contradiction judgment, and domain/cluster naming |
+| FTS5 virtual tables | Full-text keyword search over memories and their write-time key expansions, fused with Vectorize via RRF (k=60) |
+| Workers AI | BGE embeddings; Jev for reranking, merge decisions, and contradiction judgment; Llama 4 Scout for key expansions; Llama 3.2 3B for lightweight synthesis/summarization; Llama 3.3 70B for fact extraction, judge fallback, and domain/cluster naming |
 | KV | Identity profile cache, hot tier (recently accessed memory IDs, 24h TTL) |
 | R2 | Cold storage for consolidated low-confidence memories (age > 30 days) |
 | Cron | Nightly maintenance: consolidation, decay, dedup, entity processing, identity synthesis |
@@ -460,7 +467,7 @@ These tools are called by the AI agent, not by you directly. In your harness (Cl
 
 | Tool | Description |
 |---|---|
-| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
+| `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier, reranked by Jev. `context` passes the previous turn so vague queries resolve. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
 | `memory_list` | List all memories, optionally filtered by domain |
 | `memory_timeline` | Chronological confidence trajectory per domain |
 | `memory_belief_drift` | Show how confidence in a memory has changed over time |

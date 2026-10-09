@@ -3,7 +3,7 @@ import { embed, batchEmbed, dotProduct } from './embed';
 import { classifyDomainForStore, updateDomainCentroid } from './domain';
 import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
-import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable } from './storage';
+import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable, jevJudgeVerdict } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
 import { updateDecay, cleanupSingletons, findDuplicateClusters } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
@@ -89,6 +89,8 @@ export const TOOLS = [
         project: { type: 'string', description: 'Scope results to this project. Defaults to searching all projects.' },
         strict_project: { type: 'boolean', default: false, description: 'When project is set, exclude default-project results instead of blending them in.' },
         baseline: { type: 'boolean', default: false, description: 'Benchmark-only: naive top-k cosine retrieval, bypassing hybrid scoring entirely. Used for Stage B ablation comparisons.' },
+        context: { type: 'string', description: 'Optional: the end of the previous assistant turn, so vague references ("this", "that thing") resolve against the conversation.' },
+        rerank: { type: 'boolean', default: true, description: 'Set false to skip the model rerank stage (faster, cheaper, slightly less precise ordering).' },
       },
       required: ['query'],
     },
@@ -593,7 +595,10 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       }
 
       // Default 8 — must match the declared inputSchema default (was 5, silently diverging from schema)
-      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 8, env, args.project ?? 'default', args.strict_project === true);
+      // context: end of the previous assistant turn, sent by the hook; used by Jev and the keyword query.
+      // rerank:false skips the Jev stage (the hook's ambient queries contribute one line each, so the
+      // ~5k-token rerank isn't worth it there).
+      const results = await retrieve(args.query, args.domain ?? null, args.top_k ?? 8, env, args.project ?? 'default', args.strict_project === true, { context: typeof args.context === 'string' ? args.context : undefined, variant: args.rerank === false ? { jev: 0 } : undefined });
       if (!results.length) return 'No memories found.';
 
       // Fetch domain summaries for domains present in results (uses clean domain, not display)
@@ -1121,7 +1126,11 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           if (existing) continue;
 
           // LLM verdict — Llama 3.3 70B for reliability
-          const judgeResult = await callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+          // Jev first (2026-10-09): on 120 pairs with known answers it scored 91% vs Llama 3.3 70B's 86%,
+          // mainly by not calling added detail a supersede (85% vs 70% on "extends", which matters because a
+          // supersede expires the older memory), at ~330 ms vs ~1.1 s. Llama stays as the fallback.
+          const jevV = await jevJudgeVerdict(target, cand, env);
+          const judgeResult = jevV ? null : await callAI(env, '@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
             messages: [
               {
                 role: 'system',
@@ -1165,6 +1174,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
           } catch (e) {
             console.error('[memory_judge] JSON parse failed, defaulting to compatible:', e);
           }
+          if (jevV) { verdict = jevV.verdict; confidence = jevV.confidence; reason = 'jev'; }
 
           const direction = resolveSupersedeDirection(target, cand);
           const [fromId, toId] = verdict === 'supersedes'
