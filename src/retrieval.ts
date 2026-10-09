@@ -291,8 +291,24 @@ export function chunk<T>(xs: T[], size: number): T[][] {
   return out;
 }
 
-export type RetrievalVariant = { ftsOr?: boolean; ftsStopwords?: boolean; hotTier?: boolean; recencyCreated?: boolean };
-export const DEFAULT_VARIANT: Required<RetrievalVariant> = { ftsOr: true, ftsStopwords: true, hotTier: true, recencyCreated: false };
+export type RetrievalVariant = {
+  ftsOr?: boolean; ftsStopwords?: boolean; hotTier?: boolean; recencyCreated?: boolean; dedupCos?: number;
+  typeCap?: number; resort?: boolean; entityFix?: boolean; trim?: number;
+  weights?: number[]; noBhatt?: boolean; normFix?: boolean; pool50?: boolean; entDistinct?: boolean;
+};
+// Defaults changed 2026-10-08 after the orphan-vector cleanup, each measured on its own against
+// frozen gold (53 queries) and through a hook simulation (BENCHMARKING.md 2026-10-08):
+// dedupCos 0.85→0.90 (0.85 folded distinct facts at cos 0.852), typeCap 7→12 (episodic is
+// 68% of the corpus, the cap was cutting gold), resort (appended rows were never re-sorted),
+// entityFix (sentence-initial capitals no longer disable the vague-query paths), weights
+// recency/access 0.27/0.08→0.10/0.05 (both mostly measured past retrieval), normFix
+// (keyword-only candidates were min-maxed as cos=0). pool50/entDistinct/noHot measured
+// neutral or worse and stay off. DEDUP_COS itself stays 0.85 for the cron duplicate report.
+export const DEFAULT_VARIANT: Required<RetrievalVariant> = {
+  ftsOr: true, ftsStopwords: true, hotTier: true, recencyCreated: false, dedupCos: 0.90,
+  typeCap: 12, resort: true, entityFix: true, trim: 0,
+  weights: [0.70, 0.15, 0.10, 0.05], noBhatt: false, normFix: true, pool50: false, entDistinct: false,
+};
 
 export async function retrieve(
   query: string, domain: string | null, topK: number, env: Env, project: string = 'default',
@@ -321,7 +337,14 @@ export async function retrieve(
 
   // Extract capitalized entity tokens from the query for entity graph traversal.
   const capPattern = /\b([A-Z][a-zA-Z0-9._-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)\b/g;
-  const entityTokens = [...new Set(query.match(capPattern) ?? [])].slice(0, 3);
+  // entityFix (default on, switchable for bench A/B): a capitalized sentence-initial word ("What", "Why") is not an
+  // entity unless it's all-caps, and apostrophe names ("L'Oreal") stay whole instead of "Oreal".
+  const entityPattern = /(^|[^A-Za-z0-9'])([A-Z][a-zA-Z0-9._'-]{2,}|@cf\/[^\s]+|CW[0-9]+[A-Z]?)(?![A-Za-z0-9])/g;
+  const entityTokens = v.entityFix
+    ? [...new Set([...query.matchAll(entityPattern)]
+        .filter(m => !(query.slice(0, m.index! + m[1].length).trim() === '' && m[2] !== m[2].toUpperCase()))
+        .map(m => m[2].replace(/'s$/, '')))].slice(0, 3)
+    : [...new Set(query.match(capPattern) ?? [])].slice(0, 3);
 
   // Infer query sigma: length alone was a bad proxy for vagueness — a short casual
   // query ("that db thing again") scored as PRECISE under pure length, when it's
@@ -360,7 +383,7 @@ export async function retrieve(
   // the querySigmaVal specificity fix alone moved tokens but not recall, since it only
   // touches post-fetch filtering).
   const poolMultiplier = 4 + Math.round(4 * Math.max(0, Math.min(1, (querySigmaVal - 0.2) / 0.6)));
-  const queryOpts = { topK: Math.min(topK * poolMultiplier, 50), returnValues: true, returnMetadata: 'indexed' as const };
+  const queryOpts = { topK: v.pool50 ? 50 : Math.min(topK * poolMultiplier, 50), returnValues: true, returnMetadata: 'indexed' as const };
 
   // FTS5 query: OR of quoted keywords. The raw query used to go in as-is, and FTS5 reads
   // bare words as an implicit AND, so a natural question ("what did Osman tell me at
@@ -494,7 +517,7 @@ export async function retrieve(
   if (entityTokens.length > 0) {
     const entityNamePlaceholders = entityTokens.map(() => '?').join(',');
     const graphRows = await env.DB.prepare(
-      `SELECT me.memory_id, COUNT(*) as shared_entities
+      `SELECT me.memory_id, ${v.entDistinct ? 'COUNT(DISTINCT en.canonical_name)' : 'COUNT(*)'} as shared_entities
        FROM entity_nodes en
        JOIN memory_entities me ON en.id = me.entity_id
        WHERE en.canonical_name IN (${entityNamePlaceholders})
@@ -549,6 +572,13 @@ export async function retrieve(
   for (const id of temporalOnlyIds) { if (!cosineMap.has(id)) syntheticCosMap.set(id, 0.5); }
   for (const id of clusterOnlyIds) { if (!cosineMap.has(id) && !syntheticCosMap.has(id)) syntheticCosMap.set(id, 0.45); }
   for (const id of hotAccessOnlyIds) { if (!cosineMap.has(id) && !syntheticCosMap.has(id)) syntheticCosMap.set(id, 0.35); }
+  // normFix (default on, switchable for bench A/B): keyword-only and hot-tier-only candidates have no real
+  // cosine; without a synthetic value they enter min-max as cos=0, become the batch
+  // minimum, and squeeze the real hits' range. FTS-only carries real keyword evidence.
+  if (v.normFix) {
+    for (const id of ftsOnlyIds) { if (!cosineMap.has(id) && !syntheticCosMap.has(id)) syntheticCosMap.set(id, 0.4); }
+    for (const id of hotOnlyIds) { if (!cosineMap.has(id) && !syntheticCosMap.has(id)) syntheticCosMap.set(id, 0.3); }
+  }
   const vectorMap = new Map(results.matches.map(m => [m.id, m.values as number[] ?? []]));
 
   // Cluster cohesion: batch-fetch entity links for all candidates in one D1 query.
@@ -653,7 +683,8 @@ export async function retrieve(
     // access lowered from 22/13 (2026-07-07) — access_count was letting stale memories that got
     // surfaced repeatedly outrank newer, corrected ones (rich-get-richer); see isContradiction's
     // UNRESOLVED/RESOLVED class for the complementary fix at the retrieval-eligibility level.
-    const baseScore = 0.50 * normCosine[i] + 0.15 * normBm25[i] + 0.27 * normRecency[i] + 0.08 * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
+    const [wCos, wBm25, wRec, wAcc] = v.weights;
+    const baseScore = wCos * normCosine[i] + wBm25 * normBm25[i] + wRec * normRecency[i] + wAcc * normAccess[i] + entityBoost + rrfBoost + cohesionBonus + temporalBoost;
     // Density-bias dampener (2026-07-27): large `session`-type blobs have more surface area
     // to match against than a small atomic decision/episodic fact, so they can win multihop
     // queries on sheer size rather than precision (see BENCHMARKING.md session log 2026-07-27
@@ -667,7 +698,7 @@ export async function retrieve(
     const sessionLengthPenalty = row.memory_type === 'session' && row.text.length > 500
       ? Math.min(0.15, 0.04 * Math.log2(row.text.length / 500))
       : 0;
-    const primaryScore = baseScore * (1 - sessionLengthPenalty) * Math.min(1.40, Math.max(0.70, bhattMultiplier));
+    const primaryScore = baseScore * (1 - sessionLengthPenalty) * (v.noBhatt ? 1 : Math.min(1.40, Math.max(0.70, bhattMultiplier)));
     const ageSeconds = nowSec - (row.timestamp ?? 0);
     return {
       id: row.id,
@@ -826,7 +857,7 @@ export async function retrieve(
   // once per domain; without this they self-reinforce (mutual neighbours + shared entities)
   // and flood injection 8-10x. Keep the highest-scored instance, drop later near-identical
   // ones — embedding cosine when both have vectors, token-Jaccard fallback otherwise.
-  const kept = dedupBySimilarity(scored); // scored is already sorted desc by score
+  const kept = dedupBySimilarity(scored, v.dedupCos); // scored is already sorted desc by score
 
   // Threshold-based retrieval: return ALL above score floor, not a hard topK.
   // Context window is 200k — injecting 15 relevant memories costs nothing vs 5.
@@ -911,7 +942,7 @@ export async function retrieve(
 
   // Final near-dup sweep: the BFS/temporal/contradiction de-biasing above can re-introduce
   // near-duplicates the main pass already dropped — collapse them once more before gating.
-  const topDeduped = dedupBySimilarity(top);
+  const topDeduped = dedupBySimilarity(top, v.dedupCos);
 
   // σ hard gate: specific queries only surface memories whose confidence meets the
   // query's specificity requirement. Always keep at least 2 results to prevent empty injection.
@@ -959,9 +990,11 @@ export async function retrieve(
   // the human-facing capped/named `domain` field. Memories without a cluster_id yet
   // (pre-backfill) are exempt rather than all bucketed under one null key, so old
   // rows aren't penalized as if they were one giant cluster.
-  const diversityCapped = applyDiversityCap(finalTop, 2, 7, 3, capExemptIds);
+  const diversityCapped = applyDiversityCap(finalTop, 2, v.typeCap, 3, capExemptIds);
   // If diversity cap is too aggressive (< 2 results), fall back to finalTop
-  const postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
+  let postDiversity = diversityCapped.length >= 2 ? diversityCapped : finalTop;
+  if (v.resort) postDiversity = [...postDiversity].sort((a, b) => b.score - a.score);
+  if (v.trim > 0) postDiversity = postDiversity.slice(0, v.trim);
 
   if (opts.trace) {
     opts.trace.topDeduped = topDeduped.map(c => c.id.slice(0, 8));

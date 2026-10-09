@@ -103,8 +103,10 @@ merged = merged.filter(l => {
 
 const seenText = new Set();
 merged = merged.filter(l => {
-  const i = l.indexOf('● ');
-  const key = i >= 0 ? l.slice(i + 2, i + 82) : '';
+  // Text follows the confidence marker (● ◑ ○); keying on '●' alone gave every ◑/○ line the
+  // same empty key, so only the first of them survived.
+  const m = l.match(/[●◑○]\s(.*)/);
+  const key = m ? m[1].slice(0, 80) : l;
   if (seenText.has(key)) return false;
   seenText.add(key);
   return true;
@@ -114,6 +116,17 @@ let sessionCount = 0;
 merged = merged.filter(l => {
   if (/\/session\)/.test(l)) { sessionCount++; if (sessionCount > 3) return false; }
   return true;
+});
+
+// Q2/Q3 are ambient context; uncapped they crowded prompt matches out of the 12 slots
+// (simulated on frozen gold 2026-10-08: injected recall 0.642 uncapped, 0.679 at 1 line each).
+const q1Lines = new Set((r1 || '').split('\n'));
+const ambientCount = new Map();
+merged = merged.filter(l => {
+  if (q1Lines.has(l)) return true;
+  const src = (r2 || '').split('\n').includes(l) ? 2 : 3;
+  ambientCount.set(src, (ambientCount.get(src) ?? 0) + 1);
+  return ambientCount.get(src) <= 1;
 });
 merged = merged.slice(0, 12);
 const mergedText = merged.join('\n');

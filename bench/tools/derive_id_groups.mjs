@@ -20,7 +20,7 @@
 // The output file is committed. Frozen gold files are NOT modified.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import { norm } from '../lib/textmatch.mjs';
 
 const GOLD_FILES = [
@@ -45,7 +45,9 @@ function main() {
   const allIds = [...new Set(queries.flatMap(q => q.gold_ids))];
   console.error(`Fetching ${allIds.length} distinct gold ids from remote D1...`);
   const sql = `SELECT id, text FROM memories WHERE id IN (${allIds.map(i => `'${i}'`).join(',')})`;
-  const raw = execFileSync('npx', ['wrangler', 'd1', 'execute', 'gaussian-memory', '--remote', '--json', '--command', sql],
+  // execSync through the shell so npx resolves on Windows too; the SQL only contains
+  // single-quoted hex ids, so wrapping it in double quotes is safe in sh and cmd.
+  const raw = execSync(`npx wrangler d1 execute gaussian-memory --remote --json --command "${sql}"`,
     { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
   const parsed = JSON.parse(raw);
   const rows = parsed[0]?.results ?? [];
@@ -90,7 +92,8 @@ function main() {
     }
     const empty = groups.filter(g => !g.ids.length);
     for (const g of empty) console.error(`note: ${q.id} unit "${g.match_text.slice(0, 50)}" has NO assigned id (text-match only at runtime)`);
-    out.queries[q.id] = { groups };
+    // Composite key: ids repeat across gold files (q33-q44 are in both vague and multihop).
+    out.queries[`${q.id}::${q.match_texts.join('||')}`] = { groups };
   }
 
   writeFileSync(OUT, JSON.stringify(out, null, 2) + '\n');

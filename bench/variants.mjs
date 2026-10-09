@@ -31,7 +31,38 @@ const VARIANTS = {
   created: { recencyCreated: true },
   ftsOr_noHot: { ftsOr: true, hotTier: false },
   all: { ftsOr: true, hotTier: false, recencyCreated: true },
+  dedup88: { dedupCos: 0.88 },
+  dedup90: { dedupCos: 0.90 },
+  dedup92: { dedupCos: 0.92 },
+  d90_sort: { dedupCos: 0.90, resort: true },
+  d90_cap12: { dedupCos: 0.90, typeCap: 12 },
+  d90_capoff: { dedupCos: 0.90, typeCap: 99 },
+  d90_ent: { dedupCos: 0.90, entityFix: true },
+  combo: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true },
+  combo_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 8 },
+  combo_t12: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 12 },
+  cos_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 8, weights: [1, 0, 0, 0], noBhatt: true },
+  cosbm_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 8, weights: [0.85, 0.15, 0, 0], noBhatt: true },
+  cosbmB_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 8, weights: [0.85, 0.15, 0, 0] },
+  lowrec_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 8, weights: [0.70, 0.15, 0.10, 0.05] },
+  noB_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, trim: 8, noBhatt: true },
+  cosbm: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.85, 0.15, 0, 0], noBhatt: true },
+  lowrec: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05] },
+  // B = shipped-candidate base; each fix below is B plus exactly one change, then all of them.
+  B: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05] },
+  B_norm: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], normFix: true },
+  B_pool50: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], pool50: true },
+  B_noHot: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], hotTier: false },
+  B_entD: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], entDistinct: true },
+  B_all: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], normFix: true, pool50: true, hotTier: false, entDistinct: true },
+  B_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], trim: 8 },
+  B_norm_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], normFix: true, trim: 8 },
+  B_pool50_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], pool50: true, trim: 8 },
+  B_noHot_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], hotTier: false, trim: 8 },
+  B_entD_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], entDistinct: true, trim: 8 },
+  B_all_t8: { dedupCos: 0.90, typeCap: 12, resort: true, entityFix: true, weights: [0.70, 0.15, 0.10, 0.05], normFix: true, pool50: true, hotTier: false, entDistinct: true, trim: 8 },
 };
+// cosineN pseudo-variants run the naive-cosine baseline at top_k=N, scored identically.
 const names = arg('--variants', Object.keys(VARIANTS).join(',')).split(',');
 
 async function main() {
@@ -53,7 +84,9 @@ async function main() {
       const recalls = [], rr = [];
       for (const q of queries) {
         const units = unitsFor(q, idGroups);
-        const res = await retrieveStructured(q.query, { top_k: TOP_K, variant: VARIANTS[name] }, env);
+        const res = /^cosine\d+$/.test(name)
+          ? await retrieveStructured(q.query, { top_k: Number(name.slice(6)), baseline: true }, env)
+          : await retrieveStructured(q.query, { top_k: TOP_K, variant: VARIANTS[name] }, env);
         if (!res.ok) console.error(`  ! ${name} ${q.id}: ${res.error}`);
         const r = recallOfUnits(res.rows, units);
         const rank = firstHitRankUnits(res.rows, units);

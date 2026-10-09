@@ -22,7 +22,8 @@ export function unitsFor(goldQuery, idGroups) {
   // id_groups.json is keyed by bare query id, but ids repeat across gold files (q33-q44 are
   // in both vague and multihop) and the last file derived wins. Only trust an entry whose
   // match_texts belong to this query; otherwise multihop q33 gets scored against vague q33.
-  const entry = idGroups?.queries?.[goldQuery.id];
+  const entry = idGroups?.queries?.[`${goldQuery.id}::${(goldQuery.match_texts ?? []).join('||')}`]
+    ?? idGroups?.queries?.[goldQuery.id];
   const own = new Set(goldQuery.match_texts ?? []);
   if (entry?.groups?.length && entry.groups.every(g => own.has(g.match_text))) {
     return entry.groups.map(g => ({ match_text: g.match_text, ids: g.ids ?? [] }));
