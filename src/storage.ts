@@ -590,7 +590,10 @@ export async function storeMemory(
     ).bind(serializeSigma(newSigma), now, bestId).run();
     return { action: 'merged', id: bestId };
   }
-  const doMerge = jevAction ? jevAction === 'same' : Boolean(bestId && bestSigma && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold));
+  // Without a Jev verdict the σ gate only sees near-verbatim repeats: it has no similarity floor of its
+  // own, so two fresh (σ 0.50) memories about different things passed it and the second overwrote the
+  // first (live 2026-10-09: a one-off slice note replaced an early-extension note at cosine < 0.80).
+  const doMerge = jevAction ? jevAction === 'same' : Boolean(bestId && bestSigma && bestScore >= 0.92 && shouldMerge(mu, sigma, mu, bestSigma, mergeThreshold));
   if (bestId && bestSigma && doMerge) {
     const [, newSigma] = kalmanMerge(mu, sigma, mu, bestSigma);
 
