@@ -3,7 +3,7 @@ import { embed, batchEmbed, dotProduct } from './embed';
 import { classifyDomainForStore, updateDomainCentroid } from './domain';
 import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
-import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable, jevJudgeVerdict, shouldExpireOnSupersede } from './storage';
+import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable, jevJudgeVerdict, shouldExpireOnSupersede, SUPERSEDE_MIN_CONFIDENCE } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
 import { updateDecay, cleanupSingletons, findDuplicateClusters } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
@@ -134,7 +134,9 @@ export const TOOLS = [
       properties: {
         memory_id: { type: 'string' },
         top_k: { type: 'number', default: 5 },
-        budget_ms: { type: 'number', default: 180000, description: 'Time budget for a queue run' },
+        budget_ms: { type: 'number', default: 45000, description: 'Time budget for a queue run (the nightly cron passes its own)' },
+        backfill_copies: { type: 'boolean', description: 'One-off: retire stale copies for supersedes stored earlier' },
+        after: { type: 'number', description: 'Backfill resume cursor from the previous run' },
       },
     },
   },
@@ -346,6 +348,51 @@ function unwrapParamBleed(value: string, args: Record<string, unknown>): string 
   const [, spilledKey, spilledVal] = m;
   if (!args[spilledKey]) args[spilledKey] = spilledVal.trim();
   return value.slice(0, m.index).trim();
+}
+
+type JudgedMemory = { id: string; text: string; timestamp: number; project: string | null };
+
+// After a supersede, other copies of the retired fact (same fact, other words, often filed under other
+// topics) stay live and keep coming back in search: on 2026-10-21 four copies of a reverted threshold
+// change were still live after the judge retired one. A close copy of the older memory is retired only
+// when it is closer to the older memory than to the newer one (so restatements of the current fact
+// stay) and Jev says the newer memory supersedes it under the confident same-project rule. Jev only;
+// any failure leaves the copy alone. Every retirement stores a 'jev: copy of <id>' relation, so it can be
+// found and reverted.
+export async function retireStaleCopies(newer: JudgedMemory, older: JudgedMemory, env: Env, now: number, deadline: number): Promise<string[]> {
+  const out: string[] = [];
+  const project = newer.project ?? 'default';
+  const [muOld, muNew] = await Promise.all([embed(older.text, env), embed(newer.text, env)]);
+  const res = await env.VECTORIZE.query(Array.from(muOld), { topK: 10, returnValues: false, returnMetadata: 'indexed', filter: { project } });
+  const ids = (res.matches ?? [])
+    .filter(m => (m.score ?? 0) >= 0.85 && m.id !== older.id && m.id !== newer.id)
+    .map(m => m.id);
+  if (!ids.length) return out;
+  const rows = await env.DB.prepare(
+    `SELECT id, text, timestamp, project FROM memories WHERE id IN (${ids.map(() => '?').join(',')})
+     AND (valid_to IS NULL OR valid_to > ?) AND timestamp <= ?`
+  ).bind(...ids, now, newer.timestamp).all<JudgedMemory>();
+  for (const copy of rows.results ?? []) {
+    if (Date.now() >= deadline) break;
+    if ((copy.project ?? 'default') !== project) continue;
+    const muCopy = await embed(copy.text, env);
+    if (dotProduct(muCopy, muOld) <= dotProduct(muCopy, muNew)) continue;
+    const judged = await env.DB.prepare(
+      `SELECT id FROM memory_relations WHERE relation_type != 'pending_judge'
+       AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
+    ).bind(newer.id, copy.id, copy.id, newer.id).first();
+    if (judged) continue;
+    const v = await jevJudgeVerdict(newer, copy, env);
+    if (v?.verdict !== 'supersedes' || !shouldExpireOnSupersede(v.confidence, newer.project, copy.project)) continue;
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).bind(crypto.randomUUID(), newer.id, copy.id, 'supersedes', v.confidence, `jev: copy of ${older.id.slice(0, 8)}`, now),
+      env.DB.prepare('UPDATE memories SET contradiction_flag = 1, valid_to = ? WHERE id = ?').bind(now, copy.id),
+    ]);
+    out.push(`${newer.id.slice(0, 8)} → ${copy.id.slice(0, 8)}: supersedes (${(v.confidence * 100).toFixed(0)}%) — copy of ${older.id.slice(0, 8)}`);
+  }
+  return out;
 }
 
 export async function handleToolCall(name: string, args: any, env: Env, ctx?: ExecutionContext): Promise<string> {
@@ -1048,6 +1095,40 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const topK = (args.top_k as number) ?? 5;
       const now = Math.floor(Date.now() / 1000);
 
+      // One-off backfill: run retireStaleCopies over supersedes stored before it existed. Pages by rowid;
+      // the last line reports where to resume.
+      if (args.backfill_copies) {
+        const deadline = Date.now() + ((args.budget_ms as number) ?? 45_000);
+        let after = Number(args.after ?? 0);
+        const lines: string[] = [];
+        // Seeds stop at the rowid the backfill started from, so copies retired by this pass never become
+        // seeds themselves (no copy-of-a-copy chains).
+        const maxRow = (await env.DB.prepare('SELECT MAX(rowid) AS m FROM memory_relations').first<{ m: number }>())?.m ?? 0;
+        while (Date.now() < deadline) {
+          const page = await env.DB.prepare(
+            `SELECT r.rowid AS rid, a.id AS aid, a.text AS atext, a.timestamp AS ats, a.project AS aproj,
+                    b.id AS bid, b.text AS btext, b.timestamp AS bts, b.project AS bproj
+             FROM memory_relations r JOIN memories a ON a.id = r.from_id JOIN memories b ON b.id = r.to_id
+             WHERE r.relation_type = 'supersedes' AND r.rowid > ? AND r.rowid <= ? AND (a.valid_to IS NULL OR a.valid_to > ?)
+               AND r.reason NOT LIKE 'jev: copy of%' AND r.confidence >= ?
+               AND COALESCE(a.project, 'default') = COALESCE(b.project, 'default')
+             ORDER BY r.rowid LIMIT 25`
+          ).bind(after, maxRow, now, SUPERSEDE_MIN_CONFIDENCE).all<{ rid: number; aid: string; atext: string; ats: number; aproj: string | null; bid: string; btext: string; bts: number; bproj: string | null }>();
+          const rows = page.results ?? [];
+          if (!rows.length) { lines.push('backfill complete'); break; }
+          for (const r of rows) {
+            if (Date.now() >= deadline) break;
+            lines.push(...await retireStaleCopies(
+              { id: r.aid, text: r.atext, timestamp: r.ats, project: r.aproj },
+              { id: r.bid, text: r.btext, timestamp: r.bts, project: r.bproj }, env, now, deadline));
+            // A seed cut off by the deadline is redone on resume rather than skipped.
+            if (Date.now() < deadline) after = r.rid;
+          }
+        }
+        lines.push(`next after=${after}`);
+        return lines.join('\n');
+      }
+
       type JudgeRow = { id: string; text: string; timestamp: number; project: string | null; valid_to: number | null };
       const isLive = (r: { valid_to: number | null }) => r.valid_to === null || r.valid_to > now;
 
@@ -1066,7 +1147,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
       // Queue runs take batches of 20 until the time budget is spent, so the backlog drains in days
       // instead of 20 memories a night. `seen` stops a target whose pass failed from being retried in the same run.
-      const deadline = Date.now() + ((args.budget_ms as number) ?? 180_000);
+      const deadline = Date.now() + ((args.budget_ms as number) ?? 45_000);
       const seen = new Set<string>();
       const nextBatch = async (): Promise<JudgeRow[]> => {
         if (single) return seen.size ? [] : [single];
@@ -1260,6 +1341,8 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
             await env.DB.prepare('UPDATE memories SET contradiction_flag = 0 WHERE id = ?')
               .bind(direction.newerId).run();
             if (direction.olderId === target.id) targetExpired = true;
+            const [newerRow, olderRow] = direction.newerId === target.id ? [target, cand] : [cand, target];
+            results.push(...await retireStaleCopies(newerRow, olderRow, env, now, deadline));
           }
 
           results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${relationType} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
