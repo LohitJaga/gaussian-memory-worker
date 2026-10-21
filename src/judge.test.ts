@@ -70,7 +70,8 @@ const rels = (type: string) => db.prepare('SELECT from_id, to_id FROM memory_rel
 
 beforeEach(() => {
   db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, timestamp INTEGER, project TEXT, valid_to INTEGER, contradiction_flag INTEGER DEFAULT 0);
+  db.exec(`CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, timestamp INTEGER, project TEXT, valid_to INTEGER, contradiction_flag INTEGER DEFAULT 0,
+             domain TEXT DEFAULT 'general', memory_type TEXT DEFAULT 'episodic', sigma_diagonal TEXT DEFAULT 'AAAAPw==', access_count INTEGER DEFAULT 0);
            CREATE TABLE memory_relations (id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL, relation_type TEXT NOT NULL, confidence REAL, reason TEXT, created_at INTEGER);
            CREATE TABLE memories_fts (id TEXT, text TEXT);`);
   neighbours = [];
@@ -299,5 +300,22 @@ describe('memory_judge stale copies', () => {
     await handleToolCall('memory_judge', { backfill_copies: true, budget_ms: 5000 }, env());
 
     expect(row('copy').valid_to).toBeNull();
+  });
+});
+
+describe('memory_timeline query', () => {
+  it('follows a subject across topics in date order, including superseded memories', async () => {
+    mem('new', 'reverted threshold to 0.3', 200);
+    mem('old', 'threshold 0.3 to 0.6', 100, 'p1', '150, 1');
+    mem('far', 'unrelated note', 150);
+    rel('new', 'old', 'supersedes');
+    neighbours = ['new', 'old'];
+
+    const out = await handleToolCall('memory_timeline', { query: 'domain threshold' }, env());
+
+    expect(out).toContain('TIMELINE: "domain threshold" (2 memories)');
+    expect(out.indexOf('threshold 0.3 to 0.6')).toBeLessThan(out.indexOf('reverted threshold'));
+    expect(out).toContain('[SUPERSEDED] threshold 0.3 to 0.6');
+    expect(out).not.toContain('unrelated note');
   });
 });

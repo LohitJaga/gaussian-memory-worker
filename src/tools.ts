@@ -154,10 +154,12 @@ export const TOOLS = [
   },
   {
     name: 'memory_timeline',
-    description: 'Chronological/temporal tool — use for "what did I do this week" or "walk me through how X evolved," not topical search (use memory_retrieve for that). Shows memories in time order with sigma trajectory and any supersede/conflict markers. Pass domain to scope it; omit for a cross-domain timeline of the most recent memories.',
+    description: 'Chronological/temporal tool — use for "what did I do this week" or "walk me through how X evolved," not topical search (use memory_retrieve for that). Shows memories in time order with sigma trajectory and any supersede/conflict markers. Pass query to follow one subject across topics (includes superseded memories, so you see what replaced what); pass domain to scope to one topic; omit both for the most recent memories.',
     inputSchema: {
       type: 'object',
       properties: {
+        query: { type: 'string', description: 'Subject to follow, e.g. "domain classification threshold"' },
+        project: { type: 'string', description: 'With query: only this project' },
         domain: { type: 'string' },
         limit: { type: 'number', default: 20 },
       },
@@ -891,12 +893,41 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     case 'memory_timeline': {
       const limit = Math.min((args.limit as number) ?? 20, 50);
       const domain = args.domain as string | undefined;
+      const query = (args.query as string | undefined)?.trim();
+      type TimelineRow = { id: string; text: string; domain: string; memory_type: string;
+        sigma_diagonal: string; access_count: number; contradiction_flag: number; timestamp: number };
+
+      // query: follow one subject across topics. Topic labels group by phrasing as much as subject, so
+      // a subject's history is found by vector + keyword search instead, including memories already
+      // retired by the judge, so a superseded fact shows up next to the one that replaced it.
+      let queried: TimelineRow[] | null = null;
+      if (query) {
+        const mu = await embed(query, env);
+        const project = args.project as string | undefined;
+        const kw = buildKeywordQuery(query);
+        const [vec, fts] = await Promise.all([
+          env.VECTORIZE.query(Array.from(mu), { topK: 50, returnValues: false, returnMetadata: 'indexed', ...(project ? { filter: { project } } : {}) }),
+          kw ? env.DB.prepare(`SELECT id FROM memories_fts WHERE memories_fts MATCH ?${project ? " AND COALESCE(project, 'default') = ?" : ''} ORDER BY rank LIMIT 20`)
+                .bind(kw, ...(project ? [project] : [])).all<{ id: string }>().catch(() => ({ results: [] as { id: string }[] }))
+             : Promise.resolve({ results: [] as { id: string }[] }),
+        ]);
+        const score = new Map<string, number>();
+        for (const m of vec.matches ?? []) if ((m.score ?? 0) >= 0.7) score.set(m.id, m.score ?? 0);
+        for (const r of fts.results ?? []) if (!score.has(r.id)) score.set(r.id, 0.7);
+        const top = [...score.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([id]) => id);
+        if (!top.length) return `No memories found about "${query}".`;
+        const found = await env.DB.prepare(
+          `SELECT id, text, domain, memory_type, sigma_diagonal, access_count, contradiction_flag, timestamp
+           FROM memories WHERE id IN (${top.map(() => '?').join(',')})${project ? " AND COALESCE(project, 'default') = ?" : ''}`
+        ).bind(...top, ...(project ? [project] : [])).all<TimelineRow>();
+        queried = (found.results ?? []).sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+      }
 
       // Pull the most recent `limit` rows (DESC), then reverse in JS so the
       // displayed timeline still reads oldest→newest — previously this sorted
       // ASC directly, which returned the OLDEST N rows in a domain and could
       // never surface anything recent once a domain passed `limit` in size.
-      const rows = await env.DB.prepare(
+      const rows = queried ? { results: [...queried].reverse() } : await env.DB.prepare(
         domain
           ? `SELECT id, text, domain, memory_type, sigma_diagonal, access_count,
                     contradiction_flag, timestamp
@@ -907,9 +938,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
              FROM memories
              ORDER BY timestamp DESC LIMIT ?`
       ).bind(...(domain ? [domain, limit] : [limit]))
-       .all<{ id: string; text: string; domain: string; memory_type: string;
-              sigma_diagonal: string; access_count: number;
-              contradiction_flag: number; timestamp: number }>();
+       .all<TimelineRow>();
 
       const memories = (rows.results ?? []).reverse();
       if (!memories.length) return domain ? `No memories in domain "${domain}".` : 'No memories found.';
@@ -944,7 +973,8 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       }
 
       const lines: string[] = [
-        domain ? `TIMELINE: ${domain} (${memories.length} memories)` : `TIMELINE: ${memories.length} most recent memories`,
+        query ? `TIMELINE: "${query}" (${memories.length} memories)`
+          : domain ? `TIMELINE: ${domain} (${memories.length} memories)` : `TIMELINE: ${memories.length} most recent memories`,
         '',
       ];
 
