@@ -307,6 +307,7 @@ export default {
 
   // Daily decay + domain cleanup + identity synthesis via cron
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    const start = Date.now();
     const run = async (name: string, fn: () => Promise<unknown>) => {
       try { await fn(); } catch (e) { console.error(`[cron] ${name} failed:`, e); }
     };
@@ -320,7 +321,9 @@ export default {
     await run('refreshDomains', () => refreshStaleDomainSummaries(env));
     await run('cronRebuild', () => cronRebuildBatch(env, 2000, 10 * 60 * 1000));
     await run('synthesizeIdentity', () => synthesizeIdentityProfile(env));
-    await run('memoryJudge', () => handleToolCall('memory_judge', {}, env));
+    // Whatever is left of an 11-minute window, capped at 3, so the judge can't push the steps after it
+    // (including the pending-ingest drain) past the 15-minute cron limit when cronRebuild ran long.
+    await run('memoryJudge', () => handleToolCall('memory_judge', { budget_ms: Math.max(0, Math.min(180_000, 11 * 60_000 - (Date.now() - start))) }, env));
     await run('entityQueue', () => processPendingEntityQueue(env));
     // Runs LAST, deliberately: drains quota-degraded writes (pending_ingest, see src/ai.ts +
     // storage.ts's storeMemory) through the real store/extraction path now that every earlier

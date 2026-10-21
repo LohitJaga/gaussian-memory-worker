@@ -3,7 +3,7 @@ import { embed, batchEmbed, dotProduct } from './embed';
 import { classifyDomainForStore, updateDomainCentroid } from './domain';
 import { assignMicroCluster, commitMicroClusterAssignment } from './microcluster';
 import { rebuildDomainsStep } from './rebuild';
-import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable, jevJudgeVerdict } from './storage';
+import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buildKeywordQuery, ensurePendingIngestTable, jevJudgeVerdict, shouldExpireOnSupersede } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
 import { updateDecay, cleanupSingletons, findDuplicateClusters } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
@@ -128,12 +128,13 @@ export const TOOLS = [
   },
   {
     name: 'memory_judge',
-    description: 'Maintenance tool, not typically needed mid-conversation — judges relationships between a memory and its nearest neighbours, returning supersedes/conflicts_with/compatible/extends verdicts stored in memory_relations. Pass memory_id to judge one memory; omit to auto-judge all memories currently flagged as contradictions.',
+    description: 'Maintenance tool, not typically needed mid-conversation — judges relationships between a memory and its nearest neighbours, returning supersedes/conflicts_with/compatible/extends verdicts stored in memory_relations. A supersede below 0.8 confidence or across projects is stored as possible_supersede and hides nothing. Pass memory_id to judge one memory; omit to work through the queued near-misses, then flagged contradictions, until budget_ms runs out.',
     inputSchema: {
       type: 'object',
       properties: {
         memory_id: { type: 'string' },
         top_k: { type: 'number', default: 5 },
+        budget_ms: { type: 'number', default: 180000, description: 'Time budget for a queue run' },
       },
     },
   },
@@ -1047,40 +1048,59 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       const topK = (args.top_k as number) ?? 5;
       const now = Math.floor(Date.now() / 1000);
 
-      // Build candidate list: explicit ID or all unflagged contradiction memories
-      let targets: { id: string; text: string; timestamp: number }[] = [];
+      type JudgeRow = { id: string; text: string; timestamp: number; project: string | null; valid_to: number | null };
+      const isLive = (r: { valid_to: number | null }) => r.valid_to === null || r.valid_to > now;
+
+      let single: JudgeRow | null = null;
       if (args.memory_id) {
         // Support both full UUIDs and 8-char display prefixes shown in tool output
         const memId = args.memory_id as string;
         const isPrefix = memId.length === 8 && !memId.includes('-');
-        const row = isPrefix
-          ? await env.DB.prepare('SELECT id, text, timestamp FROM memories WHERE id LIKE ?')
-              .bind(`${memId}%`).first<{ id: string; text: string; timestamp: number }>()
-          : await env.DB.prepare('SELECT id, text, timestamp FROM memories WHERE id = ?')
-              .bind(memId).first<{ id: string; text: string; timestamp: number }>();
-        if (!row) return `Not found: ${memId}`;
-        targets = [row];
-      } else {
-        // Process pending_judge queue first (near-misses queued at store time), then contradiction_flag
-        const pendingRows = await env.DB.prepare(
-          `SELECT DISTINCT m.id, m.text, m.timestamp FROM memory_relations mr
-           JOIN memories m ON m.id = mr.from_id
-           WHERE mr.relation_type = 'pending_judge' LIMIT 20`
-        ).all<{ id: string; text: string; timestamp: number }>();
-        targets = pendingRows.results ?? [];
-
-        if (!targets.length) {
-          const flagged = await env.DB.prepare(
-            'SELECT id, text, timestamp FROM memories WHERE contradiction_flag = 1 LIMIT 20'
-          ).all<{ id: string; text: string; timestamp: number }>();
-          targets = flagged.results ?? [];
-        }
-        if (!targets.length) return 'No pending judgements or flagged contradictions.';
+        single = isPrefix
+          ? await env.DB.prepare('SELECT id, text, timestamp, project, valid_to FROM memories WHERE id LIKE ?')
+              .bind(`${memId}%`).first<JudgeRow>()
+          : await env.DB.prepare('SELECT id, text, timestamp, project, valid_to FROM memories WHERE id = ?')
+              .bind(memId).first<JudgeRow>();
+        if (!single) return `Not found: ${memId}`;
       }
 
-      const results: string[] = [];
+      // Queue runs take batches of 20 until the time budget is spent, so the backlog drains in days
+      // instead of 20 memories a night. `seen` stops a target whose pass failed from being retried in the same run.
+      const deadline = Date.now() + ((args.budget_ms as number) ?? 180_000);
+      const seen = new Set<string>();
+      const nextBatch = async (): Promise<JudgeRow[]> => {
+        if (single) return seen.size ? [] : [single];
+        // Process pending_judge queue first (near-misses queued at store time), oldest first, then contradiction_flag
+        const pendingRows = await env.DB.prepare(
+          `SELECT m.id, m.text, m.timestamp, m.project, m.valid_to FROM memory_relations mr
+           JOIN memories m ON m.id = mr.from_id
+           WHERE mr.relation_type = 'pending_judge'
+           GROUP BY m.id ORDER BY MIN(mr.created_at) LIMIT 100`
+        ).all<JudgeRow>();
+        let batch = (pendingRows.results ?? []).filter(r => !seen.has(r.id));
+        if (!batch.length) {
+          // Memories already judged as a conflict or possible supersede keep their flag on purpose, so
+          // they're left out here; otherwise they would fill these slots every night.
+          const flagged = await env.DB.prepare(
+            `SELECT id, text, timestamp, project, valid_to FROM memories
+             WHERE contradiction_flag = 1 AND (valid_to IS NULL OR valid_to > ?)
+             AND id NOT IN (SELECT from_id FROM memory_relations WHERE relation_type IN ('conflicts_with','possible_supersede')
+                            UNION SELECT to_id FROM memory_relations WHERE relation_type IN ('conflicts_with','possible_supersede'))
+             ORDER BY timestamp LIMIT 100`
+          ).bind(now).all<JudgeRow>();
+          batch = (flagged.results ?? []).filter(r => !seen.has(r.id));
+        }
+        return batch.slice(0, 20);
+      };
 
-      for (const target of targets) {
+      const results: string[] = [];
+      let batch = await nextBatch();
+      if (!batch.length) return 'No pending judgements or flagged contradictions.';
+
+      while (batch.length) {
+      for (const target of batch) {
+        if (Date.now() >= deadline) break;
+        seen.add(target.id);
         // Find nearest neighbours via Vectorize (cosine) + FTS5 (keyword). Vectorize alone
         // misses topically-related-but-lexically-distant pairs — confirmed live 2026-07-07: a
         // real "domain rebuild has issues" vs "domain/cluster_id split resolved" pair sat below
@@ -1088,6 +1108,24 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         // "rebuild"). No cosine floor applies to FTS5 candidates — shared vocabulary is the
         // signal, and the LLM verdict call below is the actual precision gate, same as it
         // already is for cosine-sourced candidates.
+        // Every queued pair for this target is resolved by a successful pass (judged, already judged, or its
+        // partner is gone), so the queue drains instead of serving the same targets every night.
+        const clearQueue = () => env.DB.prepare(
+          `DELETE FROM memory_relations WHERE relation_type = 'pending_judge' AND from_id = ?`
+        ).bind(target.id).run();
+        // Drop the re-evaluate flag unless a stored verdict (from this pass or an earlier one) says the
+        // memory conflicts or may be superseded; those keep the flag and its [CONTRADICTED] tag.
+        const clearFlag = () => env.DB.prepare(
+          `UPDATE memories SET contradiction_flag = 0 WHERE id = ? AND (valid_to IS NULL OR valid_to > ?)
+           AND NOT EXISTS (SELECT 1 FROM memory_relations WHERE relation_type IN ('conflicts_with','possible_supersede')
+                           AND (from_id = ? OR to_id = ?))`
+        ).bind(target.id, now, target.id, target.id).run();
+        if (!isLive(target)) {
+          await clearQueue();
+          results.push(`${target.id.slice(0, 8)}: expired, skipped`);
+          continue;
+        }
+
         const mu = await embed(target.text, env);
         const ftsQuery = buildKeywordQuery(target.text);
         const [vecResults, ftsResults] = await Promise.all([
@@ -1107,21 +1145,35 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
           .map(r => r.id)
           .filter(id => id !== target.id);
 
-        const candidateIds = [...new Set([...vecCandidateIds, ...ftsCandidateIds])];
+        // The partners queued at store time are judged even when the fresh search doesn't find them again.
+        const queued = await env.DB.prepare(
+          `SELECT to_id FROM memory_relations WHERE relation_type = 'pending_judge' AND from_id = ?`
+        ).bind(target.id).all<{ to_id: string }>();
+        const queuedIds = (queued.results ?? []).map(r => r.to_id).filter(id => id !== target.id);
+
+        const candidateIds = [...new Set([...vecCandidateIds, ...ftsCandidateIds, ...queuedIds])];
 
         if (!candidateIds.length) {
+          await clearQueue();
+          await clearFlag();
           results.push(`${target.id.slice(0, 8)}: no candidates above 0.70 or via keyword match`);
           continue;
         }
 
+        let targetExpired = false, failed = false;
+        // Expired candidates are skipped: an expired newer memory must not expire a live one, and
+        // re-expiring an expired one would push its valid_to forward.
         const candRows = await env.DB.prepare(
-          `SELECT id, text, timestamp FROM memories WHERE id IN (${candidateIds.map(() => '?').join(',')})`
-        ).bind(...candidateIds).all<{ id: string; text: string; timestamp: number }>();
+          `SELECT id, text, timestamp, project FROM memories WHERE id IN (${candidateIds.map(() => '?').join(',')})
+           AND (valid_to IS NULL OR valid_to > ?)`
+        ).bind(...candidateIds, now).all<{ id: string; text: string; timestamp: number; project: string | null }>();
 
         for (const cand of candRows.results ?? []) {
-          // Check if relation already judged
+          // Check if relation already judged. The pair's own pending_judge row is not a verdict: counting it
+          // skipped every queued pair, so the queue never drained (2,253 rows back to June on 2026-10-21).
           const existing = await env.DB.prepare(
-            'SELECT id FROM memory_relations WHERE (from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?)'
+            `SELECT id FROM memory_relations WHERE relation_type != 'pending_judge'
+             AND ((from_id = ? AND to_id = ?) OR (from_id = ? AND to_id = ?))`
           ).bind(target.id, cand.id, cand.id, target.id).first();
           if (existing) continue;
 
@@ -1160,7 +1212,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
 
           const rawVVal = judgeResult?.response ?? judgeResult?.choices?.[0]?.message?.content ?? '';
           const rawV = (typeof rawVVal === 'string' ? rawVVal : JSON.stringify(rawVVal)).trim();
-          let verdict = 'compatible', confidence = 0.5, reason = '';
+          let verdict = 'compatible', confidence = 0.5, reason = '', parsedOk = Boolean(jevV);
           try {
             const match = rawV.match(/\{[^}]*\}/);
             if (match) {
@@ -1169,21 +1221,28 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
                 verdict = parsed.verdict;
                 confidence = Math.min(1, Math.max(0, Number(parsed.confidence) || 0.5));
                 reason = (parsed.reason ?? '').slice(0, 200);
+                parsedOk = true;
               }
             }
           } catch (e) {
             console.error('[memory_judge] JSON parse failed, defaulting to compatible:', e);
           }
           if (jevV) { verdict = jevV.verdict; confidence = jevV.confidence; reason = 'jev'; }
+          // No usable verdict: store nothing and keep the queue row, so the pair is retried next run
+          // instead of being recorded as a permanent "compatible".
+          if (!parsedOk) { failed = true; results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: no verdict, retry later`); continue; }
 
           const direction = resolveSupersedeDirection(target, cand);
           const [fromId, toId] = verdict === 'supersedes'
             ? [direction.fromId, direction.toId]
             : [target.id, cand.id];
+          const relationType = verdict === 'supersedes' && !shouldExpireOnSupersede(confidence, target.project, cand.project)
+            ? 'possible_supersede'
+            : verdict;
 
           await env.DB.prepare(
             'INSERT INTO memory_relations (id, from_id, to_id, relation_type, confidence, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-          ).bind(crypto.randomUUID(), fromId, toId, verdict, confidence, reason, now).run();
+          ).bind(crypto.randomUUID(), fromId, toId, relationType, confidence, reason, now).run();
 
           // Clear pending_judge entry now that verdict is stored
           await env.DB.prepare(
@@ -1195,15 +1254,24 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
           // survivor's contradiction_flag (both sides get flagged at store time — leaving the
           // winner flagged after judging keeps showing it as "[CONTRADICTED — re-evaluate]"
           // even though the relation is now resolved).
-          if (verdict === 'supersedes') {
+          if (relationType === 'supersedes') {
             await env.DB.prepare('UPDATE memories SET contradiction_flag = 1, valid_to = ? WHERE id = ?')
               .bind(Math.floor(Date.now() / 1000), direction.olderId).run();
             await env.DB.prepare('UPDATE memories SET contradiction_flag = 0 WHERE id = ?')
               .bind(direction.newerId).run();
+            if (direction.olderId === target.id) targetExpired = true;
           }
 
-          results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${verdict} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
+          results.push(`${target.id.slice(0, 8)} → ${cand.id.slice(0, 8)}: ${relationType} (${(confidence * 100).toFixed(0)}%) — ${reason}`);
+          // An expired target must not go on to expire its remaining candidates.
+          if (targetExpired) break;
         }
+        if (failed) continue;
+        await clearQueue();
+        if (!targetExpired) await clearFlag();
+      }
+      if (Date.now() >= deadline) break;
+      batch = await nextBatch();
       }
 
       return results.length ? results.join('\n') : 'All relations already judged.';

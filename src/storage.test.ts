@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery, QUERY_STOPWORDS } from './storage';
+import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery, QUERY_STOPWORDS, shouldExpireOnSupersede } from './storage';
 
 // ── isContradiction ──────────────────────────────────────────────────────
 
@@ -390,5 +390,30 @@ describe('jevMergeDecision', () => {
   it('returns null for an unknown label', async () => {
     const env = envWith(async () => ({ result: { answers: { action: { choice: 'merge_everything' } } } }));
     expect(await jevMergeDecision('a', 'b', env)).toBeNull();
+  });
+});
+
+// ── shouldExpireOnSupersede ──────────────────────────────────────────────
+// Regression for 2026-10-21: memory_judge expired older memories on any supersede verdict, so 35% and
+// 44% verdicts hid loosely related memories, and a cross-project pair (golf-coach vs default) expired
+// a note from another project.
+
+describe('shouldExpireOnSupersede', () => {
+  it('expires on a confident same-project verdict', () => {
+    expect(shouldExpireOnSupersede(1.0, 'gaussian-memory-worker', 'gaussian-memory-worker')).toBe(true);
+    expect(shouldExpireOnSupersede(0.8, 'default', 'default')).toBe(true);
+  });
+
+  it('does not expire below the confidence floor', () => {
+    expect(shouldExpireOnSupersede(0.44, 'gaussian-memory-worker', 'gaussian-memory-worker')).toBe(false);
+    expect(shouldExpireOnSupersede(0.79, 'default', 'default')).toBe(false);
+  });
+
+  it('does not expire across projects', () => {
+    expect(shouldExpireOnSupersede(0.97, 'golf-coach', 'default')).toBe(false);
+  });
+
+  it('treats a missing project as default', () => {
+    expect(shouldExpireOnSupersede(0.9, null, 'default')).toBe(true);
   });
 });

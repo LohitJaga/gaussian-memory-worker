@@ -194,6 +194,15 @@ export function resolveSupersedeDirection(
   return { fromId: newerId, toId: olderId, olderId, newerId };
 }
 
+// A supersede expires the older memory, so it needs a confident verdict on two memories from the same
+// project. Live 2026-10-21: supersedes at 35% and 44% expired loosely related memories, and on
+// 2026-10-10 a golf-coach note expired a default-project note. Weaker or cross-project verdicts are
+// recorded as 'possible_supersede' and both memories stay searchable.
+export const SUPERSEDE_MIN_CONFIDENCE = 0.8;
+export function shouldExpireOnSupersede(confidence: number, projectA: string | null, projectB: string | null): boolean {
+  return confidence >= SUPERSEDE_MIN_CONFIDENCE && (projectA ?? 'default') === (projectB ?? 'default');
+}
+
 const FTS_STOPWORDS = new Set([
   'the', 'and', 'but', 'for', 'with', 'this', 'that', 'from', 'have', 'has', 'was', 'were',
   'are', 'not', 'now', 'still', 'been', 'into', 'about', 'when', 'then', 'than', 'also',
