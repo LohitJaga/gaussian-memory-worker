@@ -469,7 +469,7 @@ These tools are called by the AI agent, not by you directly. In your harness (Cl
 |---|---|
 | `memory_retrieve` | Hybrid retrieval (cosine + BM25 + recency + access_freq) with Bhattacharyya multiplier, reranked by Jev. `context` passes the previous turn so vague queries resolve. `synthesize=true` blends equidistant memories. `project` scopes results (default: search all); `strict_project=true` excludes the default-project fallback for true isolation |
 | `memory_list` | List all memories, optionally filtered by domain |
-| `memory_timeline` | Chronological confidence trajectory per domain |
+| `memory_timeline` | Memories in date order with confidence and supersede markers. Pass `query` to follow one subject across topics (superseded memories included, so you see what replaced what), or `domain` for one topic |
 | `memory_belief_drift` | Show how confidence in a memory has changed over time |
 | `memory_belief_drift_backfill` | Reconstruct confidence history for existing memories from access metadata |
 
@@ -485,7 +485,7 @@ These tools are called by the AI agent, not by you directly. In your harness (Cl
 | `memory_retag_projects` | LLM-based project re-tagging for the default memory pool |
 | `memory_build_entities` | Retroactive entity extraction for entity graph traversal |
 | `memory_process_entity_queue` | Flush the pending entity-extraction queue deferred at store time |
-| `memory_judge` | LLM verdict on a memory against its nearest neighbors: supersedes / conflicts_with / extends / compatible. Pass `memory_id` to judge one; omit to auto-judge everything currently flagged as a contradiction |
+| `memory_judge` | Jev verdict (Llama fallback) on a memory against its nearest neighbors: supersedes / conflicts_with / extends / compatible. Only a supersede at 0.8+ confidence within one project hides the older memory, and it also retires close rewordings of it; weaker ones are stored as possible_supersede. Pass `memory_id` to judge one; omit to work through the queued near-misses, then flagged contradictions, until `budget_ms` runs out (the nightly cron runs it too) |
 
 ### Identity
 
