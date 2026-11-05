@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery, QUERY_STOPWORDS, shouldExpireOnSupersede } from './storage';
+import { isContradiction, normalizeForExactMatch, NEGATION, UNRESOLVED, RESOLVED, resolveSupersedeDirection, buildKeywordQuery, QUERY_STOPWORDS, shouldExpireOnSupersede, processPendingEntityQueue } from './storage';
+import { QUOTA_COOLDOWN_KV_KEY } from './ai';
 
 // ── isContradiction ──────────────────────────────────────────────────────
 
@@ -415,5 +416,102 @@ describe('shouldExpireOnSupersede', () => {
 
   it('treats a missing project as default', () => {
     expect(shouldExpireOnSupersede(0.9, null, 'default')).toBe(true);
+  });
+});
+
+// ── processPendingEntityQueue ────────────────────────────────────────────
+// Issue #1: one bad model reply or a quota error used to drop the rest of the batch, because the
+// shortened queue was written back before processing and the per-item body had no guard.
+
+function makeQueueEnv(replies: Record<string, any>, initialQueue: Array<{ id: string; text: string }>) {
+  const kv = new Map<string, string>([['pending_entity_queue', JSON.stringify(initialQueue)]]);
+  const batches: any[][] = [];
+  const env = {
+    KV: {
+      async get(k: string) { return kv.get(k) ?? null; },
+      async put(k: string, v: string) { kv.set(k, v); },
+    },
+    AI: {
+      async run(_model: string, input: any) {
+        const r = replies[input.messages[1].content];
+        if (r instanceof Error) throw r;
+        return r;
+      },
+    },
+    DB: {
+      prepare: (sql: string) => ({ bind: (...args: any[]) => ({ sql, args }) }),
+      async batch(ops: any[]) { batches.push(ops); },
+    },
+  } as any;
+  return { env, kv, batches };
+}
+
+const linkedIds = (batches: any[][]) =>
+  batches.map(ops => ops.find((o: any) => o.sql.includes('memory_entities')).args[0]);
+
+describe('processPendingEntityQueue', () => {
+  const queue = [{ id: 'a', text: 'A' }, { id: 'b', text: 'B' }, { id: 'c', text: 'C' }];
+
+  it('skips an item whose reply is not valid JSON and still processes the rest', async () => {
+    const { env, kv, batches } = makeQueueEnv({
+      A: { response: '[tool:foo]' },
+      B: { response: '["tool:x"]' },
+      C: { response: '["project:y"]' },
+    }, queue);
+    await processPendingEntityQueue(env);
+    expect(linkedIds(batches)).toEqual(['b', 'c']);
+    expect(JSON.parse(kv.get('pending_entity_queue') ?? '[]')).toEqual([]);
+  });
+
+  it('skips non-string array elements without throwing', async () => {
+    const { env, batches } = makeQueueEnv({
+      A: { response: '[1, null, "tool:x"]' },
+      B: { response: '[]' },
+      C: { response: '["concept:z"]' },
+    }, queue);
+    await processPendingEntityQueue(env);
+    expect(linkedIds(batches)).toEqual(['a', 'c']);
+  });
+
+  it('puts the unprocessed items back on the queue when the quota runs out', async () => {
+    const { env, kv, batches } = makeQueueEnv({
+      A: { response: '["tool:x"]' },
+      B: new Error('3036: You have used up your daily free allocation of 10,000 neurons'),
+      C: { response: '["tool:y"]' },
+    }, queue);
+    await processPendingEntityQueue(env);
+    expect(linkedIds(batches)).toEqual(['a']);
+    expect(JSON.parse(kv.get('pending_entity_queue') ?? '[]').map((q: any) => q.id)).toEqual(['b', 'c']);
+  });
+});
+
+describe('processPendingEntityQueue: transient failures and cooldown', () => {
+  const queue = [{ id: 'a', text: 'A' }, { id: 'b', text: 'B' }, { id: 'c', text: 'C' }];
+
+  it('requeues an item that hit a transient error, at the back, with an attempt count', async () => {
+    const { env, kv, batches } = makeQueueEnv({
+      A: { response: '["tool:x"]' },
+      B: new Error('network timeout'),
+      C: { response: '["tool:y"]' },
+    }, queue);
+    const res = await processPendingEntityQueue(env);
+    expect(res).toEqual({ processed: 2, stoppedOnQuota: false });
+    expect(linkedIds(batches)).toEqual(['a', 'c']);
+    expect(JSON.parse(kv.get('pending_entity_queue') ?? '[]')).toEqual([{ id: 'b', text: 'B', attempts: 1 }]);
+  });
+
+  it('drops an item after its last allowed attempt', async () => {
+    const { env, kv } = makeQueueEnv({ B: new Error('network timeout') }, [{ id: 'b', text: 'B', attempts: 2 }] as any);
+    await processPendingEntityQueue(env);
+    expect(JSON.parse(kv.get('pending_entity_queue') ?? '[]')).toEqual([]);
+  });
+
+  it('leaves the queue untouched during a quota cooldown', async () => {
+    const { env, kv, batches } = makeQueueEnv({ A: { response: '["tool:x"]' } }, queue);
+    kv.set(QUOTA_COOLDOWN_KV_KEY, '1');
+    const res = await processPendingEntityQueue(env);
+    expect(res.stoppedOnQuota).toBe(true);
+    expect(batches).toEqual([]);
+    expect(JSON.parse(kv.get('pending_entity_queue') ?? '[]').map((q: any) => q.id)).toEqual(['a', 'b', 'c']);
   });
 });

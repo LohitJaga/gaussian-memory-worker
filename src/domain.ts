@@ -268,9 +268,10 @@ export async function classifyBatchDomains(
       const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
       const match = raw.match(/\[[\s\S]*?\]/);
       if (match) {
-        const parsed = JSON.parse(match[0]) as string[];
-        for (let j = 0; j < group.length && j < parsed.length; j++) {
-          const choice = cleanDomainName(parsed[j] ?? '');
+        const parsed: unknown = JSON.parse(match[0]);
+        const labels = Array.isArray(parsed) ? parsed : [];
+        for (let j = 0; j < group.length && j < labels.length; j++) {
+          const choice = typeof labels[j] === 'string' ? cleanDomainName(labels[j]) : null;
           if (choice && (names.has(choice) || choice === 'general')) {
             assignments[group[j]] = choice;
           }

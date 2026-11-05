@@ -4,7 +4,7 @@ import {
   initialSigma, deserializeSigma, serializeSigma,
   kalmanMerge, shouldMerge, meanSigma,
 } from './gaussian';
-import { callAI, QuotaExceededError } from './ai';
+import { callAI, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
 
 // Live-deployment migration: pending_ingest doesn't exist on already-deployed D1 databases.
 // CREATE TABLE IF NOT EXISTS is natively idempotent (unlike ALTER TABLE ADD COLUMN, which SQLite
@@ -101,44 +101,82 @@ export async function extractAndLinkEntities(memoryId: string, text: string, env
   } catch {}
 }
 
-export async function processPendingEntityQueue(env: Env): Promise<void> {
+type EntityQueueItem = { id: string; text: string; attempts?: number };
+const ENTITY_QUEUE_MAX_ATTEMPTS = 3;
+
+// Re-reads the queue before writing so items enqueued while a batch ran aren't overwritten.
+// Same 200 cap as extractAndLinkEntities, keeping the newest when over.
+async function requeueEntityItems(env: Env, items: EntityQueueItem[], atFront: boolean): Promise<void> {
+  if (!items.length) return;
+  const curRaw = await env.KV.get('pending_entity_queue');
+  const cur: EntityQueueItem[] = curRaw ? JSON.parse(curRaw) : [];
+  const merged = atFront ? [...items, ...cur] : [...cur, ...items];
+  await env.KV.put('pending_entity_queue', JSON.stringify(merged.slice(-200)));
+}
+
+export async function processPendingEntityQueue(env: Env): Promise<{ processed: number; stoppedOnQuota: boolean }> {
+  let processed = 0;
   try {
+    // Skip the batch entirely during a quota cooldown instead of dequeuing and requeuing it.
+    if (await env.KV.get(QUOTA_COOLDOWN_KV_KEY).catch(() => null)) return { processed, stoppedOnQuota: true };
     const raw = await env.KV.get('pending_entity_queue');
-    if (!raw) return;
-    const queue: Array<{id: string; text: string}> = JSON.parse(raw);
-    if (!queue.length) return;
+    if (!raw) return { processed, stoppedOnQuota: false };
+    const queue: EntityQueueItem[] = JSON.parse(raw);
+    if (!queue.length) return { processed, stoppedOnQuota: false };
     const batch = queue.splice(0, 50); // process up to 50 per cron run
     await env.KV.put('pending_entity_queue', JSON.stringify(queue));
     const now = Math.floor(Date.now() / 1000);
-    for (const item of batch) {
-      const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
-        messages: [
-          { role: 'system', content: `Extract named entities. Return ONLY a JSON array of "type:name" strings. Max 4. Types: tool, project, concept, parameter, person. Return [] if none. Example: ["tool:GLM-4.7-flash","concept:spreading activation"]` },
-          { role: 'user', content: item.text },
-        ],
-        max_tokens: 128, temperature: 0,
-      }) as any;
-      const rawEnt = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
-      const match = rawEnt.match(/\[[\s\S]*?\]/);
-      if (!match) continue;
-      const entities = JSON.parse(match[0]) as string[];
-      const ops: any[] = [];
-      for (const ent of entities) {
-        const colonIdx = ent.indexOf(':');
-        if (colonIdx < 0) continue;
-        const type = ent.slice(0, colonIdx).trim();
-        const name = ent.slice(colonIdx + 1).trim();
-        if (!type || !name) continue;
-        const entId = `ent_${type}_${name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`;
-        ops.push(env.DB.prepare(`INSERT OR IGNORE INTO entity_nodes (id, type, canonical_name, last_seen) VALUES (?,?,?,?)`).bind(entId, type, name, now));
-        ops.push(env.DB.prepare(`UPDATE entity_nodes SET last_seen = ? WHERE id = ?`).bind(now, entId));
-        ops.push(env.DB.prepare(`INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, entity_span) VALUES (?,?,?)`).bind(item.id, entId, name));
+    const retry: EntityQueueItem[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      const item = batch[i];
+      try {
+        const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+          messages: [
+            { role: 'system', content: `Extract named entities. Return ONLY a JSON array of "type:name" strings. Max 4. Types: tool, project, concept, parameter, person. Return [] if none. Example: ["tool:GLM-4.7-flash","concept:spreading activation"]` },
+            { role: 'user', content: item.text },
+          ],
+          max_tokens: 128, temperature: 0,
+        }) as any;
+        // A moderation-flagged reply can come back as a non-string; treat it as no entities.
+        const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+        const rawEnt = typeof rawVal === 'string' ? rawVal.trim() : '';
+        const match = rawEnt.match(/\[[\s\S]*?\]/);
+        // A reply that isn't a valid JSON array (e.g. [tool:foo]) means no entities for this item.
+        let parsed: unknown = [];
+        if (match) { try { parsed = JSON.parse(match[0]); } catch { parsed = []; } }
+        const entities: unknown[] = Array.isArray(parsed) ? parsed : [];
+        const ops: any[] = [];
+        for (const ent of entities) {
+          if (typeof ent !== 'string') continue;
+          const colonIdx = ent.indexOf(':');
+          if (colonIdx < 0) continue;
+          const type = ent.slice(0, colonIdx).trim();
+          const name = ent.slice(colonIdx + 1).trim();
+          if (!type || !name) continue;
+          const entId = `ent_${type}_${name.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`;
+          ops.push(env.DB.prepare(`INSERT OR IGNORE INTO entity_nodes (id, type, canonical_name, last_seen) VALUES (?,?,?,?)`).bind(entId, type, name, now));
+          ops.push(env.DB.prepare(`UPDATE entity_nodes SET last_seen = ? WHERE id = ?`).bind(now, entId));
+          ops.push(env.DB.prepare(`INSERT OR IGNORE INTO memory_entities (memory_id, entity_id, entity_span) VALUES (?,?,?)`).bind(item.id, entId, name));
+        }
+        if (ops.length > 0) await env.DB.batch(ops);
+        processed++;
+      } catch (e) {
+        if (e instanceof QuotaExceededError) {
+          // Every remaining call would fail the same way until the quota resets: put this item
+          // and the rest of the batch back at the front, plus anything waiting to retry.
+          await requeueEntityItems(env, [...batch.slice(i), ...retry], true);
+          return { processed, stoppedOnQuota: true };
+        }
+        // Transient failure (capacity, network, D1): retry on a later run, up to a limit.
+        if ((item.attempts ?? 0) + 1 < ENTITY_QUEUE_MAX_ATTEMPTS) retry.push({ ...item, attempts: (item.attempts ?? 0) + 1 });
+        console.error('[entity-queue]', item.id, e);
       }
-      if (ops.length > 0) await env.DB.batch(ops);
     }
+    await requeueEntityItems(env, retry, false);
   } catch (e) {
     console.error('[entity-queue]', e);
   }
+  return { processed, stoppedOnQuota: false };
 }
 
 export const NEGATION = /\b(no longer|stop using|stopped using|don't use|switched from|instead of|avoid using|shouldn't use|never use|removed|disabled|deprecated)\b/i;

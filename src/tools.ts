@@ -1112,13 +1112,11 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
     }
 
     case 'memory_process_entity_queue': {
-      const before = await env.KV.get('pending_entity_queue');
-      const beforeCount = before ? JSON.parse(before).length : 0;
-      await processPendingEntityQueue(env);
+      const { processed, stoppedOnQuota } = await processPendingEntityQueue(env);
       const after = await env.KV.get('pending_entity_queue');
       const afterCount = after ? JSON.parse(after).length : 0;
       const entityCount = await env.DB.prepare('SELECT COUNT(*) as n FROM memory_entities').first<{n:number}>();
-      return `Processed ${beforeCount - afterCount} memories. Queue: ${beforeCount} → ${afterCount}. Total entity links: ${entityCount?.n ?? 0}`;
+      return `Processed ${processed} memories${stoppedOnQuota ? ' (stopped: Workers AI daily quota reached, resumes after 00:00 UTC)' : ''}. Queue: ${afterCount} remaining. Total entity links: ${entityCount?.n ?? 0}`;
     }
 
     case 'memory_judge': {
@@ -1592,9 +1590,9 @@ Return ONLY valid JSON array:
           if (match) {
             const parsed = JSON.parse(match[0]);
             // Handle both object array and legacy string array
-            facts = parsed.map((f: any) =>
-              typeof f === 'string' ? { text: f } : f
-            );
+            facts = (Array.isArray(parsed) ? parsed : [])
+              .map((f: any) => typeof f === 'string' ? { text: f } : f)
+              .filter((f: any) => f && typeof f === 'object' && !Array.isArray(f) && typeof f.text === 'string');
           }
         } catch {}
 
@@ -1841,8 +1839,10 @@ Return ONLY valid JSON array:
       const offsetRaw = await env.KV.get('ENTITY_BUILD_OFFSET');
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
 
+      // Stable order: access_count changes on every retrieve, so paging by it between calls
+      // skips some memories and repeats others.
       const rows = await env.DB.prepare(
-        `SELECT id, text FROM memories ORDER BY access_count DESC, rowid DESC LIMIT ? OFFSET ?`
+        `SELECT id, text FROM memories ORDER BY rowid LIMIT ? OFFSET ?`
       ).bind(BATCH, offset).all<{ id: string; text: string }>();
 
       const batch = rows.results ?? [];
@@ -1996,14 +1996,16 @@ Return: ["project-name", "project-name", ...]`,
       // can make Workers AI return a non-string response shape).
       const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
       const raw = typeof rawVal === 'string' ? rawVal.trim() : '';
+      let moved = 0;
       try {
         const match = raw.match(/\[[\s\S]*?\]/);
         if (match) {
-          const parsed = JSON.parse(match[0]) as string[];
+          const parsed: unknown = JSON.parse(match[0]);
+          const labels = Array.isArray(parsed) ? parsed : [];
           const updates = batch
             .map((r, i) => {
-              const p = (parsed[i] ?? 'default').trim();
-              return PROJECTS.includes(p) ? { id: r.id, project: p } : null;
+              const p = typeof labels[i] === 'string' ? labels[i].trim() : 'default';
+              return p !== 'default' && PROJECTS.includes(p) ? { id: r.id, project: p } : null;
             })
             .filter(Boolean) as { id: string; project: string }[];
 
@@ -2011,11 +2013,15 @@ Return: ["project-name", "project-name", ...]`,
             await env.DB.batch(
               updates.map(u => env.DB.prepare('UPDATE memories SET project = ? WHERE id = ?').bind(u.project, u.id))
             );
+            moved = updates.length;
           }
         }
       } catch {}
 
-      await env.KV.put('RETAG_OFFSET', String(offset + BATCH));
+      // The query filters on project = 'default', so retagged rows leave the result set. Advance
+      // only past the rows that stayed default, or the next OFFSET skips untouched rows
+      // (same approach as rebuild.ts's targeted pass).
+      await env.KV.put('RETAG_OFFSET', String(offset + batch.length - moved));
       const remaining = await env.DB.prepare(`SELECT COUNT(*) as n FROM memories WHERE project = 'default'`).first<{n:number}>();
       return `Processed batch. ~${remaining?.n ?? '?'} default memories remaining.`;
     }
