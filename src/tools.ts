@@ -1856,7 +1856,7 @@ Return ONLY valid JSON array:
       // or shrinking the batch doesn't fix that (it either truncates later or "succeeds"
       // with every slot silently wrong) — one memory per call removes the cross-item
       // interference entirely, since each call only ever sees one memory's text.
-      const BATCH = 8;
+      const BATCH = 32;
       const offsetRaw = await env.KV.get('ENTITY_BUILD_OFFSET');
       const offset = offsetRaw ? parseInt(offsetRaw, 10) : 0;
 
