@@ -1,6 +1,6 @@
 import type { Env } from './types';
 import { embed, batchEmbed, dotProduct } from './embed';
-import { callAI } from './ai';
+import { aiText, callAI, SMALL_MODEL } from './ai';
 import { hotTierGet, hotTierAddMany, buildKeywordQuery, QUERY_STOPWORDS } from './storage';
 import {
   deserializeSigma, serializeSigma, meanSigma, sharpenSigma, distributionalScore,
@@ -529,12 +529,12 @@ export async function retrieve(
     }
   }
   if (top1Cos < 0.85 && v.hyde) {
-    const r = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+    const r = await callAI(env, SMALL_MODEL, {
       messages: [{ role: 'user', content: `A developer typed this to their AI coding assistant: "${query}"
 Write the one-sentence note the assistant probably saved earlier that this message refers to. Output only the note.` }],
       max_tokens: 60,
     }).catch(() => null) as any;
-    const note = String(r?.response ?? '').trim();
+    const note = aiText(r).trim();
     if (note) extraVecs.push(await embed(note, env));
   }
   if (extraVecs.length) {

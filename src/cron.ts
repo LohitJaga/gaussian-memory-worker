@@ -5,7 +5,7 @@ import {
 } from './domain';
 import { applyBatchAssignments } from './rebuild';
 import { decaySigma, deserializeSigma, serializeSigma, meanSigma } from './gaussian';
-import { callAI } from './ai';
+import { aiText, callAI, SMALL_MODEL } from './ai';
 import { groupSimilarByCosine, DEDUP_COS } from './retrieval';
 
 export async function updateDecay(env: Env): Promise<{ decayed: number; pruned: number }> {
@@ -435,7 +435,7 @@ export async function synthesizeIdentityProfile(env: Env): Promise<void> {
   const facts = (rows.results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+  const result = await callAI(env, SMALL_MODEL, {
     messages: [
       {
         role: 'system',
@@ -446,7 +446,7 @@ export async function synthesizeIdentityProfile(env: Env): Promise<void> {
     max_tokens: 700,
   }) as any;
 
-  const profile = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
+  const profile = aiText(result).trim();
   if (profile) {
     await env.KV.put('IDENTITY_PROFILE', profile);
   }
@@ -484,14 +484,14 @@ export async function consolidateColdMemories(env: Env): Promise<{ archived: num
     const batch = cold.slice(i, i + BATCH);
     const summaries = await Promise.all(batch.map(async row => {
       try {
-        const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+        const result = await callAI(env, SMALL_MODEL, {
           messages: [
             { role: 'system', content: 'Summarize the following memory in one concise sentence. Return only the sentence.' },
             { role: 'user', content: row.text },
           ],
           max_tokens: 80,
         }) as any;
-        return (result?.response ?? result?.choices?.[0]?.message?.content ?? row.text ?? '').trim();
+        return (aiText(result) || row.text || '').trim();
       } catch {
         return (row.text ?? '').slice(0, 200);
       }

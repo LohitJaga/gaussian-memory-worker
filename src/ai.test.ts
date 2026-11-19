@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  callAI, isQuotaExceededError, cooldownTtlSeconds, secondsUntilNextMidnightUTC,
+  aiText, callAI, isQuotaExceededError, cooldownTtlSeconds, secondsUntilNextMidnightUTC,
   QuotaExceededError, QUOTA_COOLDOWN_KV_KEY, KV_MIN_TTL_SECONDS,
 } from './ai';
 
@@ -267,5 +267,31 @@ describe('QuotaExceededError', () => {
   it('has a sensible default message', () => {
     const e = new QuotaExceededError();
     expect(e.message.length).toBeGreaterThan(0);
+  });
+});
+
+describe('aiText', () => {
+  it('prefers the raw content string over a parsed JSON response', () => {
+    expect(aiText({ response: [], choices: [{ message: { content: '["tool:D1"]' } }] })).toBe('["tool:D1"]');
+  });
+  it('falls back to a string response', () => {
+    expect(aiText({ response: 'hello' })).toBe('hello');
+  });
+  it('treats a non-string response as no answer by default', () => {
+    expect(aiText({ response: [] })).toBe('');
+    expect(aiText({ response: { flagged: true } })).toBe('');
+    expect(aiText({ response: ['tool:D1'] })).toBe('');
+  });
+  it("accepts a non-empty parsed array with 'array', never an empty one or an object", () => {
+    expect(aiText({ response: ['tool:D1'] }, 'array')).toBe('["tool:D1"]');
+    expect(aiText({ response: [] }, 'array')).toBe('');
+    expect(aiText({ response: { categories: ['S1'] } }, 'array')).toBe('');
+  });
+  it("accepts a non-empty parsed object with 'any'", () => {
+    expect(aiText({ response: { verdict: 'x' } }, 'any')).toBe('{"verdict":"x"}');
+    expect(aiText({ response: {} }, 'any')).toBe('');
+  });
+  it('returns empty for nothing', () => {
+    expect(aiText(null)).toBe('');
   });
 });

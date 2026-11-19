@@ -4,7 +4,7 @@ import {
   initialSigma, deserializeSigma, serializeSigma,
   kalmanMerge, shouldMerge, meanSigma,
 } from './gaussian';
-import { callAI, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
+import { aiText, callAI, SMALL_MODEL, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
 
 // Live-deployment migration: pending_ingest doesn't exist on already-deployed D1 databases.
 // CREATE TABLE IF NOT EXISTS is natively idempotent (unlike ALTER TABLE ADD COLUMN, which SQLite
@@ -130,7 +130,7 @@ export async function processPendingEntityQueue(env: Env): Promise<{ processed: 
     for (let i = 0; i < batch.length; i++) {
       const item = batch[i];
       try {
-        const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+        const result = await callAI(env, SMALL_MODEL, {
           messages: [
             { role: 'system', content: `Extract named entities. Return ONLY a JSON array of "type:name" strings. Max 4. Types: tool, project, concept, parameter, person. Return [] if none. Example: ["tool:GLM-4.7-flash","concept:spreading activation"]` },
             { role: 'user', content: item.text },
@@ -138,8 +138,7 @@ export async function processPendingEntityQueue(env: Env): Promise<{ processed: 
           max_tokens: 128, temperature: 0,
         }) as any;
         // A moderation-flagged reply can come back as a non-string; treat it as no entities.
-        const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-        const rawEnt = typeof rawVal === 'string' ? rawVal.trim() : '';
+        const rawEnt = aiText(result, 'array').trim();
         const match = rawEnt.match(/\[[\s\S]*?\]/);
         // A reply that isn't a valid JSON array (e.g. [tool:foo]) means no entities for this item.
         let parsed: unknown = [];

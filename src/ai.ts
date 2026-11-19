@@ -18,9 +18,30 @@ import type { Env } from './types';
 //     won't misfire on 3040 or on a future unrelated 429 class.
 export const QUOTA_COOLDOWN_KV_KEY = 'quota:cooldown';
 
+// Small instruct model used by every classification/extraction call site. llama-3.2-3b-instruct
+// retires 2026-11-20.
+export const SMALL_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
+
 // Cloudflare KV's expirationTtl has a hard floor of 60s — env.KV.put rejects a smaller TTL
 // outright rather than silently rounding up, so this file owns the clamp (see cooldownTtlSeconds).
 export const KV_MIN_TTL_SECONDS = 60;
+
+// Text of a chat model's answer. When the answer is JSON, Workers AI parses it into `response`
+// (an array/object, and on llama-3.1-8b-instruct-fast sometimes an empty []), so reading only a
+// string `response` throws the answer away. choices[0].message.content holds the raw string, so
+// read that first. A non-string `response` with no content is NOT an answer by default (it can be
+// a moderation object or that spurious []); `parsed` opts a JSON call site into accepting a
+// non-empty parsed array ('array') or array/object ('any') from `response` instead.
+export function aiText(result: any, parsed: 'none' | 'array' | 'any' = 'none'): string {
+  const content = result?.choices?.[0]?.message?.content;
+  if (typeof content === 'string' && content.trim()) return content;
+  const r = result?.response;
+  if (typeof r === 'string') return r;
+  if (parsed === 'none' || r == null || typeof r !== 'object') return '';
+  if (Array.isArray(r)) return r.length ? JSON.stringify(r) : '';
+  return parsed === 'any' && Object.keys(r).length ? JSON.stringify(r) : '';
+}
+
 
 export class QuotaExceededError extends Error {
   constructor(message: string = 'Workers AI daily free quota exceeded') {

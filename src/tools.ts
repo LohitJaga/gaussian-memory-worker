@@ -7,7 +7,7 @@ import { storeMemory, processPendingEntityQueue, resolveSupersedeDirection, buil
 import { retrieve, baselineRetrieve } from './retrieval';
 import { updateDecay, cleanupSingletons, findDuplicateClusters } from './cron';
 import { deserializeSigma, meanSigma } from './gaussian';
-import { callAI, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
+import { aiText, callAI, SMALL_MODEL, QuotaExceededError, QUOTA_COOLDOWN_KV_KEY } from './ai';
 
 // Rows drained from pending_ingest per nightly cron run (last step in index.ts's scheduled()).
 // Deliberately capped and tunable in one place: quota resets fresh at 00:00 UTC but cron runs at
@@ -198,6 +198,7 @@ export const TOOLS = [
       type: 'object',
       properties: {
         log_text: { type: 'string' },
+        project: { type: 'string' },
       },
       required: ['log_text'],
     },
@@ -397,7 +398,23 @@ export async function retireStaleCopies(newer: JudgedMemory, older: JudgedMemory
   return out;
 }
 
+// A call missing a required argument (e.g. `content` passed where the schema says `text`) used to
+// fall through to a misleading "SKIP: low-signal" result. Name the problem instead.
+export function missingArgsError(name: string, args: Record<string, unknown>): string | null {
+  const tool = TOOLS.find(t => t.name === name);
+  const schema = tool?.inputSchema as { properties?: Record<string, unknown>; required?: string[] } | undefined;
+  const missing = (schema?.required ?? []).filter(k => args[k] === undefined || args[k] === null);
+  if (!missing.length) return null;
+  const known = Object.keys(schema?.properties ?? {});
+  const unknown = Object.keys(args).filter(k => !known.includes(k));
+  return `ERROR: ${name} is missing required argument(s): ${missing.join(', ')}.` +
+    (unknown.length ? ` Unrecognized: ${unknown.join(', ')}.` : '') +
+    ` Accepted: ${known.join(', ')}.`;
+}
+
 export async function handleToolCall(name: string, args: any, env: Env, ctx?: ExecutionContext): Promise<string> {
+  const argsError = missingArgsError(name, args ?? {});
+  if (argsError) return argsError;
   switch (name) {
     case 'memory_store': {
       if (!args.text || isLowSignalText(args.text as string)) return 'SKIP: low-signal or chat-filler text';
@@ -454,7 +471,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       if (args.context) {
         try {
           const enrichResult = await Promise.race([
-            callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+            callAI(env, SMALL_MODEL, {
               messages: [
                 {
                   role: 'system',
@@ -470,7 +487,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
             }),
             new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
           ]) as any;
-          const enriched = (enrichResult?.response ?? enrichResult?.choices?.[0]?.message?.content ?? '').trim();
+          const enriched = aiText(enrichResult).trim();
           if (enriched && enriched.length > 20 && enriched.length < 300) storedText = enriched;
         } catch {}
       }
@@ -599,14 +616,13 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       // GLM-4.7-flash is a thinking model: reasoning goes into reasoning_content,
       // the final answer is in choices[0].message.content (null until reasoning completes).
       // Must use max_tokens >= 1024 so the model can finish reasoning and emit content.
-      const choice = gateResult?.choices?.[0]?.message;
-      const rawGate = (gateResult?.response ?? choice?.content ?? '') as string;
+      const rawGate = aiText(gateResult);
       const gateAnswer = rawGate.trim().toUpperCase();
       if (!gateAnswer.startsWith('YES')) return 'SKIP: low signal (GLM quality gate)';
 
       // Ask Llama to describe the change semantically in one sentence
       // Llama 3.1 8B for diff description — GLM fails on short/minimal diffs (returns {})
-      const descResult = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+      const descResult = await callAI(env, SMALL_MODEL, {
         messages: [
           {
             role: 'system',
@@ -619,8 +635,7 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
       // `as string` is compile-time only — coerce for real, same crash class as
       // memory_build_entities (Workers AI can return a non-string response shape).
-      const descRaw = descResult?.response ?? '';
-      const description = (typeof descRaw === 'string' ? descRaw : '').trim();
+      const description = aiText(descResult).trim();
       if (!description || description.length < 10) return 'SKIP: model returned empty description';
 
       const mu = await embed(description, env);
@@ -704,14 +719,14 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
         // call site starts observing the shared cooldown. Degrading to "no synthesis preamble"
         // (same as the non-synthesize path) instead.
         try {
-          const blend = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+          const blend = await callAI(env, SMALL_MODEL, {
             messages: [
               { role: 'system', content: 'Memory synthesis: given 2-3 closely related memories, write one sentence that reconstructs the underlying belief or fact. Be specific. No preamble.' },
               { role: 'user', content: blendInput },
             ],
             max_tokens: 100,
           }) as any;
-          const blended = (blend?.response ?? blend?.choices?.[0]?.message?.content ?? '').trim();
+          const blended = aiText(blend).trim();
           if (blended) preamble = `[SYNTHESIS] ${blended}\n`;
         } catch {}
       }
@@ -1319,8 +1334,7 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
             temperature: 0,
           }) as any;
 
-          const rawVVal = judgeResult?.response ?? judgeResult?.choices?.[0]?.message?.content ?? '';
-          const rawV = (typeof rawVVal === 'string' ? rawVVal : JSON.stringify(rawVVal)).trim();
+          const rawV = aiText(judgeResult, 'any').trim();
           let verdict = 'compatible', confidence = 0.5, reason = '', parsedOk = Boolean(jevV);
           try {
             const match = rawV.match(/\{[^}]*\}/);
@@ -1583,8 +1597,7 @@ Return ONLY valid JSON array:
           temperature: 0,
         }) as any;
 
-        const rawVal = extraction?.response ?? extraction?.choices?.[0]?.message?.content ?? '';
-        const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
+        const raw = aiText(extraction, 'array').trim();
         try {
           const match = raw.match(/\[[\s\S]*\]/);
           if (match) {
@@ -1827,7 +1840,7 @@ Return ONLY valid JSON array:
       // entity_nodes + memory_entities for 1-hop graph traversal at retrieve time.
       //
       // Previously batched N memories into one array-of-arrays prompt. That let a small
-      // model (llama-3.2-3b) degenerate into repeating ONE item's answer for every slot
+      // model (llama-3.2-3b, since replaced by SMALL_MODEL) degenerate into repeating ONE item's answer for every slot
       // when several batch items were topically similar (e.g. many Gaussian Memory
       // session notes all mentioning topK=2/Bhattacharyya) — confirmed via the debug
       // path below, which showed rawPreview repeating `["project:Gaussian Memory",
@@ -1857,7 +1870,7 @@ Return ONLY a JSON array: ["type:canonical_name", ...]. Return [] if no clear en
 Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
 
       async function extractOne(text: string): Promise<{ raw: string; entities: string[]; parseError: string }> {
-        const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+        const result = await callAI(env, SMALL_MODEL, {
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: text.slice(0, 300) },
@@ -1869,8 +1882,7 @@ Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
         // Coerce before use — Workers AI can return a non-string `response` (e.g. a
         // safety/moderation object) for sensitive content; without this guard a crash
         // here would propagate past this function with no per-item isolation.
-        const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-        const raw = typeof rawVal === 'string' ? rawVal.trim() : '';
+        const raw = aiText(result, 'array').trim();
         try {
           const match = raw.match(/\[[\s\S]*\]/);
           if (!match) return { raw, entities: [], parseError: '' };
@@ -1974,7 +1986,7 @@ Example: ["tool:GLM-4.7-flash","concept:spreading activation"]`;
 
       const projectList = PROJECTS.map(p => `- ${p}`).join('\n');
       const numbered = batch.map((r, i) => `${i+1}. ${r.text.slice(0, 120)}`).join('\n');
-      const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+      const result = await callAI(env, SMALL_MODEL, {
         messages: [
           {
             role: 'system',
@@ -1994,8 +2006,7 @@ Return: ["project-name", "project-name", ...]`,
       // would throw before RETAG_OFFSET advances below, permanently wedging this
       // batch (see that fix's comment for why: safety/moderation-flagged content
       // can make Workers AI return a non-string response shape).
-      const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-      const raw = typeof rawVal === 'string' ? rawVal.trim() : '';
+      const raw = aiText(result, 'array').trim();
       let moved = 0;
       try {
         const match = raw.match(/\[[\s\S]*?\]/);

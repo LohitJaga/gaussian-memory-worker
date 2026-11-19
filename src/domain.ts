@@ -1,5 +1,5 @@
 import { dotProduct, embed } from './embed';
-import { callAI } from './ai';
+import { aiText, callAI, SMALL_MODEL } from './ai';
 import type { Env } from './types';
 
 export const DOMAIN_CAP = 50;
@@ -104,8 +104,7 @@ function cleanDomainName(raw: string): string | null {
 }
 
 function parseJsonName(result: any, key: string): string | null {
-  const rawVal = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-  const raw = (typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal)).trim();
+  const raw = aiText(result, 'any').trim();
   try {
     const match = raw.match(/\{[^}]*\}/);
     if (match) {
@@ -264,8 +263,7 @@ export async function classifyBatchDomains(
         temperature: 0,
       }) as any;
 
-      const rawBatch = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
-      const raw = (typeof rawBatch === 'string' ? rawBatch : JSON.stringify(rawBatch)).trim();
+      const raw = aiText(result, 'array').trim();
       const match = raw.match(/\[[\s\S]*?\]/);
       if (match) {
         const parsed: unknown = JSON.parse(match[0]);
@@ -373,7 +371,7 @@ export async function refreshDomainSummary(domainName: string, newCount: number,
   const facts = ((fallback ?? rows).results ?? []).map(r => r.text).join('\n');
   if (!facts) return;
 
-  const result = await callAI(env, '@cf/meta/llama-3.2-3b-instruct', {
+  const result = await callAI(env, SMALL_MODEL, {
     messages: [
       { role: 'system', content: `Summarize what this person knows, does, or prefers specifically in the "${domainName}" domain. Focus only on what distinguishes this domain from others. 2 sentences, specific and factual. No speculation or preamble.` },
       { role: 'user', content: facts },
@@ -381,7 +379,7 @@ export async function refreshDomainSummary(domainName: string, newCount: number,
     max_tokens: 120,
   }) as any;
 
-  const summary = (result?.response ?? result?.choices?.[0]?.message?.content ?? '').trim();
+  const summary = aiText(result).trim();
   if (summary) {
     await env.KV.put(`domain_summary:${domainName}`, summary);
     await env.DB.prepare('UPDATE domain_anchors SET last_summarized_count = ? WHERE name = ?')

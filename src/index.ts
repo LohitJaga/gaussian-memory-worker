@@ -10,7 +10,7 @@ import {
 } from './cron';
 import { processPendingEntityQueue } from './storage';
 import { retrieve, baselineRetrieve } from './retrieval';
-import { callAI } from './ai';
+import { aiText, callAI } from './ai';
 
 export type { Env };
 
@@ -221,7 +221,7 @@ export default {
         // confirmed live (2026-07-13, LoCoMo eval) that .content can come back as a
         // non-string (e.g. structured content parts) for some responses — coerce here
         // so callers always get a string, not an object that crashes their .trim()/.match().
-        const text = String(result?.response ?? result?.choices?.[0]?.message?.content ?? '');
+        const text = aiText(result, 'any');
         return new Response(JSON.stringify({ model: q.model, text, _raw: q.debug === true ? result : undefined }), { headers: JSON_HEADERS });
       } catch (e: any) {
         return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: JSON_HEADERS });
