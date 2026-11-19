@@ -71,6 +71,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   text,
   project UNINDEXED
 );
+-- The code writes memories_fts itself on insert, text edit and delete. This trigger only keeps
+-- the project filter in sync when memory_retag_projects moves a memory. Do not add a trigger on
+-- every UPDATE: id is UNINDEXED, so each firing scans the whole FTS table, and decay/access-count
+-- updates would then read the entire table per row (the D1 "overloaded" errors).
+CREATE TRIGGER IF NOT EXISTS memories_fts_project AFTER UPDATE OF project ON memories
+WHEN old.project IS NOT new.project
+BEGIN
+  UPDATE memories_fts SET project = new.project WHERE id = old.id;
+END;
 
 -- Entity graph for 1-hop traversal at retrieve time
 CREATE TABLE IF NOT EXISTS entity_nodes (

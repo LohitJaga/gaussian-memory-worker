@@ -778,30 +778,23 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
 
     case 'memory_orphan_check': {
       const repair = args.repair === true;
-      // Fetch all D1 IDs + text in batches
-      const allRows = await env.DB.prepare(
-        'SELECT id, text, domain, memory_type, project FROM memories ORDER BY rowid'
-      ).all<{ id: string; text: string; domain: string; memory_type: string; project: string }>();
-
-      const rows = allRows.results ?? [];
+      // Only ids up front; text etc. is loaded for orphans alone, at repair time.
+      const rows = (await env.DB.prepare('SELECT id FROM memories ORDER BY rowid').all<{ id: string }>()).results ?? [];
       if (!rows.length) return 'No memories found.';
 
-      // Check Vectorize in batches of 20 (API hard limit for getByIds)
+      // getByIds takes at most 20 ids. ~800 sequential calls took over 90 s at 15k memories, so
+      // run them 10 at a time.
       const CHUNK = 20;
+      const PARALLEL = 10;
+      const chunks: string[][] = [];
+      for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK).map(r => r.id));
       const orphanIds: string[] = [];
-      const orphanRows: typeof rows = [];
-
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        const chunk = rows.slice(i, i + CHUNK);
-        const ids = chunk.map(r => r.id);
-        const vecResult = await (env.VECTORIZE as any).getByIds(ids);
-        const foundIds = new Set((vecResult ?? []).map((v: any) => v.id));
-        for (const row of chunk) {
-          if (!foundIds.has(row.id)) {
-            orphanIds.push(row.id);
-            orphanRows.push(row);
-          }
-        }
+      for (let i = 0; i < chunks.length; i += PARALLEL) {
+        const results = await Promise.all(chunks.slice(i, i + PARALLEL).map(ids => (env.VECTORIZE as any).getByIds(ids)));
+        results.forEach((vecResult, j) => {
+          const foundIds = new Set((vecResult ?? []).map((v: any) => v.id));
+          for (const id of chunks[i + j]) if (!foundIds.has(id)) orphanIds.push(id);
+        });
       }
 
       if (!orphanIds.length) return `No orphans found. All ${rows.length} D1 rows have Vectorize vectors.`;
@@ -811,6 +804,15 @@ export async function handleToolCall(name: string, args: any, env: Env, ctx?: Ex
       }
 
       // Repair: re-embed orphans and upsert into Vectorize
+      type OrphanRow = { id: string; text: string; domain: string; memory_type: string; project: string };
+      const orphanRows: OrphanRow[] = [];
+      for (let i = 0; i < orphanIds.length; i += 90) {
+        const ids = orphanIds.slice(i, i + 90);
+        const got = await env.DB.prepare(
+          `SELECT id, text, domain, memory_type, project FROM memories WHERE id IN (${ids.map(() => '?').join(',')})`
+        ).bind(...ids).all<OrphanRow>();
+        orphanRows.push(...(got.results ?? []));
+      }
       let fixed = 0;
       const EMBED_BATCH = 20;
       for (let i = 0; i < orphanRows.length; i += EMBED_BATCH) {
@@ -1408,13 +1410,45 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
     }
 
     case 'memory_stats': {
-      const rows = await env.DB.prepare(
-        `SELECT sigma_diagonal, domain, memory_type, access_count, emotional_intensity, contradiction_flag
-         FROM memories`
-      ).all<{ sigma_diagonal: string; domain: string; memory_type: string; access_count: number; emotional_intensity: number; contradiction_flag: number }>();
+      // Paged by rowid and aggregated per page: sigma_diagonal is ~4 KB of base64 per row, so one
+      // unpaged SELECT passed D1's 50 MB result limit at ~15k memories, and holding every row
+      // would approach the isolate's memory limit instead.
+      const PAGE = 2000;
+      const byDomain: Record<string, number> = {};
+      const byType: Record<string, number> = {};
+      let sharp = 0, medium = 0, fuzzy = 0, prunable = 0;
+      let hot = 0, warm = 0, cold = 0;
+      let contradictions = 0;
+      let totalSigma = 0;
+      let total = 0;
+      for (let after = -1; ; ) {
+        const page = (await env.DB.prepare(
+          `SELECT rowid AS rid, sigma_diagonal, domain, memory_type, access_count, contradiction_flag
+           FROM memories WHERE rowid > ? ORDER BY rowid LIMIT ?`
+        ).bind(after, PAGE).all<{ rid: number; sigma_diagonal: string; domain: string; memory_type: string; access_count: number; contradiction_flag: number }>()).results ?? [];
+        for (const r of page) {
+          total++;
+          byDomain[r.domain] = (byDomain[r.domain] ?? 0) + 1;
+          byType[r.memory_type] = (byType[r.memory_type] ?? 0) + 1;
 
-      const all = rows.results ?? [];
-      const total = all.length;
+          // Corrupt/unparseable sigma_diagonal must not 500 the whole stats call.
+          let s: number;
+          try { s = meanSigma(deserializeSigma(r.sigma_diagonal)); } catch { s = 1; }
+          totalSigma += s;
+          if (s < 0.3) sharp++;
+          else if (s < 0.8) medium++;
+          else if (s < 1.8) fuzzy++;
+          else prunable++;
+
+          if (r.access_count > 50) hot++;
+          else if (r.access_count > 0) warm++;
+          else cold++;
+
+          if (r.contradiction_flag) contradictions++;
+        }
+        if (page.length < PAGE) break;
+        after = page[page.length - 1].rid;
+      }
 
       // Anchor stats from D1
       let anchorLine = 'Anchors: 0 domains discovered';
@@ -1424,34 +1458,8 @@ Return ONLY valid JSON: {"verdict":"supersedes|conflicts_with|extends|compatible
         if (anchorNames.length) anchorLine = `Anchors: ${anchorNames.length} domains discovered — ${anchorNames.join(', ')}`;
       } catch {}
 
-      if (total === 0) return `No memories stored.\n${anchorLine}`;
-
-      const byDomain: Record<string, number> = {};
-      const byType: Record<string, number> = {};
-      let sharp = 0, medium = 0, fuzzy = 0, prunable = 0;
-      let hot = 0, warm = 0, cold = 0;
-      let contradictions = 0;
-      let totalSigma = 0;
-
-      for (const r of all) {
-        byDomain[r.domain] = (byDomain[r.domain] ?? 0) + 1;
-        byType[r.memory_type] = (byType[r.memory_type] ?? 0) + 1;
-
-        // Corrupt/unparseable sigma_diagonal must not 500 the whole stats call.
-        let s: number;
-        try { s = meanSigma(deserializeSigma(r.sigma_diagonal)); } catch { s = 1; }
-        totalSigma += s;
-        if (s < 0.3) sharp++;
-        else if (s < 0.8) medium++;
-        else if (s < 1.8) fuzzy++;
-        else prunable++;
-
-        if (r.access_count > 50) hot++;
-        else if (r.access_count > 0) warm++;
-        else cold++;
-
-        if (r.contradiction_flag) contradictions++;
-      }
+      if (total === 0) return `No memories stored.
+${anchorLine}`;
 
       const avgSigma = (totalSigma / total).toFixed(4);
       const domainLines = Object.entries(byDomain).sort((a, b) => b[1] - a[1])
